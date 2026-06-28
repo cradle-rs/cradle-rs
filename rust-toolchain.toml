@@ -1,0 +1,7 @@
+# cradle-rs builds the eBPF data plane with aya, which needs a nightly
+# toolchain (for `-Z build-std=core` against the `bpfel-unknown-none` target).
+# We pin the whole workspace to nightly for simplicity; the user-space crates
+# can be split back onto stable later if desired.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustfmt", "clippy"]

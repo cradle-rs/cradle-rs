@@ -1,0 +1,16 @@
+[package]
+name = "cradle-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "cradle-rs eBPF data plane (L2/L3/L4) — compiled to bpfel-unknown-none"
+
+[[bin]]
+name = "cradle-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = { workspace = true }
+cradle-common = { workspace = true }
+network-types = { workspace = true }
