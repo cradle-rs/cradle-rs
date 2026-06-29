@@ -8,7 +8,7 @@
 //! The `FDB` map is intentionally *not* taken here: it is populated by the eBPF
 //! data plane via MAC learning, not by user space.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context as _, Result};
 use aya::{
@@ -20,13 +20,14 @@ use aya::{
 };
 use cradle_common::{
     Backend, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, PortConfig,
-    ServiceInfo, ServiceKey, LB_ALGO_RANDOM, NEIGH_STATE_REACHABLE,
+    ServiceInfo, ServiceKey, LB_ALGO_RANDOM, NEIGH_STATE_REACHABLE, NH_F_V6,
 };
 
 use crate::util;
 
 pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
+    fib6: LpmTrie<MapData, [u8; 16], FibEntry>,
     nexthops: HashMap<MapData, u32, NextHop>,
     neigh4: HashMap<MapData, Neigh4Key, NeighEntry>,
     ports: HashMap<MapData, u32, PortConfig>,
@@ -44,6 +45,7 @@ impl Dataplane {
     pub fn from_ebpf(bpf: &mut Ebpf) -> Result<Self> {
         Ok(Self {
             fib4: LpmTrie::try_from(bpf.take_map("FIB4").context("map FIB4 missing")?)?,
+            fib6: LpmTrie::try_from(bpf.take_map("FIB6").context("map FIB6 missing")?)?,
             nexthops: HashMap::try_from(bpf.take_map("NEXTHOPS").context("map NEXTHOPS missing")?)?,
             neigh4: HashMap::try_from(bpf.take_map("NEIGH4").context("map NEIGH4 missing")?)?,
             ports: HashMap::try_from(bpf.take_map("PORTS").context("map PORTS missing")?)?,
@@ -156,6 +158,38 @@ impl Dataplane {
     pub fn route4_del(&mut self, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
         let key = Key::new(prefix_len as u32, addr.octets());
         self.fib4.remove(&key)?;
+        Ok(())
+    }
+
+    /// Install/replace an IPv6 nexthop. `gateway == None` means on-link.
+    pub fn nexthop_set_v6(&mut self, id: u32, gateway: Option<Ipv6Addr>, oif: u32) -> Result<()> {
+        let nh = NextHop {
+            gateway_v4: 0,
+            gateway_v6: gateway.map(|a| a.octets()).unwrap_or([0; 16]),
+            oif,
+            flags: NH_F_V6,
+        };
+        self.nexthops.insert(id, nh, 0)?;
+        Ok(())
+    }
+
+    /// Install an IPv6 route `addr/prefix_len` pointing at `nexthop_id`.
+    pub fn route6_add(
+        &mut self,
+        addr: Ipv6Addr,
+        prefix_len: u8,
+        nexthop_id: u32,
+        flags: u32,
+    ) -> Result<()> {
+        let key = Key::new(prefix_len as u32, addr.octets());
+        self.fib6.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+        Ok(())
+    }
+
+    /// Remove an IPv6 route.
+    pub fn route6_del(&mut self, addr: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        let key = Key::new(prefix_len as u32, addr.octets());
+        self.fib6.remove(&key)?;
         Ok(())
     }
 

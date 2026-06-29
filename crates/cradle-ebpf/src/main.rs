@@ -42,6 +42,8 @@ static PORTS: HashMap<u32, PortConfig> = HashMap::with_max_entries(256, 0);
 #[map]
 static FIB4: LpmTrie<[u8; 4], FibEntry> = LpmTrie::with_max_entries(4096, 0);
 #[map]
+static FIB6: LpmTrie<[u8; 16], FibEntry> = LpmTrie::with_max_entries(4096, 0);
+#[map]
 static NEXTHOPS: HashMap<u32, NextHop> = HashMap::with_max_entries(4096, 0);
 #[map]
 static NEIGH4: HashMap<Neigh4Key, NeighEntry> = HashMap::with_max_entries(4096, 0);
@@ -82,6 +84,10 @@ const L4_OFF: usize = EthHdr::LEN + 20;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const AF_INET: u32 = 2;
+const AF_INET6: u32 = 10;
+const ETH_P_IPV6: u16 = 0x86dd;
+const IP6_HOP_OFF: usize = EthHdr::LEN + 7;
+const IP6_DST_OFF: usize = EthHdr::LEN + 24;
 const BPF_F_PSEUDO_HDR: u64 = 16;
 const BPF_F_MARK_MANGLED_0: u64 = 32;
 
@@ -336,10 +342,15 @@ fn snat(
 #[inline(always)]
 fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
-    if u16::from_be(ethertype) != ETH_P_IP {
-        return Ok(TC_ACT_PIPE as i32); // ARP, IPv6, ... -> stack
+    match u16::from_be(ethertype) {
+        ETH_P_IP => l3_forward_v4(ctx),
+        ETH_P_IPV6 => l3_forward_v6(ctx),
+        _ => Ok(TC_ACT_PIPE as i32), // ARP, ... -> stack
     }
+}
 
+#[inline(always)]
+fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
     let fib = match FIB4.get(Key::new(32, dst)) {
         Some(fib) => *fib,
@@ -387,6 +398,55 @@ fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
         nh_family: AF_INET,
         __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
             ipv4_nh: u32::from_ne_bytes(nh_octets),
+        },
+    };
+    let ret = unsafe {
+        bpf_redirect_neigh(
+            oif,
+            &mut params,
+            core::mem::size_of::<bpf_redir_neigh>() as i32,
+            0,
+        )
+    };
+    Ok(ret as i32)
+}
+
+#[inline(always)]
+fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
+    let dst: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
+    let fib = match FIB6.get(Key::new(128, dst)) {
+        Some(fib) => *fib,
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    if fib.flags & FIB_F_BLACKHOLE != 0 {
+        return Ok(TC_ACT_SHOT as i32);
+    }
+    if fib.flags & FIB_F_LOCAL != 0 {
+        return Ok(TC_ACT_PIPE as i32); // destined to us
+    }
+
+    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&fib.nexthop_id).ok_or(())? };
+    let oif = nh.oif;
+
+    // Decrement the hop limit (IPv6 has no header checksum to patch).
+    let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
+    if hop <= 1 {
+        return Ok(TC_ACT_PIPE as i32);
+    }
+    let new_hop = hop - 1;
+    ctx.store(IP6_HOP_OFF, &new_hop, 0).map_err(|_| ())?;
+
+    // Next hop = gateway for via-routes, destination for connected ones; the
+    // kernel resolves the neighbor (NDP) and rewrites the ethernet header.
+    let nh6: [u8; 16] = if nh.gateway_v6 != [0u8; 16] {
+        nh.gateway_v6
+    } else {
+        dst
+    };
+    let mut params = bpf_redir_neigh {
+        nh_family: AF_INET6,
+        __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
+            ipv6_nh: unsafe { core::mem::transmute::<[u8; 16], [u32; 4]>(nh6) },
         },
     };
     let ret = unsafe {
