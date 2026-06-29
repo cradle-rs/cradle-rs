@@ -749,6 +749,322 @@ async fn stop_cradle(world: &mut World, namespace: String) {
     println!("✓ cradle stopped in namespace {}", world.ns(&namespace));
 }
 
+// ----------------- cradle gRPC + zebra-rs integration steps ---------------
+
+fn config_in(world: &World, file: &str) -> String {
+    format!(
+        "{}/tests/configs/{}/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        world.feature_tag,
+        file
+    )
+}
+
+/// Per-feature unix socket path for the cradle gRPC control API.
+fn grpc_sock(world: &World, name: &str) -> String {
+    format!("unix:/tmp/{}_{}.sock", world.feature_tag, name)
+}
+
+fn zebra_bin() -> String {
+    std::env::var("ZEBRA").unwrap_or_else(|_| "/home/kunihiro/zebra-rs/target/debug/zebra-rs".into())
+}
+
+fn zebra_yang() -> String {
+    std::env::var("ZEBRA_YANG").unwrap_or_else(|_| "/home/kunihiro/zebra-rs/zebra-rs/yang".into())
+}
+
+async fn await_cradle(scoped: &str, pid_file: &str) {
+    for _ in 0..30 {
+        if netns::pidfile_alive(Path::new(pid_file)).await {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    assert!(
+        netns::pidfile_alive(Path::new(pid_file)).await,
+        "cradle did not start in namespace {} (no live pid file {})",
+        scoped,
+        pid_file
+    );
+}
+
+#[when(expr = "I start cradle in namespace {string} with config {string} serving gRPC as {string}")]
+async fn start_cradle_grpc_cfg(world: &mut World, namespace: String, config: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let pid = world.pid_file(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info")],
+        &cradle_bin(),
+        &["serve", "--config", &cfg, "--grpc", &ep, "--pid-file", &pid],
+    )
+    .await
+    .expect("Failed to start cradle");
+    await_cradle(&scoped, &pid).await;
+    println!("✓ cradle started in {} serving gRPC at {}", scoped, ep);
+}
+
+#[when(expr = "I start cradle in namespace {string} serving gRPC as {string}")]
+async fn start_cradle_grpc(world: &mut World, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let pid = world.pid_file(&namespace);
+    let ep = grpc_sock(world, &sock);
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info")],
+        &cradle_bin(),
+        &["serve", "--grpc", &ep, "--pid-file", &pid],
+    )
+    .await
+    .expect("Failed to start cradle");
+    await_cradle(&scoped, &pid).await;
+    println!("✓ cradle started in {} serving gRPC at {}", scoped, ep);
+}
+
+#[when(expr = "I apply cradle config {string} to namespace {string} via gRPC as {string}")]
+async fn apply_cradle_grpc(world: &mut World, config: String, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    netns::exec_in_netns(&scoped, &cradle_bin(), &["ctl", "--grpc", &ep, "apply", &cfg])
+        .await
+        .expect("Failed to apply cradle config via gRPC");
+    println!("✓ applied {} to {} via gRPC {}", config, scoped, ep);
+}
+
+/// Start a plain zebra-rs (no cradle tee) from a `--config-file`. Used for peer
+/// routers that only originate/advertise.
+#[when(expr = "I start zebra-rs in namespace {string} with config {string}")]
+async fn start_zebra_cfg(world: &mut World, namespace: String, config: String) {
+    let scoped = world.ns(&namespace);
+    let pid = world.pid_file(&namespace);
+    let log = format!("logs/{}.zebra.log", scoped);
+    let cfg = config_in(world, &config);
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "warn")],
+        &zebra_bin(),
+        &[
+            "--yang-path",
+            &zebra_yang(),
+            "--config-file",
+            &cfg,
+            "--log-output=file",
+            &format!("--log-file={}", log),
+            "--pid-file",
+            &pid,
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    println!("✓ zebra-rs started in {} with config {}", scoped, config);
+}
+
+/// Start zebra-rs teeing its FIB installs to a cradle gRPC endpoint. Uses a
+/// distinct pid file so it can coexist with cradle in the same namespace.
+#[when(expr = "I start zebra-rs in namespace {string} with config {string} teeing to cradle as {string}")]
+async fn start_zebra_tee(world: &mut World, namespace: String, config: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let pid = format!("/tmp/{}_zebra.pid", scoped);
+    let log = format!("logs/{}.zebra.log", scoped);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "warn"), ("CRADLE_GRPC", &ep)],
+        &zebra_bin(),
+        &[
+            "--yang-path",
+            &zebra_yang(),
+            "--config-file",
+            &cfg,
+            "--log-output=file",
+            &format!("--log-file={}", log),
+            "--pid-file",
+            &pid,
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs (tee)");
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+    println!("✓ zebra-rs started in {} teeing to cradle {}", scoped, ep);
+}
+
+#[when(expr = "I stop the zebra-rs tee in namespace {string}")]
+async fn stop_zebra_tee(world: &mut World, namespace: String) {
+    if keep_topology() {
+        return;
+    }
+    let pid = format!("/tmp/{}_zebra.pid", world.ns(&namespace));
+    let _ = netns::kill_pidfile(Path::new(&pid)).await;
+    println!("✓ zebra-rs tee stopped in namespace {}", world.ns(&namespace));
+}
+
+// ------------------------------ HTTP service ------------------------------
+
+/// Serve a fixed HTTP body from a namespace (a backend behind an L4 VIP).
+#[when(expr = "I serve HTTP {string} in namespace {string} bound to {string}")]
+async fn serve_http(world: &mut World, body: String, namespace: String, bind: String) {
+    let scoped = world.ns(&namespace);
+    let dir = format!("/tmp/{}_www", scoped);
+    let pid = format!("/tmp/{}_http.pid", scoped);
+    std::fs::create_dir_all(&dir).expect("create www dir");
+    std::fs::write(format!("{}/index.html", dir), format!("{body}\n")).expect("write index.html");
+    let script = format!("echo $$ > {pid}; cd {dir}; exec python3 -m http.server 8080 --bind {bind}");
+    netns::spawn_in_netns(&scoped, "sh", &["-c", &script])
+        .await
+        .expect("Failed to start HTTP server");
+    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+    println!("✓ HTTP {:?} serving in namespace {} on {}", body, scoped, bind);
+}
+
+#[when(expr = "I stop HTTP in namespace {string}")]
+async fn stop_http(world: &mut World, namespace: String) {
+    if keep_topology() {
+        return;
+    }
+    let pid = format!("/tmp/{}_http.pid", world.ns(&namespace));
+    let _ = netns::kill_pidfile(Path::new(&pid)).await;
+}
+
+#[then(expr = "HTTP GET {string} from namespace {string} should eventually succeed")]
+async fn http_get_eventually(world: &mut World, url: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    for _ in 0..30 {
+        if let Ok(s) =
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await
+            && !s.trim().is_empty()
+        {
+            println!("✓ HTTP GET {} from {} succeeded", url, scoped);
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!("HTTP GET {} from {} did not succeed", url, scoped);
+}
+
+#[then(
+    expr = "HTTP GET {string} from namespace {string} returns at least {int} distinct responses over {int} requests"
+)]
+async fn http_get_distinct(
+    world: &mut World,
+    url: String,
+    namespace: String,
+    min_distinct: u64,
+    tries: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ok = 0u64;
+    for _ in 0..tries {
+        if let Ok(s) =
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await
+        {
+            let body = s.trim().to_string();
+            if !body.is_empty() {
+                ok += 1;
+                seen.insert(body);
+            }
+        }
+    }
+    assert!(
+        ok * 10 >= tries * 8,
+        "too few HTTP responses from {}: {}/{}",
+        scoped,
+        ok,
+        tries
+    );
+    assert!(
+        seen.len() as u64 >= min_distinct,
+        "expected >= {} distinct backends, got {} ({:?})",
+        min_distinct,
+        seen.len(),
+        seen
+    );
+    println!(
+        "✓ {} responses, {} distinct backends: {:?}",
+        ok,
+        seen.len(),
+        seen
+    );
+}
+
+// ------------------------------ ECMP balance ------------------------------
+
+/// TX packet counter for an interface inside a namespace.
+async fn iface_tx(ns: &str, iface: &str) -> u64 {
+    let out = netns::exec_in_netns(ns, "ip", &["-s", "link", "show", iface])
+        .await
+        .unwrap_or_default();
+    let lines: Vec<&str> = out.lines().collect();
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim_start().starts_with("TX:")
+            && let Some(next) = lines.get(i + 1)
+            && let Some(p) = next.split_whitespace().nth(1)
+        {
+            return p.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+#[when(expr = "I disable reverse path filtering in namespace {string}")]
+async fn disable_rpf(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "sysctl", &["-wq", "net.ipv4.conf.all.rp_filter=0"])
+        .await
+        .expect("Failed to disable rp_filter");
+    println!("✓ disabled rp_filter in namespace {}", scoped);
+}
+
+/// Ping `target` from each comma-separated source address (in `ping_ns`) and
+/// assert every listed egress interface in `check_ns` carried traffic — i.e.
+/// ECMP spread the flows across the members.
+#[then(
+    expr = "namespace {string} balances pings to {string} from sources {string} across interfaces {string} in namespace {string}"
+)]
+async fn ecmp_balance(
+    world: &mut World,
+    ping_ns: String,
+    target: String,
+    sources: String,
+    ifaces: String,
+    check_ns: String,
+) {
+    let pinger = world.ns(&ping_ns);
+    let checker = world.ns(&check_ns);
+    let fam = if target.contains(':') { "-6" } else { "-4" };
+    let if_list: Vec<String> = ifaces.split(',').map(|s| s.trim().to_string()).collect();
+    let mut before = Vec::new();
+    for i in &if_list {
+        before.push(iface_tx(&checker, i).await);
+    }
+    for src in sources.split(',').map(|s| s.trim()) {
+        let _ = netns::exec_in_netns(
+            &pinger,
+            "ping",
+            &[fam, "-c", "1", "-W", "2", "-I", src, &target],
+        )
+        .await;
+    }
+    for (idx, iface) in if_list.iter().enumerate() {
+        let after = iface_tx(&checker, iface).await;
+        assert!(
+            after > before[idx],
+            "interface {} in {} carried no ECMP traffic (tx {} -> {})",
+            iface,
+            checker,
+            before[idx],
+            after
+        );
+        println!("✓ {} carried ECMP traffic (tx {} -> {})", iface, before[idx], after);
+    }
+}
+
 #[then(expr = "the zebra-rs log in namespace {string} should contain {string}")]
 async fn log_should_contain(world: &mut World, namespace: String, needle: String) {
     let scoped = world.ns(&namespace);
