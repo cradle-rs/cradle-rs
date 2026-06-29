@@ -873,9 +873,12 @@ async fn start_zebra_tee(world: &mut World, namespace: String, config: String, s
     let log = format!("logs/{}.zebra.log", scoped);
     let cfg = config_in(world, &config);
     let ep = grpc_sock(world, &sock);
+    // The tee endpoint comes from the `system cradle-grpc` config leaf in the
+    // YAML (cfg), not the CRADLE_GRPC env — so this exercises the config-leaf
+    // path. `ep` is the endpoint the YAML must point at (asserted by reaching it).
     netns::spawn_in_netns_env(
         &scoped,
-        &[("RUST_LOG", "warn"), ("CRADLE_GRPC", &ep)],
+        &[("RUST_LOG", "info")],
         &zebra_bin(),
         &[
             "--yang-path",

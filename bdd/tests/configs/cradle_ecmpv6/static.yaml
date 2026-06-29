@@ -1,3 +1,5 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_ecmpv6_ctl.sock"
 router:
   static:
     ipv6:

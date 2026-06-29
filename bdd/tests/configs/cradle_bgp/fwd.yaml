@@ -1,3 +1,5 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_bgp_ctl.sock"
 router:
   bgp:
     global:
