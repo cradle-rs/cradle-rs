@@ -1,27 +1,37 @@
 //! cradle — user-space control plane for the cradle-rs eBPF data plane.
 //!
-//! Phase 0 responsibilities: load the eBPF object and, if an interface is
-//! given, attach the datapath classifier to its `clsact` ingress hook. Later
-//! phases add map programming and the route-injection API that wires the
-//! data plane to the zebra-rs routing control plane.
+//! Phase 1: load the L3 datapath, attach it to the configured L3 ports'
+//! `clsact` ingress hooks, and program the FIB / nexthop / neighbor / port maps
+//! from a static JSON config. Later phases replace the static config with a
+//! gRPC/unix-socket route-injection API and the zebra-rs control plane.
 
-use anyhow::Context as _;
+mod config;
+mod dataplane;
+mod util;
+
+use std::path::PathBuf;
+
+use anyhow::{Context as _, Result};
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use clap::Parser;
 use tracing::{info, warn};
 
-/// cradle-rs eBPF L2/L3/L4 data plane.
+use crate::{config::Config, dataplane::Dataplane};
+
 #[derive(Debug, Parser)]
-#[command(name = "cradle", version)]
+#[command(name = "cradle", version, about = "cradle-rs eBPF L2/L3/L4 data plane")]
 struct Cli {
-    /// Interface to attach the datapath to (clsact ingress). If omitted, the
-    /// object is loaded but not attached.
+    /// JSON config: ports, nexthops, routes, neighbors.
     #[arg(short, long)]
-    iface: Option<String>,
+    config: Option<PathBuf>,
+    /// Extra interface(s) to attach to (clsact ingress), in addition to the
+    /// config's L3 ports. Repeatable.
+    #[arg(short, long)]
+    iface: Vec<String>,
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -30,32 +40,52 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let cfg = match &cli.config {
+        Some(p) => Some(Config::load(p)?),
+        None => None,
+    };
 
-    // The eBPF object is compiled by build.rs and embedded here.
     let mut bpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/cradle-ebpf"
     )))
     .context("failed to load embedded eBPF object")?;
 
-    match cli.iface.as_deref() {
-        Some(iface) => {
-            // clsact qdisc is idempotent-ish; ignore "already exists".
-            if let Err(e) = tc::qdisc_add_clsact(iface) {
-                warn!("qdisc_add_clsact({iface}): {e} (continuing; may already exist)");
-            }
-            let prog: &mut SchedClassifier = bpf
-                .program_mut("cradle_tc")
-                .context("program `cradle_tc` not found in object")?
-                .try_into()?;
-            prog.load().context("failed to load cradle_tc into kernel")?;
-            prog.attach(iface, TcAttachType::Ingress)
-                .with_context(|| format!("failed to attach cradle_tc to {iface}"))?;
-            info!("cradle datapath attached to {iface} (clsact ingress)");
+    // Load the classifier once.
+    {
+        let prog: &mut SchedClassifier = bpf
+            .program_mut("cradle_tc")
+            .context("program `cradle_tc` not found")?
+            .try_into()?;
+        prog.load().context("loading cradle_tc")?;
+    }
+
+    // Attach to every L3 port from the config, plus any explicit --iface.
+    let mut attach: Vec<String> = Vec::new();
+    if let Some(cfg) = &cfg {
+        attach.extend(cfg.l3_ports().map(str::to_owned));
+    }
+    attach.extend(cli.iface.iter().cloned());
+    if attach.is_empty() {
+        warn!("no interfaces to attach to (no --iface and no L3 ports in config)");
+    }
+    for name in &attach {
+        if let Err(e) = tc::qdisc_add_clsact(name) {
+            warn!("qdisc_add_clsact({name}): {e} (continuing; may already exist)");
         }
-        None => {
-            info!("eBPF object loaded; no --iface given, so nothing attached");
-        }
+        let prog: &mut SchedClassifier = bpf
+            .program_mut("cradle_tc")
+            .context("program `cradle_tc` not found")?
+            .try_into()?;
+        prog.attach(name, TcAttachType::Ingress)
+            .with_context(|| format!("attaching to {name}"))?;
+        info!("attached cradle datapath to {name} (clsact ingress)");
+    }
+
+    // Program the maps (after attach, so relocations are resolved).
+    let mut dp = Dataplane::from_ebpf(&mut bpf)?;
+    if let Some(cfg) = &cfg {
+        cfg.apply(&mut dp)?;
     }
 
     info!("cradle running — press Ctrl-C to exit");

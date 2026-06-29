@@ -12,6 +12,10 @@
 //! * `#[repr(C)]` and `Copy`.
 //! * No implicit padding — pad explicitly so hash-map key comparison (which is
 //!   byte-wise in the kernel) is deterministic.
+//! * IPv4 addresses are carried as a `u32` built with `u32::from_be_bytes(octets)`
+//!   (i.e. network-byte-order octets). Both the eBPF data plane and user space
+//!   are little-endian here, so this representation is identical on both sides;
+//!   IPv4 LPM keys instead use `[u8; 4]` octets directly to avoid any ambiguity.
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -98,11 +102,13 @@ pub const FDB_F_LOCAL: u32 = 1 << 0;
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PortConfig {
-    /// `PORT_F_*` flags.
-    pub flags: u32,
+    /// This interface's MAC — used as the source MAC when the L3 stage forwards
+    /// a packet *out* of this port.
+    pub mac: [u8; 6],
     /// Access/PVID VLAN for L2 ports.
     pub vlan: u16,
-    pub _pad: u16,
+    /// `PORT_F_*` flags.
+    pub flags: u32,
 }
 
 /// Participate in L2 switching.
