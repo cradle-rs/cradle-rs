@@ -19,8 +19,8 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, PortConfig,
-    ServiceInfo, ServiceKey, LB_ALGO_RANDOM, NEIGH_STATE_REACHABLE, NH_F_V6,
+    Backend, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, NhGroupKey,
+    PortConfig, ServiceInfo, ServiceKey, LB_ALGO_RANDOM, NEIGH_STATE_REACHABLE, NH_F_V6,
 };
 
 use crate::util;
@@ -29,6 +29,8 @@ pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
     fib6: LpmTrie<MapData, [u8; 16], FibEntry>,
     nexthops: HashMap<MapData, u32, NextHop>,
+    nhgroup: HashMap<MapData, u32, u32>,
+    nhgroup_member: HashMap<MapData, NhGroupKey, u32>,
     neigh4: HashMap<MapData, Neigh4Key, NeighEntry>,
     ports: HashMap<MapData, u32, PortConfig>,
     l2_members: HashMap<MapData, L2MemberKey, u32>,
@@ -47,6 +49,10 @@ impl Dataplane {
             fib4: LpmTrie::try_from(bpf.take_map("FIB4").context("map FIB4 missing")?)?,
             fib6: LpmTrie::try_from(bpf.take_map("FIB6").context("map FIB6 missing")?)?,
             nexthops: HashMap::try_from(bpf.take_map("NEXTHOPS").context("map NEXTHOPS missing")?)?,
+            nhgroup: HashMap::try_from(bpf.take_map("NHGROUP").context("map NHGROUP missing")?)?,
+            nhgroup_member: HashMap::try_from(
+                bpf.take_map("NHGROUP_MEMBER").context("map NHGROUP_MEMBER missing")?,
+            )?,
             neigh4: HashMap::try_from(bpf.take_map("NEIGH4").context("map NEIGH4 missing")?)?,
             ports: HashMap::try_from(bpf.take_map("PORTS").context("map PORTS missing")?)?,
             l2_members: HashMap::try_from(
@@ -138,6 +144,24 @@ impl Dataplane {
             flags: 0,
         };
         self.nexthops.insert(id, nh, 0)?;
+        Ok(())
+    }
+
+    /// Define a nexthop group (for ECMP): `group_id` -> ordered member nexthop
+    /// ids. A route flagged `FIB_F_ECMP` whose `nexthop_id` is `group_id` then
+    /// hashes each flow onto one member.
+    pub fn nexthop_group_set(&mut self, group_id: u32, members: &[u32]) -> Result<()> {
+        self.nhgroup.insert(group_id, members.len() as u32, 0)?;
+        for (slot, &nh_id) in members.iter().enumerate() {
+            self.nhgroup_member.insert(
+                NhGroupKey {
+                    group_id,
+                    slot: slot as u32,
+                },
+                nh_id,
+                0,
+            )?;
+        }
         Ok(())
     }
 

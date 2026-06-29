@@ -29,8 +29,8 @@ use aya_ebpf::{
 };
 use cradle_common::{
     Backend, BackendKey, CtEntry, CtKey, FdbEntry, FdbKey, FibEntry, L2MemberKey, Neigh4Key,
-    NeighEntry, NextHop, PortConfig, ServiceInfo, ServiceKey, CT_F_DNAT, CT_F_SNAT, FIB_F_BLACKHOLE,
-    FIB_F_LOCAL, PORT_F_L2, PORT_F_L3,
+    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, CT_F_DNAT, CT_F_SNAT,
+    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, PORT_F_L2, PORT_F_L3,
 };
 use network_types::eth::EthHdr;
 
@@ -45,6 +45,11 @@ static FIB4: LpmTrie<[u8; 4], FibEntry> = LpmTrie::with_max_entries(4096, 0);
 static FIB6: LpmTrie<[u8; 16], FibEntry> = LpmTrie::with_max_entries(4096, 0);
 #[map]
 static NEXTHOPS: HashMap<u32, NextHop> = HashMap::with_max_entries(4096, 0);
+// Nexthop groups for ECMP: group_id -> member count, and (group_id, slot) -> nexthop id.
+#[map]
+static NHGROUP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+#[map]
+static NHGROUP_MEMBER: HashMap<NhGroupKey, u32> = HashMap::with_max_entries(8192, 0);
 #[map]
 static NEIGH4: HashMap<Neigh4Key, NeighEntry> = HashMap::with_max_entries(4096, 0);
 
@@ -349,6 +354,31 @@ fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
     }
 }
 
+/// Resolve a nexthop-group member by hashing the flow onto `0..count`.
+#[inline(always)]
+fn ecmp_member(group_id: u32, hash: u32) -> Option<u32> {
+    let count = unsafe { *NHGROUP.get_ptr(&group_id)? };
+    if count == 0 {
+        return None;
+    }
+    let slot = hash % count;
+    Some(unsafe { *NHGROUP_MEMBER.get_ptr(&NhGroupKey { group_id, slot })? })
+}
+
+/// Per-flow hash for ECMP member selection (consistent within a flow/direction).
+#[inline(always)]
+fn flow_hash_v4(ctx: &TcContext, src: u32, dst: u32) -> u32 {
+    let proto: u8 = ctx.load(IP_PROTO_OFF).unwrap_or(0);
+    let mut h = src ^ dst.rotate_left(16) ^ (proto as u32);
+    if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+        if let Ok(ports) = ctx.load::<u32>(L4_OFF) {
+            h ^= ports;
+        }
+    }
+    h = h.wrapping_mul(2654435761);
+    h ^ (h >> 16)
+}
+
 #[inline(always)]
 fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
@@ -364,7 +394,19 @@ fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE as i32); // destined to us
     }
 
-    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&fib.nexthop_id).ok_or(())? };
+    // ECMP: hash the flow to a group member; otherwise a single nexthop.
+    let nh_id = if fib.flags & FIB_F_ECMP != 0 {
+        let src: [u8; 4] = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
+        let hash = flow_hash_v4(ctx, u32::from_ne_bytes(src), u32::from_ne_bytes(dst));
+        match ecmp_member(fib.nexthop_id, hash) {
+            Some(id) => id,
+            None => return Ok(TC_ACT_PIPE as i32),
+        }
+    } else {
+        fib.nexthop_id
+    };
+
+    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
     let oif = nh.oif;
 
     // Decrement TTL and patch the IPv4 header checksum (RFC 1624 incremental).

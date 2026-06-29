@@ -30,6 +30,14 @@ message Nexthop {
   bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
 }
 
+// A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
+// include FIB_F_ECMP and whose nexthop_id is this group's id load-balances over
+// the members.
+message NexthopGroup {
+  uint32 id = 1;
+  repeated uint32 members = 2;
+}
+
 message Route4 {
   string prefix = 1;   // "a.b.c.d/len"
   uint32 nexthop_id = 2;
@@ -73,6 +81,7 @@ service Cradle {
   rpc SetPort(Port) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
   rpc SetNexthop(Nexthop) returns (Empty);
+  rpc SetNexthopGroup(NexthopGroup) returns (Empty);
   rpc AddRoute4(Route4) returns (Empty);
   rpc DelRoute4(Route4Del) returns (Empty);
   rpc AddRoute6(Route6) returns (Empty);

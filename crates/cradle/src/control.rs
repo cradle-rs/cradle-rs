@@ -140,6 +140,11 @@ impl Control {
         Ok(())
     }
 
+    pub async fn set_nexthop_group(&self, group_id: u32, members: &[u32]) -> Result<()> {
+        self.dp.lock().await.nexthop_group_set(group_id, members)?;
+        Ok(())
+    }
+
     pub async fn add_route6(
         &self,
         addr: Ipv6Addr,
@@ -257,6 +262,18 @@ impl Cradle for GrpcService {
                 self.control.set_nexthop(n.id, gw, &n.oif).await.map_err(st)?;
             }
         }
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_nexthop_group(
+        &self,
+        req: Request<pb::NexthopGroup>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let g = req.into_inner();
+        self.control
+            .set_nexthop_group(g.id, &g.members)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

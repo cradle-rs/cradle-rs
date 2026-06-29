@@ -40,6 +40,19 @@ pub const FIB_F_LOCAL: u32 = 1 << 1;
 /// On-link / connected route — resolve the neighbor by the packet's
 /// destination address rather than a gateway.
 pub const FIB_F_CONNECTED: u32 = 1 << 2;
+/// Multipath: `FibEntry.nexthop_id` is a *group* id (into the nexthop-group
+/// maps), not a single nexthop. The data plane hashes the flow to pick a member.
+pub const FIB_F_ECMP: u32 = 1 << 3;
+
+/// Member of a nexthop group, keyed by `(group_id, slot)` with a dense slot
+/// index `0..count`. The value is a nexthop id (into the per-nexthop map).
+/// The member count per group lives in a separate `group_id -> count` map.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct NhGroupKey {
+    pub group_id: u32,
+    pub slot: u32,
+}
 
 /// A single nexthop. Keyed by `nexthop_id`. (Nexthop *groups* / multipath are
 /// modelled in a later phase as a group table over these ids.)
@@ -214,7 +227,7 @@ mod user {
     }
 
     pod!(
-        FibEntry, NextHop, Neigh4Key, NeighEntry,
+        FibEntry, NextHop, Neigh4Key, NeighEntry, NhGroupKey,
         FdbKey, FdbEntry, PortConfig, L2MemberKey,
         ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
     );
