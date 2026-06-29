@@ -86,6 +86,30 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            for s in &cfg.l7_services {
+                let routes = s
+                    .routes
+                    .iter()
+                    .map(|r| {
+                        let sa: std::net::SocketAddr = r
+                            .backend
+                            .parse()
+                            .with_context(|| format!("bad L7 backend {:?}", r.backend))?;
+                        Ok(pb::L7Route {
+                            path_prefix: r.prefix.clone(),
+                            backend_ip: sa.ip().to_string(),
+                            backend_port: sa.port() as u32,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                client
+                    .add_l7_service(pb::L7Service {
+                        vip: s.vip.clone(),
+                        port: s.port as u32,
+                        routes,
+                    })
+                    .await?;
+            }
             println!("applied {} to {uri} via gRPC", config.display());
         }
         CtlOp::Stats => {

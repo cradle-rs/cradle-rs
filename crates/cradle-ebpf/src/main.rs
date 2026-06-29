@@ -19,9 +19,14 @@
 //! `u16`. `bpf_l3/l4_csum_replace` consume `from`/`to` in this same order.
 
 use aya_ebpf::{
-    bindings::{bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, TC_ACT_PIPE, TC_ACT_SHOT},
+    bindings::{
+        bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, bpf_sock_tuple,
+        bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1, TC_ACT_OK,
+        TC_ACT_PIPE, TC_ACT_SHOT,
+    },
     helpers::generated::{
-        bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh,
+        bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
+        bpf_sk_release, bpf_skc_lookup_tcp,
     },
     macros::{classifier, map},
     maps::{lpm_trie::Key, HashMap, LpmTrie, LruHashMap, PerCpuArray},
@@ -30,9 +35,9 @@ use aya_ebpf::{
 use cradle_common::{
     Backend, Backend6, BackendKey, CtEntry, CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry,
     L2MemberKey, Neigh4Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
-    ServiceKey6, CT_F_DNAT, CT_F_SNAT, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, PORT_F_L2,
-    PORT_F_L3, STAT_DROP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_MAX,
+    ServiceKey6, CT_F_DNAT, CT_F_SNAT, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
+    PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD,
+    STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX,
 };
 use network_types::eth::EthHdr;
 
@@ -82,6 +87,10 @@ static CT6: LruHashMap<CtKey6, CtEntry6> = LruHashMap::with_max_entries(65536, 0
 #[map]
 static STATS: PerCpuArray<u64> = PerCpuArray::with_max_entries(STAT_MAX, 0);
 
+// --- L7: VIP:port/proto flows steered to the user-space transparent proxy ---
+#[map]
+static L7_SERVICES: HashMap<ServiceKey, u8> = HashMap::with_max_entries(1024, 0);
+
 /// Upper bound on flood fan-out per VLAN (also bounds the verifier's loop).
 const MAX_L2_MEMBERS: u16 = 64;
 
@@ -112,6 +121,10 @@ const IP6_DST_OFF: usize = EthHdr::LEN + 24;
 const IP6_L4_OFF: usize = EthHdr::LEN + 40;
 const BPF_F_PSEUDO_HDR: u64 = 16;
 const BPF_F_MARK_MANGLED_0: u64 = 32;
+/// `bpf_*_lookup_tcp` netns selector: look up sockets in the skb's own netns.
+const BPF_F_CURRENT_NETNS: u64 = -1i64 as u64;
+/// `bpf_sock.state` value for a listening TCP socket (kernel `BPF_TCP_LISTEN`).
+const TCP_LISTEN: u32 = 10;
 
 #[classifier]
 pub fn cradle_tc(ctx: TcContext) -> i32 {
@@ -134,6 +147,91 @@ fn stat_inc(idx: u32) {
     }
 }
 
+/// Build an IPv4 `bpf_sock_tuple` (addresses/ports already in network order).
+#[inline(always)]
+fn sock_tuple(saddr: u32, daddr: u32, sport: u16, dport: u16) -> bpf_sock_tuple {
+    bpf_sock_tuple {
+        __bindgen_anon_1: bpf_sock_tuple__bindgen_ty_1 {
+            ipv4: bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1 {
+                saddr,
+                daddr,
+                sport,
+                dport,
+            },
+        },
+    }
+}
+
+/// Steer an L7-marked TCP flow to the user-space transparent proxy
+/// (`L7_PROXY_PORT`) via `bpf_sk_assign`. Returns `Some(TC_ACT_OK)` when the
+/// packet was assigned to a local socket, else `None` (fall through to routing).
+///
+/// For an established proxy connection the packet's own 4-tuple resolves the
+/// socket; a fresh SYN finds the proxy's wildcard listener. The proxy binds
+/// `IP_TRANSPARENT`, so the accepted socket's local address is the original VIP.
+#[inline(always)]
+fn l7_redirect(ctx: &TcContext) -> Option<i32> {
+    let ethertype: u16 = ctx.load(ETH_TYPE_OFF).ok()?;
+    if u16::from_be(ethertype) != ETH_P_IP {
+        return None;
+    }
+    let ver_ihl: u8 = ctx.load(IP_VER_IHL_OFF).ok()?;
+    if ver_ihl & 0x0f != 5 {
+        return None; // IPv4 options present: skip
+    }
+    let proto: u8 = ctx.load(IP_PROTO_OFF).ok()?;
+    if proto != IPPROTO_TCP {
+        return None;
+    }
+    let src_ip: u32 = ctx.load(IP_SRC_OFF).ok()?;
+    let dst_ip: u32 = ctx.load(IP_DST_OFF).ok()?;
+    let sport: u16 = ctx.load(L4_OFF).ok()?;
+    let dport: u16 = ctx.load(L4_OFF + 2).ok()?;
+
+    // Only steer flows whose (VIP, port) is a configured L7 service.
+    let key = ServiceKey {
+        vip: dst_ip,
+        port: dport,
+        proto,
+        _pad: 0,
+    };
+    L7_SERVICES.get_ptr(&key)?;
+
+    let skb = ctx.skb.skb;
+    let tlen = core::mem::size_of::<bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1>() as u32;
+
+    // 1. Established proxy connection for this 4-tuple? Reuse it.
+    let mut conn = sock_tuple(src_ip, dst_ip, sport, dport);
+    let sk = unsafe { bpf_skc_lookup_tcp(skb as *mut _, &mut conn, tlen, BPF_F_CURRENT_NETNS, 0) };
+    if !sk.is_null() {
+        let state = unsafe { (*sk).state };
+        if state != TCP_LISTEN {
+            let r = unsafe { bpf_sk_assign(skb as *mut _, sk as *mut _, 0) };
+            unsafe { bpf_sk_release(sk as *mut _) };
+            if r == 0 {
+                stat_inc(STAT_L7_REDIRECT);
+                return Some(TC_ACT_OK as i32);
+            }
+            return None;
+        }
+        unsafe { bpf_sk_release(sk as *mut _) };
+    }
+
+    // 2. Fresh SYN: assign the proxy's wildcard listener (*:L7_PROXY_PORT).
+    let mut lst = sock_tuple(0, dst_ip, 0, L7_PROXY_PORT.to_be());
+    let psk = unsafe { bpf_skc_lookup_tcp(skb as *mut _, &mut lst, tlen, BPF_F_CURRENT_NETNS, 0) };
+    if psk.is_null() {
+        return None;
+    }
+    let r = unsafe { bpf_sk_assign(skb as *mut _, psk as *mut _, 0) };
+    unsafe { bpf_sk_release(psk as *mut _) };
+    if r == 0 {
+        stat_inc(STAT_L7_REDIRECT);
+        return Some(TC_ACT_OK as i32);
+    }
+    None
+}
+
 #[inline(always)]
 fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     let iif = ingress_ifindex(ctx);
@@ -145,6 +243,11 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     if port.flags & PORT_F_L2 != 0 {
         l2_switch(ctx, iif, port.vlan)
     } else if port.flags & PORT_F_L3 != 0 {
+        // L7: a TCP flow to an L7-marked VIP is steered to the user-space
+        // transparent proxy via bpf_sk_assign (TC_ACT_OK = deliver locally).
+        if let Some(act) = l7_redirect(ctx) {
+            return Ok(act);
+        }
         // L4 NAT is a best-effort pre-routing stage; it rewrites the packet in
         // place (service DNAT / reverse SNAT) so routing then targets the real
         // endpoint. Failures fall through to plain routing.

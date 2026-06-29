@@ -1,0 +1,10 @@
+{
+  "ports": [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true}, {"name":"fwd3","l3":true} ],
+  "l7_services": [
+    { "vip": "10.0.9.9", "port": 80, "routes": [
+        {"prefix": "/a", "backend": "10.0.2.1:8080"},
+        {"prefix": "/b", "backend": "10.0.3.1:8080"},
+        {"prefix": "/",  "backend": "10.0.2.1:8080"}
+    ]}
+  ]
+}

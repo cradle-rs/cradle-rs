@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashSet,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 
@@ -42,6 +42,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "l4_dnat",
     "l4_snat",
     "drop",
+    "l7_redirect",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -50,6 +51,8 @@ pub struct Control {
     bpf: Arc<Mutex<Ebpf>>,
     dp: Arc<Mutex<Dataplane>>,
     attached: Arc<Mutex<HashSet<u32>>>,
+    /// L7 path-routing table, shared with the transparent proxy task.
+    routes: Arc<Mutex<crate::l7::RouteTable>>,
 }
 
 impl Control {
@@ -58,7 +61,32 @@ impl Control {
             bpf: Arc::new(Mutex::new(bpf)),
             dp: Arc::new(Mutex::new(dp)),
             attached: Arc::new(Mutex::new(HashSet::new())),
+            routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
         }
+    }
+
+    /// Start the user-space L7 transparent proxy (best-effort; logs and
+    /// continues if the transparent bind is unavailable).
+    pub async fn start_l7_proxy(&self) {
+        if let Err(e) = crate::l7::spawn_proxy(self.routes.clone()).await {
+            warn!("L7 proxy disabled: {e:#}");
+        }
+    }
+
+    /// Mark an L7 service (VIP:port → path-prefix routes). The datapath steers
+    /// matching TCP flows to the proxy; the proxy routes by path.
+    pub async fn add_l7_service(
+        &self,
+        vip: Ipv4Addr,
+        port: u16,
+        routes: Vec<crate::l7::L7Route>,
+    ) -> Result<()> {
+        self.dp.lock().await.l7_service_add(vip, port)?;
+        self.routes
+            .lock()
+            .await
+            .add(IpAddr::V4(vip), port, routes);
+        Ok(())
     }
 
     /// Attach the datapath classifier to a port's clsact ingress (idempotent).
@@ -429,5 +457,31 @@ impl Cradle for GrpcService {
             .map(|(name, packets)| pb::StatEntry { name, packets })
             .collect();
         Ok(Response::new(pb::StatsReply { entries }))
+    }
+
+    async fn add_l7_service(
+        &self,
+        req: Request<pb::L7Service>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let s = req.into_inner();
+        let vip: Ipv4Addr = s.vip.parse().map_err(st)?;
+        let routes = s
+            .routes
+            .iter()
+            .map(|r| {
+                let backend: SocketAddr = format!("{}:{}", r.backend_ip, r.backend_port)
+                    .parse()
+                    .map_err(st)?;
+                Ok(crate::l7::L7Route {
+                    prefix: r.path_prefix.clone(),
+                    backend,
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        self.control
+            .add_l7_service(vip, s.port as u16, routes)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
     }
 }

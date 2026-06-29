@@ -29,6 +29,26 @@ pub struct Config {
     pub neighbors: Vec<Neighbor>,
     #[serde(default)]
     pub services: Vec<Service>,
+    #[serde(default)]
+    pub l7_services: Vec<L7ServiceCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct L7ServiceCfg {
+    pub vip: String,
+    pub port: u16,
+    pub routes: Vec<L7RouteCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct L7RouteCfg {
+    #[serde(default = "default_prefix")]
+    pub prefix: String,
+    pub backend: String, // "ip:port"
+}
+
+fn default_prefix() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,13 +187,36 @@ impl Config {
             }
         }
 
+        for svc in &self.l7_services {
+            let vip: Ipv4Addr = svc
+                .vip
+                .parse()
+                .with_context(|| format!("bad L7 VIP {:?}", svc.vip))?;
+            let routes = svc
+                .routes
+                .iter()
+                .map(|r| {
+                    let backend = r
+                        .backend
+                        .parse()
+                        .with_context(|| format!("bad L7 backend {:?}", r.backend))?;
+                    Ok(crate::l7::L7Route {
+                        prefix: r.prefix.clone(),
+                        backend,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            ctl.add_l7_service(vip, svc.port, routes).await?;
+        }
+
         info!(
-            "applied config: {} ports, {} nexthops, {} neighbors, {} routes, {} services",
+            "applied config: {} ports, {} nexthops, {} neighbors, {} routes, {} services, {} l7-services",
             self.ports.len(),
             self.nexthops.len(),
             self.neighbors.len(),
             self.routes.len(),
             self.services.len(),
+            self.l7_services.len(),
         );
         Ok(())
     }

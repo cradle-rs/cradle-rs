@@ -41,6 +41,7 @@ pub struct Dataplane {
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
     backends6: HashMap<MapData, BackendKey, Backend6>,
     stats: PerCpuArray<MapData, u64>,
+    l7_services: HashMap<MapData, ServiceKey, u8>,
 }
 
 impl Dataplane {
@@ -72,7 +73,26 @@ impl Dataplane {
                 bpf.take_map("BACKENDS6").context("map BACKENDS6 missing")?,
             )?,
             stats: PerCpuArray::try_from(bpf.take_map("STATS").context("map STATS missing")?)?,
+            l7_services: HashMap::try_from(
+                bpf.take_map("L7_SERVICES").context("map L7_SERVICES missing")?,
+            )?,
         })
+    }
+
+    /// Mark `(vip, port)/tcp` as an L7 service: the datapath steers its flows to
+    /// the user-space transparent proxy. Path routing lives in user space.
+    pub fn l7_service_add(&mut self, vip: Ipv4Addr, port: u16) -> Result<()> {
+        self.l7_services.insert(
+            ServiceKey {
+                vip: util::ipv4_to_map(vip),
+                port: util::port_to_map(port),
+                proto: 6,
+                _pad: 0,
+            },
+            1,
+            0,
+        )?;
+        Ok(())
     }
 
     /// Read the per-CPU datapath packet counters, summed across CPUs and indexed
