@@ -89,6 +89,21 @@ message StatsReply {
   repeated StatEntry entries = 1;
 }
 
+// An L7 (HTTP) path-prefix route to a backend.
+message L7Route {
+  string path_prefix = 1;  // longest-prefix match on the request path
+  string backend_ip = 2;
+  uint32 backend_port = 3;
+}
+
+// An L7 service: TCP flows to vip:port are steered to the transparent proxy,
+// which routes by HTTP path to one of `routes`.
+message L7Service {
+  string vip = 1;
+  uint32 port = 2;
+  repeated L7Route routes = 3;
+}
+
 service Cradle {
   rpc SetPort(Port) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
@@ -101,4 +116,5 @@ service Cradle {
   rpc SetNeighbor4(Neighbor4) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
+  rpc AddL7Service(L7Service) returns (Empty);
 }

@@ -269,8 +269,16 @@ pub const STAT_L3_LOCAL: u32 = 4;
 pub const STAT_L4_DNAT: u32 = 5;
 pub const STAT_L4_SNAT: u32 = 6;
 pub const STAT_DROP: u32 = 7;
+pub const STAT_L7_REDIRECT: u32 = 8;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 8;
+pub const STAT_MAX: u32 = 9;
+
+// ============================== L7 proxy ===================================
+
+/// TCP port the user-space L7 proxy listens on (transparently). The eBPF
+/// datapath steers L7-marked service flows to this local listener via
+/// `bpf_sk_assign`.
+pub const L7_PROXY_PORT: u16 = 18000;
 
 // ============================ user-space Pod impls =========================
 

@@ -11,6 +11,7 @@ mod ctl;
 mod dataplane;
 mod grpc;
 mod kernel;
+mod l7;
 mod pb;
 mod util;
 
@@ -114,6 +115,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     if let Some(path) = &args.config {
         Config::load(path)?.apply_control(&control).await?;
     }
+
+    // Start the L7 transparent proxy (no-op for traffic until an L7 service is
+    // configured; best-effort if the transparent bind is unavailable).
+    control.start_l7_proxy().await;
 
     match args.grpc {
         Some(s) => control.serve(GrpcEndpoint::parse(&s)?).await?, // runs until Ctrl-C

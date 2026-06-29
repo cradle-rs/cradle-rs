@@ -821,14 +821,19 @@ async fn start_cradle_grpc_cfg(world: &mut World, namespace: String, config: Str
     let pid = world.pid_file(&namespace);
     let cfg = config_in(world, &config);
     let ep = grpc_sock(world, &sock);
-    netns::spawn_in_netns_env(
-        &scoped,
-        &[("RUST_LOG", "info")],
-        &cradle_bin(),
-        &["serve", "--config", &cfg, "--grpc", &ep, "--pid-file", &pid],
-    )
-    .await
-    .expect("Failed to start cradle");
+    // Capture cradle's logs (the L7 proxy logs here) to logs/<ns>.cradle.log.
+    let log = format!("logs/{}.cradle.log", scoped);
+    let cmd = format!(
+        "exec {} serve --config {} --grpc {} --pid-file {} >> {} 2>&1",
+        cradle_bin(),
+        cfg,
+        ep,
+        pid,
+        log
+    );
+    netns::spawn_in_netns_env(&scoped, &[("RUST_LOG", "info,cradle=debug")], "sh", &["-c", &cmd])
+        .await
+        .expect("Failed to start cradle");
     await_cradle(&scoped, &pid).await;
     println!("✓ cradle started in {} serving gRPC at {}", scoped, ep);
 }
@@ -935,16 +940,33 @@ async fn stop_zebra_tee(world: &mut World, namespace: String) {
 
 // ------------------------------ HTTP service ------------------------------
 
-/// Serve a fixed HTTP body from a namespace (a backend behind an L4 VIP).
+/// Serve a fixed HTTP body from a namespace (a backend behind an L4/L7 VIP).
+/// Responds to *any* path with `body` (so L7 path routing can be observed), on
+/// port 8080, bound to `bind` (v4 or v6, inferred from the address).
 #[when(expr = "I serve HTTP {string} in namespace {string} bound to {string}")]
 async fn serve_http(world: &mut World, body: String, namespace: String, bind: String) {
     let scoped = world.ns(&namespace);
-    let dir = format!("/tmp/{}_www", scoped);
     let pid = format!("/tmp/{}_http.pid", scoped);
-    std::fs::create_dir_all(&dir).expect("create www dir");
-    std::fs::write(format!("{}/index.html", dir), format!("{body}\n")).expect("write index.html");
-    let script = format!("echo $$ > {pid}; cd {dir}; exec python3 -m http.server 8080 --bind {bind}");
-    netns::spawn_in_netns(&scoped, "sh", &["-c", &script])
+    let script = format!("/tmp/{}_srv.py", scoped);
+    let prog = r#"import sys, socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+bind, port, body = sys.argv[1], int(sys.argv[2]), sys.argv[3].encode()
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+class S(HTTPServer):
+    allow_reuse_address = True
+    address_family = socket.AF_INET6 if ":" in bind else socket.AF_INET
+S((bind, port), H).serve_forever()
+"#;
+    std::fs::write(&script, prog).expect("write srv.py");
+    let cmd = format!("echo $$ > {pid}; exec python3 {script} {bind} 8080 '{body}'");
+    netns::spawn_in_netns(&scoped, "sh", &["-c", &cmd])
         .await
         .expect("Failed to start HTTP server");
     tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
@@ -974,6 +996,24 @@ async fn http_get_eventually(world: &mut World, url: String, namespace: String) 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
     panic!("HTTP GET {} from {} did not succeed", url, scoped);
+}
+
+/// Poll an HTTP GET until the response body contains `needle` (used to assert
+/// L7 path routing reached a specific backend).
+#[then(expr = "HTTP GET {string} from namespace {string} should contain {string}")]
+async fn http_get_contains(world: &mut World, url: String, namespace: String, needle: String) {
+    let scoped = world.ns(&namespace);
+    for _ in 0..30 {
+        if let Ok(s) =
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await
+            && s.contains(&needle)
+        {
+            println!("✓ HTTP GET {} from {} returned {:?}", url, scoped, needle);
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!("HTTP GET {} from {} did not return {:?}", url, scoped, needle);
 }
 
 #[then(
@@ -1041,10 +1081,27 @@ async fn iface_tx(ns: &str, iface: &str) -> u64 {
     0
 }
 
+/// Add a `local` route so the kernel delivers packets to `prefix` locally
+/// (required for bpf_sk_assign TPROXY: the steered, non-local VIP destination
+/// must reach the local stack to be handed to the assigned socket).
+#[when(expr = "I add local route {string} in namespace {string}")]
+async fn add_local_route(world: &mut World, prefix: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "ip", &["route", "add", "local", &prefix, "dev", "lo"])
+        .await
+        .expect("Failed to add local route");
+    println!("✓ added local route {} in namespace {}", prefix, scoped);
+}
+
 #[when(expr = "I disable reverse path filtering in namespace {string}")]
 async fn disable_rpf(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
-    netns::exec_in_netns(&scoped, "sysctl", &["-wq", "net.ipv4.conf.all.rp_filter=0"])
+    // rp_filter is max(all, per-iface), so clear `all`, `default`, and every
+    // existing interface — otherwise the per-iface default (1) still filters
+    // (which would drop the non-local-dst packets bpf_sk_assign relies on).
+    let cmd = "sysctl -wq net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0; \
+               for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > \"$f\"; done";
+    netns::exec_in_netns(&scoped, "sh", &["-c", cmd])
         .await
         .expect("Failed to disable rp_filter");
     println!("✓ disabled rp_filter in namespace {}", scoped);
