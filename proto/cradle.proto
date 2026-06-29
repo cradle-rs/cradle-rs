@@ -24,8 +24,9 @@ message L2Domain {
 
 message Nexthop {
   uint32 id = 1;
-  string gateway = 2;  // empty => on-link / connected
-  string oif = 3;      // output interface name
+  string gateway = 2;     // empty => on-link / connected
+  string oif = 3;         // output interface name (used when oif_index == 0)
+  uint32 oif_index = 4;   // output ifindex; preferred when non-zero
 }
 
 message Route4 {

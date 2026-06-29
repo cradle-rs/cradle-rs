@@ -46,6 +46,7 @@ pub async fn run(addr: SocketAddr, op: CtlOp) -> Result<()> {
                         id: nh.id,
                         gateway: nh.gateway.clone().unwrap_or_default(),
                         oif: nh.oif.clone(),
+                        oif_index: 0,
                     })
                     .await?;
             }

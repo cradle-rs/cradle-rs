@@ -90,6 +90,17 @@ impl Control {
 
     pub async fn set_nexthop(&self, id: u32, gateway: Option<Ipv4Addr>, oif: &str) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
+        self.set_nexthop_idx(id, gateway, oif).await
+    }
+
+    /// Set a nexthop by output ifindex directly (used by control planes such as
+    /// zebra-rs that already work in ifindex space).
+    pub async fn set_nexthop_idx(
+        &self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: u32,
+    ) -> Result<()> {
         self.dp.lock().await.nexthop_set(id, gateway, oif)?;
         Ok(())
     }
@@ -186,7 +197,14 @@ impl Cradle for GrpcService {
         } else {
             Some(n.gateway.parse().map_err(st)?)
         };
-        self.control.set_nexthop(n.id, gw, &n.oif).await.map_err(st)?;
+        if n.oif_index != 0 {
+            self.control
+                .set_nexthop_idx(n.id, gw, n.oif_index)
+                .await
+                .map_err(st)?;
+        } else {
+            self.control.set_nexthop(n.id, gw, &n.oif).await.map_err(st)?;
+        }
         Ok(Response::new(pb::Empty {}))
     }
 
