@@ -48,6 +48,9 @@ struct ServeArgs {
     /// (a bare `host:port` is treated as TCP).
     #[arg(short, long)]
     grpc: Option<String>,
+    /// Write this process's PID to this file at startup (for test harnesses).
+    #[arg(long)]
+    pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -84,6 +87,11 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
+    if let Some(p) = &args.pid_file {
+        std::fs::write(p, std::process::id().to_string())
+            .with_context(|| format!("writing pid file {}", p.display()))?;
+    }
+
     let mut bpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/cradle-ebpf"
