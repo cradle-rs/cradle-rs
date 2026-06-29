@@ -190,10 +190,16 @@ pub struct CtEntry {
     /// Reverse-NAT / chosen-backend target.
     pub rev_addr: u32,
     pub rev_port: u16,
+    /// `CT_F_*`.
     pub flags: u16,
     /// `bpf_ktime_get_ns()` of last packet.
     pub last_seen: u64,
 }
+
+/// Rewrite the destination to `(rev_addr, rev_port)` (forward / DNAT direction).
+pub const CT_F_DNAT: u16 = 1 << 0;
+/// Rewrite the source to `(rev_addr, rev_port)` (reverse / SNAT direction).
+pub const CT_F_SNAT: u16 = 1 << 1;
 
 // ============================ user-space Pod impls =========================
 

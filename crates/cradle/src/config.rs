@@ -23,6 +23,29 @@ pub struct Config {
     pub routes: Vec<Route>,
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
+    #[serde(default)]
+    pub services: Vec<Service>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Service {
+    /// Virtual IP.
+    pub vip: String,
+    pub port: u16,
+    /// `tcp` (default) or `udp`.
+    #[serde(default = "default_proto")]
+    pub proto: String,
+    pub backends: Vec<BackendCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BackendCfg {
+    pub ip: String,
+    pub port: u16,
+}
+
+fn default_proto() -> String {
+    "tcp".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,13 +145,33 @@ impl Config {
             dp.route4_add(addr, len, r.nexthop, 0)?;
         }
 
+        // L4 services (svc_id is the 1-based config index).
+        for (i, svc) in self.services.iter().enumerate() {
+            let vip = svc.vip.parse().with_context(|| format!("bad VIP {:?}", svc.vip))?;
+            let proto = match svc.proto.as_str() {
+                "tcp" => 6u8,
+                "udp" => 17u8,
+                other => anyhow::bail!("unknown service proto {other:?} (want tcp|udp)"),
+            };
+            let backends = svc
+                .backends
+                .iter()
+                .map(|b| {
+                    let ip = b.ip.parse().with_context(|| format!("bad backend ip {:?}", b.ip))?;
+                    Ok((ip, b.port))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            dp.service_add(i as u32 + 1, vip, svc.port, proto, &backends)?;
+        }
+
         info!(
-            "programmed dataplane: {} ports, {} L2 domains, {} nexthops, {} neighbors, {} routes",
+            "programmed dataplane: {} ports, {} L2 domains, {} nexthops, {} neighbors, {} routes, {} services",
             self.ports.len(),
             domains.len(),
             self.nexthops.len(),
             self.neighbors.len(),
-            self.routes.len()
+            self.routes.len(),
+            self.services.len(),
         );
         Ok(())
     }

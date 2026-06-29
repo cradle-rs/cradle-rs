@@ -38,6 +38,19 @@ pub fn parse_mac(s: &str) -> Result<[u8; 6]> {
     Ok(mac)
 }
 
+/// Encode an IPv4 address the way the data plane reads it: a `u32` whose native
+/// (little-endian) bytes are the network octets — i.e. exactly what
+/// `ctx.load::<u32>()` produces in the eBPF program.
+pub fn ipv4_to_map(a: Ipv4Addr) -> u32 {
+    u32::from_ne_bytes(a.octets())
+}
+
+/// Encode a port the way the data plane reads it: the wire (network-order) bytes
+/// read back as a native `u16`.
+pub fn port_to_map(p: u16) -> u16 {
+    p.to_be()
+}
+
 /// Parse `a.b.c.d/len` into an address and prefix length.
 pub fn parse_ipv4_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
     let (addr, len) = s

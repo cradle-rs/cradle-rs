@@ -19,8 +19,11 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, PortConfig, NEIGH_STATE_REACHABLE,
+    Backend, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, PortConfig,
+    ServiceInfo, ServiceKey, LB_ALGO_RANDOM, NEIGH_STATE_REACHABLE,
 };
+
+use crate::util;
 
 pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
@@ -29,6 +32,8 @@ pub struct Dataplane {
     ports: HashMap<MapData, u32, PortConfig>,
     l2_members: HashMap<MapData, L2MemberKey, u32>,
     l2_count: HashMap<MapData, u16, u32>,
+    services: HashMap<MapData, ServiceKey, ServiceInfo>,
+    backends: HashMap<MapData, BackendKey, Backend>,
 }
 
 impl Dataplane {
@@ -46,7 +51,53 @@ impl Dataplane {
                 bpf.take_map("L2_MEMBERS").context("map L2_MEMBERS missing")?,
             )?,
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
+            services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
+            backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
         })
+    }
+
+    /// Install an L4 service VIP and its backend set. `svc_id` namespaces the
+    /// backend slots; the data plane picks a backend at random per new flow and
+    /// connection-tracks it.
+    pub fn service_add(
+        &mut self,
+        svc_id: u32,
+        vip: std::net::Ipv4Addr,
+        port: u16,
+        proto: u8,
+        backends: &[(std::net::Ipv4Addr, u16)],
+    ) -> Result<()> {
+        self.services.insert(
+            ServiceKey {
+                vip: util::ipv4_to_map(vip),
+                port: util::port_to_map(port),
+                proto,
+                _pad: 0,
+            },
+            ServiceInfo {
+                backend_count: backends.len() as u16,
+                lb_algo: LB_ALGO_RANDOM,
+                flags: 0,
+                svc_id,
+            },
+            0,
+        )?;
+        for (slot, (ip, p)) in backends.iter().enumerate() {
+            self.backends.insert(
+                BackendKey {
+                    svc_id,
+                    slot: slot as u16,
+                    _pad: 0,
+                },
+                Backend {
+                    addr: util::ipv4_to_map(*ip),
+                    port: util::port_to_map(*p),
+                    flags: 0,
+                },
+                0,
+            )?;
+        }
+        Ok(())
     }
 
     /// Register an interface (by ifindex) with its MAC, `PORT_F_*` flags, and
