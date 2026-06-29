@@ -1,19 +1,24 @@
-//! Compiles the `cradle-ebpf` crate to `bpfel-unknown-none` and drops the
-//! resulting object in `OUT_DIR`, where `main.rs` embeds it via
-//! `aya::include_bytes_aligned!`.
+//! Build script: (1) compile the gRPC control API proto, and (2) compile the
+//! `cradle-ebpf` crate to `bpfel-unknown-none` (embedded by `main.rs`).
 
 use aya_build::{Package, Toolchain};
 
 fn main() -> anyhow::Result<()> {
+    // gRPC control API. The build script runs in the crate dir, so reference
+    // the workspace-root proto by absolute path.
+    tonic_prost_build::compile_protos(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../proto/cradle.proto"
+    ))?;
+
+    // eBPF data plane.
     aya_build::build_ebpf(
         [Package {
             name: "cradle-ebpf",
-            // Used for `cargo:rerun-if-changed`.
             root_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../cradle-ebpf"),
             no_default_features: false,
             features: &[],
         }],
-        // `nightly` — required for `-Z build-std=core` against the BPF target.
         Toolchain::default(),
     )?;
     Ok(())

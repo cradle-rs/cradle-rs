@@ -38,6 +38,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tonic-prost-build = "0.14"
 
 # Optimize the eBPF object even in dev builds; the verifier rejects most
 # unoptimized output.

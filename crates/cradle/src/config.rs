@@ -1,8 +1,8 @@
-//! Static JSON configuration — the Phase-1/2 injection mechanism.
+//! Static JSON configuration.
 //!
-//! This is deliberately simple; it will be superseded by the gRPC/unix-socket
-//! API and ultimately by the zebra-rs control plane. The shape maps directly to
-//! [`Dataplane`] operations.
+//! Used both as a server-side bootstrap (applied in-process via [`Control`]) and
+//! as the payload of `cradle ctl apply` (replayed over gRPC). The shape maps
+//! directly to the control-plane operations.
 
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -10,8 +10,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use tracing::info;
 
-use crate::{dataplane::Dataplane, util};
-use cradle_common::{PORT_F_L2, PORT_F_L3};
+use crate::{control::Control, util};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -28,11 +27,39 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Port {
+    pub name: String,
+    #[serde(default)]
+    pub l3: bool,
+    #[serde(default)]
+    pub vlan: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Nexthop {
+    pub id: u32,
+    pub oif: String,
+    #[serde(default)]
+    pub gateway: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Route {
+    pub prefix: String,
+    pub nexthop: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Neighbor {
+    pub oif: String,
+    pub ip: String,
+    pub mac: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Service {
-    /// Virtual IP.
     pub vip: String,
     pub port: u16,
-    /// `tcp` (default) or `udp`.
     #[serde(default = "default_proto")]
     pub proto: String,
     pub backends: Vec<BackendCfg>,
@@ -48,41 +75,24 @@ fn default_proto() -> String {
     "tcp".to_string()
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Port {
-    pub name: String,
-    /// Routed (L3) port. If false, the port is an L2 bridge member in `vlan`.
-    #[serde(default)]
-    pub l3: bool,
-    /// L2 bridge/VLAN domain id (for non-L3 ports).
-    #[serde(default)]
-    pub vlan: u16,
+/// Group non-L3 ports into `(vlan -> member interface names)` L2 domains.
+pub fn l2_domains(ports: &[Port]) -> BTreeMap<u16, Vec<String>> {
+    let mut domains: BTreeMap<u16, Vec<String>> = BTreeMap::new();
+    for p in ports {
+        if !p.l3 {
+            domains.entry(p.vlan).or_default().push(p.name.clone());
+        }
+    }
+    domains
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Nexthop {
-    pub id: u32,
-    /// Output interface name.
-    pub oif: String,
-    /// Gateway address; omit for an on-link/connected nexthop.
-    #[serde(default)]
-    pub gateway: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Route {
-    /// `a.b.c.d/len`.
-    pub prefix: String,
-    /// Nexthop id.
-    pub nexthop: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Neighbor {
-    /// Interface the neighbor is reachable on.
-    pub oif: String,
-    pub ip: String,
-    pub mac: String,
+/// Parse a service proto string to its IP protocol number.
+pub fn proto_num(proto: &str) -> Result<u8> {
+    match proto {
+        "tcp" => Ok(6),
+        "udp" => Ok(17),
+        other => anyhow::bail!("unknown service proto {other:?} (want tcp|udp)"),
+    }
 }
 
 impl Config {
@@ -92,67 +102,33 @@ impl Config {
         serde_json::from_str(&s).with_context(|| format!("parsing config {}", path.display()))
     }
 
-    /// Every managed port — the datapath classifier is attached to each one's
-    /// ingress (both L2 and L3 ports need it).
-    pub fn port_names(&self) -> impl Iterator<Item = &str> {
-        self.ports.iter().map(|p| p.name.as_str())
-    }
-
-    /// Program the data plane from this configuration.
-    pub fn apply(&self, dp: &mut Dataplane) -> Result<()> {
-        // Ports.
+    /// Apply this configuration in-process via the control plane.
+    pub async fn apply_control(&self, ctl: &Control) -> Result<()> {
         for p in &self.ports {
-            let ifindex = util::ifindex_of(&p.name)?;
-            let mac = util::mac_of(&p.name)?;
-            let flags = if p.l3 { PORT_F_L3 } else { PORT_F_L2 };
-            dp.port_set(ifindex, mac, flags, p.vlan)?;
+            ctl.set_port(&p.name, None, p.l3, p.vlan).await?;
         }
-
-        // L2 domains: group non-L3 ports by VLAN and register the member sets.
-        let mut domains: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
-        for p in &self.ports {
-            if !p.l3 {
-                domains
-                    .entry(p.vlan)
-                    .or_default()
-                    .push(util::ifindex_of(&p.name)?);
-            }
+        for (vlan, members) in l2_domains(&self.ports) {
+            ctl.set_l2_domain(vlan, &members).await?;
         }
-        for (vlan, members) in &domains {
-            dp.l2_domain_set(*vlan, members)?;
-        }
-
-        // L3: nexthops, neighbors, routes.
         for nh in &self.nexthops {
-            let oif = util::ifindex_of(&nh.oif)?;
-            let gateway = match &nh.gateway {
+            let gw = match &nh.gateway {
                 Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                 None => None,
             };
-            dp.nexthop_set(nh.id, gateway, oif)?;
+            ctl.set_nexthop(nh.id, gw, &nh.oif).await?;
         }
         for n in &self.neighbors {
-            let oif = util::ifindex_of(&n.oif)?;
-            let ip = n
-                .ip
-                .parse()
-                .with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
+            let ip = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
             let mac = util::parse_mac(&n.mac)?;
-            dp.neigh4_set(oif, ip, mac)?;
+            ctl.set_neighbor4(&n.oif, ip, mac).await?;
         }
         for r in &self.routes {
             let (addr, len) = util::parse_ipv4_prefix(&r.prefix)?;
-            dp.route4_add(addr, len, r.nexthop, 0)?;
+            ctl.add_route4(addr, len, r.nexthop, 0).await?;
         }
-
-        // L4 services (svc_id is the 1-based config index).
         for (i, svc) in self.services.iter().enumerate() {
             let vip = svc.vip.parse().with_context(|| format!("bad VIP {:?}", svc.vip))?;
-            let proto = match svc.proto.as_str() {
-                "tcp" => 6u8,
-                "udp" => 17u8,
-                other => anyhow::bail!("unknown service proto {other:?} (want tcp|udp)"),
-            };
+            let proto = proto_num(&svc.proto)?;
             let backends = svc
                 .backends
                 .iter()
@@ -161,13 +137,12 @@ impl Config {
                     Ok((ip, b.port))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            dp.service_add(i as u32 + 1, vip, svc.port, proto, &backends)?;
+            ctl.add_service(i as u32 + 1, vip, svc.port, proto, &backends).await?;
         }
 
         info!(
-            "programmed dataplane: {} ports, {} L2 domains, {} nexthops, {} neighbors, {} routes, {} services",
+            "applied config: {} ports, {} nexthops, {} neighbors, {} routes, {} services",
             self.ports.len(),
-            domains.len(),
             self.nexthops.len(),
             self.neighbors.len(),
             self.routes.len(),

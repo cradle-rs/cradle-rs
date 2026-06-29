@@ -152,6 +152,13 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Remove an IPv4 route.
+    pub fn route4_del(&mut self, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        let key = Key::new(prefix_len as u32, addr.octets());
+        self.fib4.remove(&key)?;
+        Ok(())
+    }
+
     /// Set the neighbor (ARP) entry for `ip` reachable out `ifindex`.
     pub fn neigh4_set(&mut self, ifindex: u32, ip: Ipv4Addr, mac: [u8; 6]) -> Result<()> {
         let key = Neigh4Key {

@@ -84,7 +84,7 @@ fi
 echo "OK: VIP unreachable without the eBPF data plane"
 
 echo "== starting cradle in $FWD =="
-ip netns exec "$FWD" env RUST_LOG=info "$CRADLE" --config "$CFG" >"$LOG" 2>&1 &
+ip netns exec "$FWD" env RUST_LOG=info "$CRADLE" serve --config "$CFG" >"$LOG" 2>&1 &
 CRADLE_PID=$!
 sleep 1.5
 if ! kill -0 "$CRADLE_PID" 2>/dev/null; then echo "FAIL: cradle exited early:"; cat "$LOG"; exit 1; fi

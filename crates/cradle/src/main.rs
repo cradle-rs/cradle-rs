@@ -1,33 +1,68 @@
 //! cradle — user-space control plane for the cradle-rs eBPF data plane.
 //!
-//! Phase 1: load the L3 datapath, attach it to the configured L3 ports'
-//! `clsact` ingress hooks, and program the FIB / nexthop / neighbor / port maps
-//! from a static JSON config. Later phases replace the static config with a
-//! gRPC/unix-socket route-injection API and the zebra-rs control plane.
+//! `serve` loads the eBPF datapath and, optionally, applies a bootstrap JSON
+//! config and/or serves the gRPC control API. `ctl` is the client that pushes
+//! configuration to a running instance. The gRPC API is the seam the zebra-rs
+//! routing control plane will eventually drive.
 
 mod config;
+mod control;
+mod ctl;
 mod dataplane;
+mod pb;
 mod util;
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context as _, Result};
-use aya::programs::{tc, SchedClassifier, TcAttachType};
-use clap::Parser;
-use tracing::{info, warn};
+use aya::programs::SchedClassifier;
+use clap::{Parser, Subcommand};
+use tracing::info;
 
-use crate::{config::Config, dataplane::Dataplane};
+use crate::{config::Config, control::Control, dataplane::Dataplane};
 
 #[derive(Debug, Parser)]
 #[command(name = "cradle", version, about = "cradle-rs eBPF L2/L3/L4 data plane")]
 struct Cli {
-    /// JSON config: ports, nexthops, routes, neighbors.
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Debug, Subcommand)]
+enum Cmd {
+    /// Load the data plane; optionally apply a bootstrap config and/or serve the
+    /// gRPC control API.
+    Serve(ServeArgs),
+    /// Control-plane client: push configuration to a running cradle.
+    Ctl(CtlArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ServeArgs {
+    /// Bootstrap JSON config applied at startup.
     #[arg(short, long)]
     config: Option<PathBuf>,
-    /// Extra interface(s) to attach to (clsact ingress), in addition to the
-    /// config's L3 ports. Repeatable.
+    /// Serve the gRPC control API on this TCP address (e.g. 127.0.0.1:50151).
     #[arg(short, long)]
-    iface: Vec<String>,
+    grpc: Option<SocketAddr>,
+}
+
+#[derive(Debug, Parser)]
+struct CtlArgs {
+    /// gRPC server address (e.g. 127.0.0.1:50151).
+    #[arg(short, long)]
+    grpc: SocketAddr,
+    #[command(subcommand)]
+    op: CtlOp,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CtlOp {
+    /// Apply a JSON config to the running data plane.
+    Apply {
+        /// Path to the JSON config.
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -39,57 +74,42 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
-    let cfg = match &cli.config {
-        Some(p) => Some(Config::load(p)?),
-        None => None,
-    };
+    match Cli::parse().cmd {
+        Cmd::Serve(args) => serve(args).await,
+        Cmd::Ctl(args) => ctl::run(args.grpc, args.op).await,
+    }
+}
 
+async fn serve(args: ServeArgs) -> Result<()> {
     let mut bpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/cradle-ebpf"
     )))
     .context("failed to load embedded eBPF object")?;
 
-    // Load the classifier once.
     {
         let prog: &mut SchedClassifier = bpf
             .program_mut("cradle_tc")
-            .context("program `cradle_tc` not found")?
+            .context("program cradle_tc not found")?
             .try_into()?;
         prog.load().context("loading cradle_tc")?;
     }
 
-    // Attach to every L3 port from the config, plus any explicit --iface.
-    let mut attach: Vec<String> = Vec::new();
-    if let Some(cfg) = &cfg {
-        attach.extend(cfg.port_names().map(str::to_owned));
+    let dp = Dataplane::from_ebpf(&mut bpf)?;
+    let control = Control::new(bpf, dp);
+
+    if let Some(path) = &args.config {
+        Config::load(path)?.apply_control(&control).await?;
     }
-    attach.extend(cli.iface.iter().cloned());
-    if attach.is_empty() {
-        warn!("no interfaces to attach to (no --iface and no L3 ports in config)");
-    }
-    for name in &attach {
-        if let Err(e) = tc::qdisc_add_clsact(name) {
-            warn!("qdisc_add_clsact({name}): {e} (continuing; may already exist)");
+
+    match args.grpc {
+        Some(addr) => control.serve(addr).await?, // runs until Ctrl-C
+        None => {
+            info!("cradle running — press Ctrl-C to exit");
+            tokio::signal::ctrl_c().await?;
         }
-        let prog: &mut SchedClassifier = bpf
-            .program_mut("cradle_tc")
-            .context("program `cradle_tc` not found")?
-            .try_into()?;
-        prog.attach(name, TcAttachType::Ingress)
-            .with_context(|| format!("attaching to {name}"))?;
-        info!("attached cradle datapath to {name} (clsact ingress)");
     }
 
-    // Program the maps (after attach, so relocations are resolved).
-    let mut dp = Dataplane::from_ebpf(&mut bpf)?;
-    if let Some(cfg) = &cfg {
-        cfg.apply(&mut dp)?;
-    }
-
-    info!("cradle running — press Ctrl-C to exit");
-    tokio::signal::ctrl_c().await?;
     info!("shutting down");
     Ok(())
 }
