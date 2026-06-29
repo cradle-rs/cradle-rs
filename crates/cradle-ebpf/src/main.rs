@@ -91,8 +91,12 @@ const IPPROTO_UDP: u8 = 17;
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const ETH_P_IPV6: u16 = 0x86dd;
+const IP6_NEXTHDR_OFF: usize = EthHdr::LEN + 6;
 const IP6_HOP_OFF: usize = EthHdr::LEN + 7;
+const IP6_SRC_OFF: usize = EthHdr::LEN + 8;
 const IP6_DST_OFF: usize = EthHdr::LEN + 24;
+/// L4 header start for IPv6, assuming no extension headers.
+const IP6_L4_OFF: usize = EthHdr::LEN + 40;
 const BPF_F_PSEUDO_HDR: u64 = 16;
 const BPF_F_MARK_MANGLED_0: u64 = 32;
 
@@ -365,6 +369,18 @@ fn ecmp_member(group_id: u32, hash: u32) -> Option<u32> {
     Some(unsafe { *NHGROUP_MEMBER.get_ptr(&NhGroupKey { group_id, slot })? })
 }
 
+/// Murmur3 32-bit finalizer — good avalanche so the low bits used for member
+/// selection depend on every input bit (inputs often differ only in high bits).
+#[inline(always)]
+fn fmix32(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
 /// Per-flow hash for ECMP member selection (consistent within a flow/direction).
 #[inline(always)]
 fn flow_hash_v4(ctx: &TcContext, src: u32, dst: u32) -> u32 {
@@ -375,8 +391,24 @@ fn flow_hash_v4(ctx: &TcContext, src: u32, dst: u32) -> u32 {
             h ^= ports;
         }
     }
-    h = h.wrapping_mul(2654435761);
-    h ^ (h >> 16)
+    fmix32(h)
+}
+
+/// Per-flow hash for IPv6 ECMP member selection.
+#[inline(always)]
+fn flow_hash_v6(ctx: &TcContext, src: &[u8; 16], dst: &[u8; 16]) -> u32 {
+    let sw: [u32; 4] = unsafe { core::mem::transmute(*src) };
+    let dw: [u32; 4] = unsafe { core::mem::transmute(*dst) };
+    let mut h = (sw[0] ^ sw[1] ^ sw[2] ^ sw[3])
+        ^ (dw[0] ^ dw[1] ^ dw[2] ^ dw[3]).rotate_left(16);
+    let nexthdr: u8 = ctx.load(IP6_NEXTHDR_OFF).unwrap_or(0);
+    h ^= nexthdr as u32;
+    if nexthdr == IPPROTO_TCP || nexthdr == IPPROTO_UDP {
+        if let Ok(ports) = ctx.load::<u32>(IP6_L4_OFF) {
+            h ^= ports;
+        }
+    }
+    fmix32(h)
 }
 
 #[inline(always)]
@@ -467,7 +499,17 @@ fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE as i32); // destined to us
     }
 
-    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&fib.nexthop_id).ok_or(())? };
+    let nh_id = if fib.flags & FIB_F_ECMP != 0 {
+        let src: [u8; 16] = ctx.load(IP6_SRC_OFF).map_err(|_| ())?;
+        let hash = flow_hash_v6(ctx, &src, &dst);
+        match ecmp_member(fib.nexthop_id, hash) {
+            Some(id) => id,
+            None => return Ok(TC_ACT_PIPE as i32),
+        }
+    } else {
+        fib.nexthop_id
+    };
+    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
     let oif = nh.oif;
 
     // Decrement the hop limit (IPv6 has no header checksum to patch).
