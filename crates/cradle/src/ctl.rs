@@ -88,6 +88,12 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
             }
             println!("applied {} to {uri} via gRPC", config.display());
         }
+        CtlOp::Stats => {
+            let reply = client.get_stats(pb::StatsRequest {}).await?.into_inner();
+            for e in reply.entries {
+                println!("{:<14} {}", e.name, e.packets);
+            }
+        }
     }
     Ok(())
 }

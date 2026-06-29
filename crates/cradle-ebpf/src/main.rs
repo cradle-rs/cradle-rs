@@ -24,14 +24,15 @@ use aya_ebpf::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh,
     },
     macros::{classifier, map},
-    maps::{lpm_trie::Key, HashMap, LpmTrie, LruHashMap},
+    maps::{lpm_trie::Key, HashMap, LpmTrie, LruHashMap, PerCpuArray},
     programs::TcContext,
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, CtEntry, CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry,
     L2MemberKey, Neigh4Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
     ServiceKey6, CT_F_DNAT, CT_F_SNAT, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, PORT_F_L2,
-    PORT_F_L3,
+    PORT_F_L3, STAT_DROP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_MAX,
 };
 use network_types::eth::EthHdr;
 
@@ -77,6 +78,10 @@ static BACKENDS6: HashMap<BackendKey, Backend6> = HashMap::with_max_entries(8192
 #[map]
 static CT6: LruHashMap<CtKey6, CtEntry6> = LruHashMap::with_max_entries(65536, 0);
 
+// --- observability: per-CPU packet counters, indexed by STAT_* ---
+#[map]
+static STATS: PerCpuArray<u64> = PerCpuArray::with_max_entries(STAT_MAX, 0);
+
 /// Upper bound on flood fan-out per VLAN (also bounds the verifier's loop).
 const MAX_L2_MEMBERS: u16 = 64;
 
@@ -119,6 +124,14 @@ pub fn cradle_tc(ctx: TcContext) -> i32 {
 #[inline(always)]
 fn ingress_ifindex(ctx: &TcContext) -> u32 {
     unsafe { (*ctx.skb.skb).ingress_ifindex }
+}
+
+/// Bump a per-CPU datapath counter (best-effort; never affects forwarding).
+#[inline(always)]
+fn stat_inc(idx: u32) {
+    if let Some(c) = STATS.get_ptr_mut(idx) {
+        unsafe { *c += 1 };
+    }
 }
 
 #[inline(always)]
@@ -165,6 +178,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16) -> Result<i32, ()> {
             if oif == iif {
                 Ok(TC_ACT_SHOT as i32) // hairpin to the same port
             } else {
+                stat_inc(STAT_L2_FORWARD);
                 Ok(unsafe { bpf_redirect(oif, 0) } as i32)
             }
         }
@@ -174,6 +188,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16) -> Result<i32, ()> {
 
 #[inline(always)]
 fn flood(ctx: &TcContext, iif: u32, vlan: u16) -> i32 {
+    stat_inc(STAT_L2_FLOOD);
     let count = match L2_COUNT.get_ptr(&vlan) {
         Some(c) => unsafe { *c },
         None => 0,
@@ -330,6 +345,7 @@ fn dnat(
         .map_err(|_| ())?;
     ctx.store(IP_DST_OFF, &new_ip, 0).map_err(|_| ())?;
     ctx.store(L4_OFF + 2, &new_port, 0).map_err(|_| ())?;
+    stat_inc(STAT_L4_DNAT);
     Ok(())
 }
 
@@ -357,6 +373,7 @@ fn snat(
         .map_err(|_| ())?;
     ctx.store(IP_SRC_OFF, &new_ip, 0).map_err(|_| ())?;
     ctx.store(L4_OFF, &new_port, 0).map_err(|_| ())?;
+    stat_inc(STAT_L4_SNAT);
     Ok(())
 }
 
@@ -460,6 +477,7 @@ fn dnat6(
     v6_csum_fixup(ctx, proto, old_ip, new_ip, old_port, new_port)?;
     ctx.store(IP6_DST_OFF, &new_ip, 0).map_err(|_| ())?;
     ctx.store(IP6_L4_OFF + 2, &new_port, 0).map_err(|_| ())?;
+    stat_inc(STAT_L4_DNAT);
     Ok(())
 }
 
@@ -476,6 +494,7 @@ fn snat6(
     v6_csum_fixup(ctx, proto, old_ip, new_ip, old_port, new_port)?;
     ctx.store(IP6_SRC_OFF, &new_ip, 0).map_err(|_| ())?;
     ctx.store(IP6_L4_OFF, &new_port, 0).map_err(|_| ())?;
+    stat_inc(STAT_L4_SNAT);
     Ok(())
 }
 
@@ -586,9 +605,11 @@ fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
     };
 
     if fib.flags & FIB_F_BLACKHOLE != 0 {
+        stat_inc(STAT_DROP);
         return Ok(TC_ACT_SHOT as i32);
     }
     if fib.flags & FIB_F_LOCAL != 0 {
+        stat_inc(STAT_L3_LOCAL);
         return Ok(TC_ACT_PIPE as i32); // destined to us
     }
 
@@ -634,6 +655,7 @@ fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
     } else {
         dst
     };
+    stat_inc(STAT_L3V4_FORWARD);
     let mut params = bpf_redir_neigh {
         nh_family: AF_INET,
         __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
@@ -659,9 +681,11 @@ fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
         None => return Ok(TC_ACT_PIPE as i32),
     };
     if fib.flags & FIB_F_BLACKHOLE != 0 {
+        stat_inc(STAT_DROP);
         return Ok(TC_ACT_SHOT as i32);
     }
     if fib.flags & FIB_F_LOCAL != 0 {
+        stat_inc(STAT_L3_LOCAL);
         return Ok(TC_ACT_PIPE as i32); // destined to us
     }
 
@@ -693,6 +717,7 @@ fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
     } else {
         dst
     };
+    stat_inc(STAT_L3V6_FORWARD);
     let mut params = bpf_redir_neigh {
         nh_family: AF_INET6,
         __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
