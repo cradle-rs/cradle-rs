@@ -1,10 +1,10 @@
-//! Static JSON configuration — the Phase-1 route-injection mechanism.
+//! Static JSON configuration — the Phase-1/2 injection mechanism.
 //!
 //! This is deliberately simple; it will be superseded by the gRPC/unix-socket
 //! API and ultimately by the zebra-rs control plane. The shape maps directly to
 //! [`Dataplane`] operations.
 
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
@@ -28,9 +28,12 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct Port {
     pub name: String,
-    /// Routed (L3) port — the datapath classifier is attached to its ingress.
+    /// Routed (L3) port. If false, the port is an L2 bridge member in `vlan`.
     #[serde(default)]
     pub l3: bool,
+    /// L2 bridge/VLAN domain id (for non-L3 ports).
+    #[serde(default)]
+    pub vlan: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,19 +69,37 @@ impl Config {
         serde_json::from_str(&s).with_context(|| format!("parsing config {}", path.display()))
     }
 
-    /// L3 ports the datapath classifier should be attached to.
-    pub fn l3_ports(&self) -> impl Iterator<Item = &str> {
-        self.ports.iter().filter(|p| p.l3).map(|p| p.name.as_str())
+    /// Every managed port — the datapath classifier is attached to each one's
+    /// ingress (both L2 and L3 ports need it).
+    pub fn port_names(&self) -> impl Iterator<Item = &str> {
+        self.ports.iter().map(|p| p.name.as_str())
     }
 
     /// Program the data plane from this configuration.
     pub fn apply(&self, dp: &mut Dataplane) -> Result<()> {
+        // Ports.
         for p in &self.ports {
             let ifindex = util::ifindex_of(&p.name)?;
             let mac = util::mac_of(&p.name)?;
             let flags = if p.l3 { PORT_F_L3 } else { PORT_F_L2 };
-            dp.port_set(ifindex, mac, flags)?;
+            dp.port_set(ifindex, mac, flags, p.vlan)?;
         }
+
+        // L2 domains: group non-L3 ports by VLAN and register the member sets.
+        let mut domains: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+        for p in &self.ports {
+            if !p.l3 {
+                domains
+                    .entry(p.vlan)
+                    .or_default()
+                    .push(util::ifindex_of(&p.name)?);
+            }
+        }
+        for (vlan, members) in &domains {
+            dp.l2_domain_set(*vlan, members)?;
+        }
+
+        // L3: nexthops, neighbors, routes.
         for nh in &self.nexthops {
             let oif = util::ifindex_of(&nh.oif)?;
             let gateway = match &nh.gateway {
@@ -100,9 +121,11 @@ impl Config {
             let (addr, len) = util::parse_ipv4_prefix(&r.prefix)?;
             dp.route4_add(addr, len, r.nexthop, 0)?;
         }
+
         info!(
-            "programmed dataplane: {} ports, {} nexthops, {} neighbors, {} routes",
+            "programmed dataplane: {} ports, {} L2 domains, {} nexthops, {} neighbors, {} routes",
             self.ports.len(),
+            domains.len(),
             self.nexthops.len(),
             self.neighbors.len(),
             self.routes.len()

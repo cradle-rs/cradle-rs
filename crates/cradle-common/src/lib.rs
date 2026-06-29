@@ -98,6 +98,16 @@ pub struct FdbEntry {
 /// This MAC is one of ours — punt the frame up to L3 / the host stack.
 pub const FDB_F_LOCAL: u32 = 1 << 0;
 
+/// Membership of an L2 (VLAN/bridge) domain — enumerates the ports a BUM or
+/// unknown-unicast frame is flooded to. Keyed by `(vlan, slot)` where `slot` is
+/// a dense index `0..count` (the count is held in a separate per-VLAN map).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct L2MemberKey {
+    pub vlan: u16,
+    pub slot: u16,
+}
+
 /// Per-port configuration (keyed by ifindex), shared by the L2 and L3 stages.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -199,7 +209,7 @@ mod user {
 
     pod!(
         FibEntry, NextHop, Neigh4Key, NeighEntry,
-        FdbKey, FdbEntry, PortConfig,
+        FdbKey, FdbEntry, PortConfig, L2MemberKey,
         ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
     );
 }

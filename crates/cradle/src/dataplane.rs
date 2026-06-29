@@ -3,7 +3,10 @@
 //!
 //! This is the seam the zebra-rs control plane will eventually drive — the
 //! method surface intentionally mirrors zebra-rs's `FibHandle`
-//! (`route_*_add/del`, nexthop sync, neighbor updates).
+//! (`route_*_add/del`, nexthop sync, neighbor updates), plus L2 domain setup.
+//!
+//! The `FDB` map is intentionally *not* taken here: it is populated by the eBPF
+//! data plane via MAC learning, not by user space.
 
 use std::net::Ipv4Addr;
 
@@ -16,7 +19,7 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    FibEntry, Neigh4Key, NeighEntry, NextHop, PortConfig, NEIGH_STATE_REACHABLE,
+    FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, PortConfig, NEIGH_STATE_REACHABLE,
 };
 
 pub struct Dataplane {
@@ -24,6 +27,8 @@ pub struct Dataplane {
     nexthops: HashMap<MapData, u32, NextHop>,
     neigh4: HashMap<MapData, Neigh4Key, NeighEntry>,
     ports: HashMap<MapData, u32, PortConfig>,
+    l2_members: HashMap<MapData, L2MemberKey, u32>,
+    l2_count: HashMap<MapData, u16, u32>,
 }
 
 impl Dataplane {
@@ -37,13 +42,35 @@ impl Dataplane {
             nexthops: HashMap::try_from(bpf.take_map("NEXTHOPS").context("map NEXTHOPS missing")?)?,
             neigh4: HashMap::try_from(bpf.take_map("NEIGH4").context("map NEIGH4 missing")?)?,
             ports: HashMap::try_from(bpf.take_map("PORTS").context("map PORTS missing")?)?,
+            l2_members: HashMap::try_from(
+                bpf.take_map("L2_MEMBERS").context("map L2_MEMBERS missing")?,
+            )?,
+            l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
         })
     }
 
-    /// Register an interface (by ifindex) with its MAC and `PORT_F_*` flags.
-    pub fn port_set(&mut self, ifindex: u32, mac: [u8; 6], flags: u32) -> Result<()> {
+    /// Register an interface (by ifindex) with its MAC, `PORT_F_*` flags, and
+    /// L2 VLAN/bridge domain.
+    pub fn port_set(&mut self, ifindex: u32, mac: [u8; 6], flags: u32, vlan: u16) -> Result<()> {
         self.ports
-            .insert(ifindex, PortConfig { mac, vlan: 0, flags }, 0)?;
+            .insert(ifindex, PortConfig { mac, vlan, flags }, 0)?;
+        Ok(())
+    }
+
+    /// Define the member ports of an L2 (VLAN/bridge) domain. Frames are flooded
+    /// to these ports (minus the ingress) on BUM / unknown unicast.
+    pub fn l2_domain_set(&mut self, vlan: u16, members: &[u32]) -> Result<()> {
+        self.l2_count.insert(vlan, members.len() as u32, 0)?;
+        for (slot, &ifindex) in members.iter().enumerate() {
+            self.l2_members.insert(
+                L2MemberKey {
+                    vlan,
+                    slot: slot as u16,
+                },
+                ifindex,
+                0,
+            )?;
+        }
         Ok(())
     }
 
@@ -70,8 +97,7 @@ impl Dataplane {
         flags: u32,
     ) -> Result<()> {
         let key = Key::new(prefix_len as u32, addr.octets());
-        self.fib4
-            .insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+        self.fib4.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
         Ok(())
     }
 

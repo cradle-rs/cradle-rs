@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     // Attach to every L3 port from the config, plus any explicit --iface.
     let mut attach: Vec<String> = Vec::new();
     if let Some(cfg) = &cfg {
-        attach.extend(cfg.l3_ports().map(str::to_owned));
+        attach.extend(cfg.port_names().map(str::to_owned));
     }
     attach.extend(cli.iface.iter().cloned());
     if attach.is_empty() {
