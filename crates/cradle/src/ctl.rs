@@ -2,21 +2,20 @@
 //! cradle over the gRPC control API (the same operations the in-process
 //! bootstrap performs, exercised across the wire).
 
-use std::net::SocketAddr;
-
 use anyhow::{Context as _, Result};
 
 use crate::{
     config::{self, Config},
+    grpc::GrpcEndpoint,
     pb::{self, cradle_client::CradleClient},
     CtlOp,
 };
 
-pub async fn run(addr: SocketAddr, op: CtlOp) -> Result<()> {
-    let endpoint = format!("http://{addr}");
-    let mut client = CradleClient::connect(endpoint)
+pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
+    let uri = endpoint.connect_uri();
+    let mut client = CradleClient::connect(uri.clone())
         .await
-        .with_context(|| format!("connecting to {addr}"))?;
+        .with_context(|| format!("connecting to {uri}"))?;
 
     match op {
         CtlOp::Apply { config } => {
@@ -87,7 +86,7 @@ pub async fn run(addr: SocketAddr, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
-            println!("applied {} to {addr} via gRPC", config.display());
+            println!("applied {} to {uri} via gRPC", config.display());
         }
     }
     Ok(())

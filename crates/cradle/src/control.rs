@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashSet,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
 
@@ -22,6 +22,7 @@ use tracing::{info, warn};
 
 use crate::{
     dataplane::Dataplane,
+    grpc::GrpcEndpoint,
     pb::{
         self,
         cradle_server::{Cradle, CradleServer},
@@ -185,16 +186,33 @@ impl Control {
         Ok(())
     }
 
-    /// Serve the gRPC control API until Ctrl-C.
-    pub async fn serve(self, addr: SocketAddr) -> Result<()> {
-        info!("serving gRPC control API on {addr}");
-        Server::builder()
-            .add_service(CradleServer::new(GrpcService { control: self }))
-            .serve_with_shutdown(addr, async {
-                let _ = tokio::signal::ctrl_c().await;
-                info!("shutdown signal received");
-            })
-            .await?;
+    /// Serve the gRPC control API (TCP or unix socket) until Ctrl-C.
+    pub async fn serve(self, endpoint: GrpcEndpoint) -> Result<()> {
+        let svc = CradleServer::new(GrpcService { control: self });
+        let shutdown = async {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("shutdown signal received");
+        };
+        match endpoint {
+            GrpcEndpoint::Tcp(addr) => {
+                info!("serving gRPC control API on tcp {addr}");
+                Server::builder()
+                    .add_service(svc)
+                    .serve_with_shutdown(addr, shutdown)
+                    .await?;
+            }
+            GrpcEndpoint::Uds(path) => {
+                let _ = std::fs::remove_file(&path); // clear a stale socket
+                info!("serving gRPC control API on unix {}", path.display());
+                let uds = tokio::net::UnixListener::bind(&path)
+                    .with_context(|| format!("binding {}", path.display()))?;
+                let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
+                Server::builder()
+                    .add_service(svc)
+                    .serve_with_incoming_shutdown(incoming, shutdown)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }

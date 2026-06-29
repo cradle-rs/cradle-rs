@@ -16,6 +16,7 @@ cradle-common = { workspace = true, features = ["user"] }
 aya = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

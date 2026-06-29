@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CRADLE="${CRADLE:-$ROOT/target/debug/cradle}"
 ZEBRA="${ZEBRA:-/home/kunihiro/zebra-rs/target/debug/zebra-rs}"
 YANG="${YANG:-/home/kunihiro/zebra-rs/zebra-rs/yang}"
-GRPC="127.0.0.1:50151"
+SOCK="$(mktemp -u --suffix=.sock)"; GRPC="unix:$SOCK"
 CL=zb_cl; FWD=zb_fwd; SRV=zb_srv
 CCFG="$(mktemp)"; ZCFG="$(mktemp --suffix=.yaml)"; CLOG="$(mktemp)"; ZLOG="$(mktemp)"
 CRADLE_PID=""; ZEBRA_PID=""
@@ -26,7 +26,7 @@ cleanup() {
     [ -n "$CRADLE_PID" ] && kill "$CRADLE_PID" 2>/dev/null || true
     [ -n "$ZEBRA_PID" ] && kill "$ZEBRA_PID" 2>/dev/null || true
     for n in "$CL" "$FWD" "$SRV"; do ip netns del "$n" 2>/dev/null || true; done
-    rm -f "$CCFG" "$ZCFG" "$CLOG" "$ZLOG"
+    rm -f "$CCFG" "$ZCFG" "$CLOG" "$SOCK" "$ZLOG"
 }
 trap cleanup EXIT
 cleanup

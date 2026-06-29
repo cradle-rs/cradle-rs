@@ -9,18 +9,19 @@ mod config;
 mod control;
 mod ctl;
 mod dataplane;
+mod grpc;
 mod kernel;
 mod pb;
 mod util;
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use aya::programs::SchedClassifier;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use crate::{config::Config, control::Control, dataplane::Dataplane};
+use crate::{config::Config, control::Control, dataplane::Dataplane, grpc::GrpcEndpoint};
 
 #[derive(Debug, Parser)]
 #[command(name = "cradle", version, about = "cradle-rs eBPF L2/L3/L4 data plane")]
@@ -43,16 +44,17 @@ struct ServeArgs {
     /// Bootstrap JSON config applied at startup.
     #[arg(short, long)]
     config: Option<PathBuf>,
-    /// Serve the gRPC control API on this TCP address (e.g. 127.0.0.1:50151).
+    /// Serve the gRPC control API. `unix:/path/to.sock` or `tcp:127.0.0.1:50151`
+    /// (a bare `host:port` is treated as TCP).
     #[arg(short, long)]
-    grpc: Option<SocketAddr>,
+    grpc: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 struct CtlArgs {
-    /// gRPC server address (e.g. 127.0.0.1:50151).
+    /// gRPC server endpoint: `unix:/path/to.sock` or `tcp:127.0.0.1:50151`.
     #[arg(short, long)]
-    grpc: SocketAddr,
+    grpc: String,
     #[command(subcommand)]
     op: CtlOp,
 }
@@ -77,7 +79,7 @@ async fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Serve(args) => serve(args).await,
-        Cmd::Ctl(args) => ctl::run(args.grpc, args.op).await,
+        Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
     }
 }
 
@@ -104,7 +106,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
 
     match args.grpc {
-        Some(addr) => control.serve(addr).await?, // runs until Ctrl-C
+        Some(s) => control.serve(GrpcEndpoint::parse(&s)?).await?, // runs until Ctrl-C
         None => {
             info!("cradle running — press Ctrl-C to exit");
             tokio::signal::ctrl_c().await?;

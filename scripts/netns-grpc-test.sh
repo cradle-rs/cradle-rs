@@ -11,14 +11,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CRADLE="${CRADLE:-$ROOT/target/debug/cradle}"
-GRPC="127.0.0.1:50151"
+SOCK="$(mktemp -u --suffix=.sock)"; GRPC="unix:$SOCK"
 H1=gr_h1; H2=gr_h2; FWD=gr_fwd
 CFG="$(mktemp)"; LOG="$(mktemp)"; CRADLE_PID=""
 
 cleanup() {
     [ -n "$CRADLE_PID" ] && kill "$CRADLE_PID" 2>/dev/null || true
     for n in "$H1" "$H2" "$FWD"; do ip netns del "$n" 2>/dev/null || true; done
-    rm -f "$CFG" "$LOG"
+    rm -f "$CFG" "$LOG" "$SOCK"
 }
 trap cleanup EXIT
 cleanup
