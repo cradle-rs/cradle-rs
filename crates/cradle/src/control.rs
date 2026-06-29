@@ -75,7 +75,13 @@ impl Control {
         };
         let flags = if l3 { PORT_F_L3 } else { PORT_F_L2 };
         self.attach(name, ifindex).await?;
-        self.dp.lock().await.port_set(ifindex, mac, flags, vlan)?;
+        let mut dp = self.dp.lock().await;
+        dp.port_set(ifindex, mac, flags, vlan)?;
+        // Routed ports auto-derive their local + connected routes from the
+        // kernel, so no manual route/neighbor config is needed.
+        if l3 {
+            crate::kernel::derive_port(&mut dp, name, ifindex)?;
+        }
         Ok(())
     }
 

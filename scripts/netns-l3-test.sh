@@ -53,9 +53,7 @@ H2MAC="$(ip -n "$H2" -br link show h2eth | awk '{print $3}')"
 
 cat > "$CFG" <<EOF
 {
-  "ports":     [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true} ],
-  "nexthops":  [ {"id":1,"oif":"fwd1"}, {"id":2,"oif":"fwd2"} ],
-  "routes":    [ {"prefix":"10.0.1.0/24","nexthop":1}, {"prefix":"10.0.2.0/24","nexthop":2} ]
+  "ports": [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true} ]
 }
 EOF
 

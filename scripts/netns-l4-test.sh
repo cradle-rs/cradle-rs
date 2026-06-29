@@ -65,10 +65,6 @@ echo "backend-2" > "$WWW/b2/index.html"
 cat > "$CFG" <<EOF
 {
   "ports":     [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true}, {"name":"fwd3","l3":true} ],
-  "nexthops":  [ {"id":1,"oif":"fwd1"}, {"id":2,"oif":"fwd2"}, {"id":3,"oif":"fwd3"} ],
-  "routes":    [ {"prefix":"10.0.1.0/24","nexthop":1},
-                 {"prefix":"10.0.2.0/24","nexthop":2},
-                 {"prefix":"10.0.3.0/24","nexthop":3} ],
   "services":  [ {"vip":"10.0.9.9","port":8080,"proto":"tcp",
                   "backends":[ {"ip":"10.0.2.1","port":8080}, {"ip":"10.0.3.1","port":8080} ]} ]
 }

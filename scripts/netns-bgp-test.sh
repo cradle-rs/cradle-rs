@@ -49,13 +49,12 @@ PEERMAC=$(ip -n "$PEER" -br link show peereth | awk '{print $3}')
 
 cat > "$CCFG" <<EOF
 {
-  "ports":     [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true} ],
-  "nexthops":  [ {"id":100,"oif":"fwd1"}, {"id":101,"oif":"fwd2"} ],
-  "routes":    [ {"prefix":"10.0.1.0/24","nexthop":100}, {"prefix":"10.0.2.0/24","nexthop":101} ]
+  "ports": [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true} ]
 }
 EOF
-# Note: no static neighbors — the eBPF datapath uses bpf_redirect_neigh, so the
-# kernel resolves next-hop MACs (cradle can't ARP itself).
+# Bootstrap declares only the L3 ports: cradle auto-derives their connected +
+# local routes from the kernel, the kernel resolves next-hop MACs
+# (bpf_redirect_neigh), and zebra-rs supplies the BGP route over gRPC.
 
 cat > "$ZFWD" <<'EOF'
 router:

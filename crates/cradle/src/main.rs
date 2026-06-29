@@ -9,6 +9,7 @@ mod config;
 mod control;
 mod ctl;
 mod dataplane;
+mod kernel;
 mod pb;
 mod util;
 
