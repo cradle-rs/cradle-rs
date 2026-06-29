@@ -1,0 +1,33 @@
+[package]
+name = "cradle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "cradle-rs user-space control plane: loads/attaches the eBPF data plane and programs its maps"
+default-run = "cradle"
+
+[[bin]]
+name = "cradle"
+path = "src/main.rs"
+
+[dependencies]
+cradle-common = { workspace = true, features = ["user"] }
+aya = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+aya-build = { workspace = true }
+tonic-prost-build = { workspace = true }
+anyhow = { workspace = true }

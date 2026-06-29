@@ -1,0 +1,20 @@
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.2.2
+    neighbor:
+    - remote-address: 10.0.2.254
+      transport:
+        passive-mode: true
+      timers:
+        connect-retry-time: 5
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.9.9.0/24

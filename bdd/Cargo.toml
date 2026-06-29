@@ -1,0 +1,21 @@
+[package]
+name = "cradle-bdd"
+version.workspace = true
+# zebra-rs's BDD framework (copied here) uses let-chains, so this crate is on
+# edition 2024 (the rest of the workspace is 2021).
+edition = "2024"
+license.workspace = true
+description = "BDD (cucumber) tests for cradle-rs over network namespaces"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs", "time"] }
+
+[dev-dependencies]
+serde_json = "1"
+cucumber = { version = "0.23", features = ["output-json"] }
+futures = "0.3"
+
+[[test]]
+name = "cucumber"
+harness = false

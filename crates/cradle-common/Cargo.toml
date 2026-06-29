@@ -1,0 +1,16 @@
+[package]
+name = "cradle-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared data-plane contract (eBPF map key/value types) for cradle-rs"
+
+[dependencies]
+# Pulled in only for the user-space build to derive `aya::Pod`; the eBPF
+# (`no_std`) build never enables this feature.
+aya = { workspace = true, optional = true }
+
+[features]
+default = []
+user = ["dep:aya"]

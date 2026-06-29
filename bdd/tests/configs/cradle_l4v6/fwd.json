@@ -1,0 +1,3 @@
+{ "ports": [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true}, {"name":"fwd3","l3":true} ],
+  "services": [ {"vip":"2001:db8:9::9","port":8080,"proto":"tcp",
+                 "backends":[ {"ip":"2001:db8:2::1","port":8080}, {"ip":"2001:db8:3::1","port":8080} ]} ] }
