@@ -1,6 +1,9 @@
 //! Small helpers: resolve interface names, parse MACs and IPv4 prefixes.
 
-use std::{fs, net::Ipv4Addr};
+use std::{
+    fs,
+    net::{Ipv4Addr, Ipv6Addr},
+};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 
@@ -60,6 +63,19 @@ pub fn parse_ipv4_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
     let len: u8 = len.parse().with_context(|| format!("bad prefix length {len:?}"))?;
     if len > 32 {
         bail!("IPv4 prefix length {len} > 32");
+    }
+    Ok((addr, len))
+}
+
+/// Parse `addr/len` into an IPv6 address and prefix length.
+pub fn parse_ipv6_prefix(s: &str) -> Result<(Ipv6Addr, u8)> {
+    let (addr, len) = s
+        .split_once('/')
+        .ok_or_else(|| anyhow!("missing '/' in prefix {s:?}"))?;
+    let addr: Ipv6Addr = addr.parse().with_context(|| format!("bad IPv6 {addr:?}"))?;
+    let len: u8 = len.parse().with_context(|| format!("bad prefix length {len:?}"))?;
+    if len > 128 {
+        bail!("IPv6 prefix length {len} > 128");
     }
     Ok((addr, len))
 }

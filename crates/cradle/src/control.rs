@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashSet,
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 
@@ -130,6 +130,35 @@ impl Control {
         Ok(())
     }
 
+    pub async fn set_nexthop_idx_v6(
+        &self,
+        id: u32,
+        gateway: Option<Ipv6Addr>,
+        oif: u32,
+    ) -> Result<()> {
+        self.dp.lock().await.nexthop_set_v6(id, gateway, oif)?;
+        Ok(())
+    }
+
+    pub async fn add_route6(
+        &self,
+        addr: Ipv6Addr,
+        prefix_len: u8,
+        nexthop_id: u32,
+        flags: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .route6_add(addr, prefix_len, nexthop_id, flags)?;
+        Ok(())
+    }
+
+    pub async fn del_route6(&self, addr: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.route6_del(addr, prefix_len)?;
+        Ok(())
+    }
+
     pub async fn set_neighbor4(&self, oif: &str, ip: Ipv4Addr, mac: [u8; 6]) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
         self.dp.lock().await.neigh4_set(oif, ip, mac)?;
@@ -198,18 +227,35 @@ impl Cradle for GrpcService {
 
     async fn set_nexthop(&self, req: Request<pb::Nexthop>) -> Result<Response<pb::Empty>, Status> {
         let n = req.into_inner();
-        let gw = if n.gateway.is_empty() {
-            None
-        } else {
-            Some(n.gateway.parse().map_err(st)?)
-        };
-        if n.oif_index != 0 {
+        if n.v6 {
+            let gw = if n.gateway.is_empty() {
+                None
+            } else {
+                Some(n.gateway.parse::<Ipv6Addr>().map_err(st)?)
+            };
+            let oif = if n.oif_index != 0 {
+                n.oif_index
+            } else {
+                util::ifindex_of(&n.oif).map_err(st)?
+            };
             self.control
-                .set_nexthop_idx(n.id, gw, n.oif_index)
+                .set_nexthop_idx_v6(n.id, gw, oif)
                 .await
                 .map_err(st)?;
         } else {
-            self.control.set_nexthop(n.id, gw, &n.oif).await.map_err(st)?;
+            let gw = if n.gateway.is_empty() {
+                None
+            } else {
+                Some(n.gateway.parse::<Ipv4Addr>().map_err(st)?)
+            };
+            if n.oif_index != 0 {
+                self.control
+                    .set_nexthop_idx(n.id, gw, n.oif_index)
+                    .await
+                    .map_err(st)?;
+            } else {
+                self.control.set_nexthop(n.id, gw, &n.oif).await.map_err(st)?;
+            }
         }
         Ok(Response::new(pb::Empty {}))
     }
@@ -228,6 +274,23 @@ impl Cradle for GrpcService {
         let r = req.into_inner();
         let (addr, len) = util::parse_ipv4_prefix(&r.prefix).map_err(st)?;
         self.control.del_route4(addr, len).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_route6(&self, req: Request<pb::Route6>) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let (addr, len) = util::parse_ipv6_prefix(&r.prefix).map_err(st)?;
+        self.control
+            .add_route6(addr, len, r.nexthop_id, r.flags)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_route6(&self, req: Request<pb::Route6Del>) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let (addr, len) = util::parse_ipv6_prefix(&r.prefix).map_err(st)?;
+        self.control.del_route6(addr, len).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

@@ -27,6 +27,7 @@ message Nexthop {
   string gateway = 2;     // empty => on-link / connected
   string oif = 3;         // output interface name (used when oif_index == 0)
   uint32 oif_index = 4;   // output ifindex; preferred when non-zero
+  bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
 }
 
 message Route4 {
@@ -36,6 +37,16 @@ message Route4 {
 }
 
 message Route4Del {
+  string prefix = 1;
+}
+
+message Route6 {
+  string prefix = 1;   // "addr/len"
+  uint32 nexthop_id = 2;
+  uint32 flags = 3;
+}
+
+message Route6Del {
   string prefix = 1;
 }
 
@@ -64,6 +75,8 @@ service Cradle {
   rpc SetNexthop(Nexthop) returns (Empty);
   rpc AddRoute4(Route4) returns (Empty);
   rpc DelRoute4(Route4Del) returns (Empty);
+  rpc AddRoute6(Route6) returns (Empty);
+  rpc DelRoute6(Route6Del) returns (Empty);
   rpc SetNeighbor4(Neighbor4) returns (Empty);
   rpc AddService(Service) returns (Empty);
 }

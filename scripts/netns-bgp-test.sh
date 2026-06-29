@@ -64,6 +64,8 @@ router:
       router-id: 10.0.2.254
     neighbor:
     - remote-address: 10.0.2.2
+      timers:
+        connect-retry-time: 5
       afi-safi:
       - name: ipv4
         enabled: true
@@ -79,6 +81,10 @@ router:
       router-id: 10.0.2.2
     neighbor:
     - remote-address: 10.0.2.254
+      transport:
+        passive-mode: true
+      timers:
+        connect-retry-time: 5
       afi-safi:
       - name: ipv4
         enabled: true
@@ -104,12 +110,13 @@ echo "OK"
 
 echo "== start zebra-rs on peer (AS65002, originates 10.9.9.0/24) =="
 ZPEER_PID=$(zebra "$PEER" "$ZPEER" "" "$ZPLOG")
+sleep 2  # let the peer's BGP listener come up before fwd connects (avoid connect-retry backoff)
 echo "== start zebra-rs on fwd (AS65001, CRADLE_GRPC tee) =="
 ZFWD_PID=$(zebra "$FWD" "$ZFWD" "CRADLE_GRPC=$GRPC" "$ZFLOG")
 
 echo "== wait for eBGP to converge and the route to reach the eBPF FIB =="
 ok=0
-for i in $(seq 1 20); do
+for i in $(seq 1 40); do
     if ip netns exec "$FWD" bpftool map dump name FIB4 2>/dev/null | grep -q '0a 09 09 00'; then ok=1; break; fi
     sleep 1
 done
