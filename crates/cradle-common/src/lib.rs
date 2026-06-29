@@ -214,6 +214,49 @@ pub const CT_F_DNAT: u16 = 1 << 0;
 /// Rewrite the source to `(rev_addr, rev_port)` (reverse / SNAT direction).
 pub const CT_F_SNAT: u16 = 1 << 1;
 
+// --- L4 IPv6 (mirrors the IPv4 types with 16-byte addresses) ---
+
+/// IPv6 service frontend (VIP:port/proto).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ServiceKey6 {
+    pub vip: [u8; 16],
+    pub port: u16,
+    pub proto: u8,
+    pub _pad: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Backend6 {
+    pub addr: [u8; 16],
+    pub port: u16,
+    pub flags: u16,
+}
+
+/// Connection-tracking key: a normalised IPv6 5-tuple. (Reuses `ServiceInfo`
+/// and `BackendKey` from the v4 types — those are address-family agnostic.)
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CtKey6 {
+    pub src: [u8; 16],
+    pub dst: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CtEntry6 {
+    pub rev_addr: [u8; 16],
+    pub rev_port: u16,
+    /// `CT_F_*`.
+    pub flags: u16,
+    pub last_seen: u64,
+}
+
 // ============================ user-space Pod impls =========================
 
 #[cfg(feature = "user")]
@@ -230,5 +273,6 @@ mod user {
         FibEntry, NextHop, Neigh4Key, NeighEntry, NhGroupKey,
         FdbKey, FdbEntry, PortConfig, L2MemberKey,
         ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
+        ServiceKey6, Backend6, CtKey6, CtEntry6,
     );
 }

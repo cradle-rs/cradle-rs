@@ -28,9 +28,10 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use cradle_common::{
-    Backend, BackendKey, CtEntry, CtKey, FdbEntry, FdbKey, FibEntry, L2MemberKey, Neigh4Key,
-    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, CT_F_DNAT, CT_F_SNAT,
-    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, PORT_F_L2, PORT_F_L3,
+    Backend, Backend6, BackendKey, CtEntry, CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry,
+    L2MemberKey, Neigh4Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
+    ServiceKey6, CT_F_DNAT, CT_F_SNAT, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, PORT_F_L2,
+    PORT_F_L3,
 };
 use network_types::eth::EthHdr;
 
@@ -68,6 +69,13 @@ static SERVICES: HashMap<ServiceKey, ServiceInfo> = HashMap::with_max_entries(10
 static BACKENDS: HashMap<BackendKey, Backend> = HashMap::with_max_entries(8192, 0);
 #[map]
 static CT: LruHashMap<CtKey, CtEntry> = LruHashMap::with_max_entries(65536, 0);
+// L4 IPv6
+#[map]
+static SERVICES6: HashMap<ServiceKey6, ServiceInfo> = HashMap::with_max_entries(1024, 0);
+#[map]
+static BACKENDS6: HashMap<BackendKey, Backend6> = HashMap::with_max_entries(8192, 0);
+#[map]
+static CT6: LruHashMap<CtKey6, CtEntry6> = LruHashMap::with_max_entries(65536, 0);
 
 /// Upper bound on flood fan-out per VLAN (also bounds the verifier's loop).
 const MAX_L2_MEMBERS: u16 = 64;
@@ -191,9 +199,15 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16) -> i32 {
 #[inline(always)]
 fn l4_nat(ctx: &TcContext) -> Result<(), ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
-    if u16::from_be(ethertype) != ETH_P_IP {
-        return Ok(());
+    match u16::from_be(ethertype) {
+        ETH_P_IP => l4_nat_v4(ctx),
+        ETH_P_IPV6 => l4_nat_v6(ctx),
+        _ => Ok(()),
     }
+}
+
+#[inline(always)]
+fn l4_nat_v4(ctx: &TcContext) -> Result<(), ()> {
     let ver_ihl: u8 = ctx.load(IP_VER_IHL_OFF).map_err(|_| ())?;
     if ver_ihl & 0x0f != 5 {
         return Ok(()); // IPv4 options present: skip NAT
@@ -343,6 +357,158 @@ fn snat(
         .map_err(|_| ())?;
     ctx.store(IP_SRC_OFF, &new_ip, 0).map_err(|_| ())?;
     ctx.store(L4_OFF, &new_port, 0).map_err(|_| ())?;
+    Ok(())
+}
+
+// ------------------------------ L4 IPv6 ------------------------------------
+
+#[inline(always)]
+fn l4_nat_v6(ctx: &TcContext) -> Result<(), ()> {
+    let proto: u8 = ctx.load(IP6_NEXTHDR_OFF).map_err(|_| ())?;
+    if proto != IPPROTO_TCP && proto != IPPROTO_UDP {
+        return Ok(());
+    }
+    let src: [u8; 16] = ctx.load(IP6_SRC_OFF).map_err(|_| ())?;
+    let dst: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
+    let sport: u16 = ctx.load(IP6_L4_OFF).map_err(|_| ())?;
+    let dport: u16 = ctx.load(IP6_L4_OFF + 2).map_err(|_| ())?;
+
+    let key = CtKey6 {
+        src,
+        dst,
+        src_port: sport,
+        dst_port: dport,
+        proto,
+        _pad: [0; 3],
+    };
+    if let Some(ct) = CT6.get_ptr(&key) {
+        let ct = unsafe { *ct };
+        if ct.flags & CT_F_DNAT != 0 {
+            dnat6(ctx, proto, dst, ct.rev_addr, dport, ct.rev_port)?;
+        } else if ct.flags & CT_F_SNAT != 0 {
+            snat6(ctx, proto, src, ct.rev_addr, sport, ct.rev_port)?;
+        }
+        return Ok(());
+    }
+
+    let svc = match SERVICES6.get_ptr(&ServiceKey6 {
+        vip: dst,
+        port: dport,
+        proto,
+        _pad: 0,
+    }) {
+        Some(s) => unsafe { *s },
+        None => return Ok(()),
+    };
+    if svc.backend_count == 0 {
+        return Ok(());
+    }
+    let slot = (unsafe { bpf_get_prandom_u32() } % svc.backend_count as u32) as u16;
+    let be = match BACKENDS6.get_ptr(&BackendKey {
+        svc_id: svc.svc_id,
+        slot,
+        _pad: 0,
+    }) {
+        Some(b) => unsafe { *b },
+        None => return Ok(()),
+    };
+
+    let now = unsafe { bpf_ktime_get_ns() };
+    let _ = CT6.insert(
+        &key,
+        &CtEntry6 {
+            rev_addr: be.addr,
+            rev_port: be.port,
+            flags: CT_F_DNAT,
+            last_seen: now,
+        },
+        0,
+    );
+    let rkey = CtKey6 {
+        src: be.addr,
+        dst: src,
+        src_port: be.port,
+        dst_port: sport,
+        proto,
+        _pad: [0; 3],
+    };
+    let _ = CT6.insert(
+        &rkey,
+        &CtEntry6 {
+            rev_addr: dst,
+            rev_port: dport,
+            flags: CT_F_SNAT,
+            last_seen: now,
+        },
+        0,
+    );
+
+    dnat6(ctx, proto, dst, be.addr, dport, be.port)
+}
+
+/// Rewrite the IPv6 destination address+port and fix the L4 checksum (IPv6 has
+/// no header checksum; the pseudo-header covers the 16-byte address).
+#[inline(always)]
+fn dnat6(
+    ctx: &TcContext,
+    proto: u8,
+    old_ip: [u8; 16],
+    new_ip: [u8; 16],
+    old_port: u16,
+    new_port: u16,
+) -> Result<(), ()> {
+    v6_csum_fixup(ctx, proto, old_ip, new_ip, old_port, new_port)?;
+    ctx.store(IP6_DST_OFF, &new_ip, 0).map_err(|_| ())?;
+    ctx.store(IP6_L4_OFF + 2, &new_port, 0).map_err(|_| ())?;
+    Ok(())
+}
+
+/// Rewrite the IPv6 source address+port and fix the L4 checksum.
+#[inline(always)]
+fn snat6(
+    ctx: &TcContext,
+    proto: u8,
+    old_ip: [u8; 16],
+    new_ip: [u8; 16],
+    old_port: u16,
+    new_port: u16,
+) -> Result<(), ()> {
+    v6_csum_fixup(ctx, proto, old_ip, new_ip, old_port, new_port)?;
+    ctx.store(IP6_SRC_OFF, &new_ip, 0).map_err(|_| ())?;
+    ctx.store(IP6_L4_OFF, &new_port, 0).map_err(|_| ())?;
+    Ok(())
+}
+
+/// Patch the L4 checksum for a 16-byte address change (4 pseudo-header words)
+/// plus a port change. Shared by dnat6/snat6 — the checksum is updated by the
+/// delta of whichever fields changed, regardless of src vs dst.
+#[inline(always)]
+fn v6_csum_fixup(
+    ctx: &TcContext,
+    proto: u8,
+    old_ip: [u8; 16],
+    new_ip: [u8; 16],
+    old_port: u16,
+    new_port: u16,
+) -> Result<(), ()> {
+    let csum = IP6_L4_OFF + if proto == IPPROTO_TCP { 16 } else { 6 };
+    let mangled = if proto == IPPROTO_UDP {
+        BPF_F_MARK_MANGLED_0
+    } else {
+        0
+    };
+    let ow: [u32; 4] = unsafe { core::mem::transmute(old_ip) };
+    let nw: [u32; 4] = unsafe { core::mem::transmute(new_ip) };
+    ctx.l4_csum_replace(csum, ow[0] as u64, nw[0] as u64, BPF_F_PSEUDO_HDR | 4)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(csum, ow[1] as u64, nw[1] as u64, BPF_F_PSEUDO_HDR | 4)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(csum, ow[2] as u64, nw[2] as u64, BPF_F_PSEUDO_HDR | 4)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(csum, ow[3] as u64, nw[3] as u64, BPF_F_PSEUDO_HDR | 4)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(csum, old_port as u64, new_port as u64, mangled | 2)
+        .map_err(|_| ())?;
     Ok(())
 }
 

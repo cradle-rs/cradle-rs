@@ -19,8 +19,9 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop, NhGroupKey,
-    PortConfig, ServiceInfo, ServiceKey, LB_ALGO_RANDOM, NEIGH_STATE_REACHABLE, NH_F_V6,
+    Backend, Backend6, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop,
+    NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, LB_ALGO_RANDOM,
+    NEIGH_STATE_REACHABLE, NH_F_V6,
 };
 
 use crate::util;
@@ -37,6 +38,8 @@ pub struct Dataplane {
     l2_count: HashMap<MapData, u16, u32>,
     services: HashMap<MapData, ServiceKey, ServiceInfo>,
     backends: HashMap<MapData, BackendKey, Backend>,
+    services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
+    backends6: HashMap<MapData, BackendKey, Backend6>,
 }
 
 impl Dataplane {
@@ -61,6 +64,12 @@ impl Dataplane {
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
             backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
+            services6: HashMap::try_from(
+                bpf.take_map("SERVICES6").context("map SERVICES6 missing")?,
+            )?,
+            backends6: HashMap::try_from(
+                bpf.take_map("BACKENDS6").context("map BACKENDS6 missing")?,
+            )?,
         })
     }
 
@@ -99,6 +108,48 @@ impl Dataplane {
                 },
                 Backend {
                     addr: util::ipv4_to_map(*ip),
+                    port: util::port_to_map(*p),
+                    flags: 0,
+                },
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Install an IPv6 service VIP and its backend set.
+    pub fn service6_add(
+        &mut self,
+        svc_id: u32,
+        vip: Ipv6Addr,
+        port: u16,
+        proto: u8,
+        backends: &[(Ipv6Addr, u16)],
+    ) -> Result<()> {
+        self.services6.insert(
+            ServiceKey6 {
+                vip: vip.octets(),
+                port: util::port_to_map(port),
+                proto,
+                _pad: 0,
+            },
+            ServiceInfo {
+                backend_count: backends.len() as u16,
+                lb_algo: LB_ALGO_RANDOM,
+                flags: 0,
+                svc_id,
+            },
+            0,
+        )?;
+        for (slot, (ip, p)) in backends.iter().enumerate() {
+            self.backends6.insert(
+                BackendKey {
+                    svc_id,
+                    slot: slot as u16,
+                    _pad: 0,
+                },
+                Backend6 {
+                    addr: ip.octets(),
                     port: util::port_to_map(*p),
                     flags: 0,
                 },

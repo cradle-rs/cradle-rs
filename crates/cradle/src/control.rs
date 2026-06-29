@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashSet,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
 
@@ -186,6 +186,21 @@ impl Control {
         Ok(())
     }
 
+    pub async fn add_service6(
+        &self,
+        svc_id: u32,
+        vip: Ipv6Addr,
+        port: u16,
+        proto: u8,
+        backends: &[(Ipv6Addr, u16)],
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .service6_add(svc_id, vip, port, proto, backends)?;
+        Ok(())
+    }
+
     /// Serve the gRPC control API (TCP or unix socket) until Ctrl-C.
     pub async fn serve(self, endpoint: GrpcEndpoint) -> Result<()> {
         let svc = CradleServer::new(GrpcService { control: self });
@@ -345,21 +360,36 @@ impl Cradle for GrpcService {
 
     async fn add_service(&self, req: Request<pb::Service>) -> Result<Response<pb::Empty>, Status> {
         let s = req.into_inner();
-        let vip = s.vip.parse().map_err(st)?;
         let proto = match s.proto.as_str() {
             "tcp" => 6u8,
             "udp" => 17u8,
             other => return Err(Status::invalid_argument(format!("bad proto {other:?}"))),
         };
-        let backends = s
-            .backends
-            .iter()
-            .map(|b| Ok((b.ip.parse().map_err(st)?, b.port as u16)))
-            .collect::<Result<Vec<_>, Status>>()?;
-        self.control
-            .add_service(s.svc_id, vip, s.port as u16, proto, &backends)
-            .await
-            .map_err(st)?;
+        let vip: IpAddr = s.vip.parse().map_err(st)?;
+        match vip {
+            IpAddr::V4(v4) => {
+                let backends = s
+                    .backends
+                    .iter()
+                    .map(|b| Ok((b.ip.parse::<Ipv4Addr>().map_err(st)?, b.port as u16)))
+                    .collect::<Result<Vec<_>, Status>>()?;
+                self.control
+                    .add_service(s.svc_id, v4, s.port as u16, proto, &backends)
+                    .await
+                    .map_err(st)?;
+            }
+            IpAddr::V6(v6) => {
+                let backends = s
+                    .backends
+                    .iter()
+                    .map(|b| Ok((b.ip.parse::<Ipv6Addr>().map_err(st)?, b.port as u16)))
+                    .collect::<Result<Vec<_>, Status>>()?;
+                self.control
+                    .add_service6(s.svc_id, v6, s.port as u16, proto, &backends)
+                    .await
+                    .map_err(st)?;
+            }
+        }
         Ok(Response::new(pb::Empty {}))
     }
 }

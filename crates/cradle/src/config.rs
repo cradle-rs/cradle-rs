@@ -4,7 +4,12 @@
 //! as the payload of `cradle ctl apply` (replayed over gRPC). The shape maps
 //! directly to the control-plane operations.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::Path,
+};
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
@@ -127,17 +132,39 @@ impl Config {
             ctl.add_route4(addr, len, r.nexthop, 0).await?;
         }
         for (i, svc) in self.services.iter().enumerate() {
-            let vip = svc.vip.parse().with_context(|| format!("bad VIP {:?}", svc.vip))?;
             let proto = proto_num(&svc.proto)?;
-            let backends = svc
-                .backends
-                .iter()
-                .map(|b| {
-                    let ip = b.ip.parse().with_context(|| format!("bad backend ip {:?}", b.ip))?;
-                    Ok((ip, b.port))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            ctl.add_service(i as u32 + 1, vip, svc.port, proto, &backends).await?;
+            let svc_id = i as u32 + 1;
+            let vip: IpAddr = svc.vip.parse().with_context(|| format!("bad VIP {:?}", svc.vip))?;
+            match vip {
+                IpAddr::V4(v4) => {
+                    let backends = svc
+                        .backends
+                        .iter()
+                        .map(|b| {
+                            let ip = b
+                                .ip
+                                .parse::<Ipv4Addr>()
+                                .with_context(|| format!("bad backend ip {:?}", b.ip))?;
+                            Ok((ip, b.port))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    ctl.add_service(svc_id, v4, svc.port, proto, &backends).await?;
+                }
+                IpAddr::V6(v6) => {
+                    let backends = svc
+                        .backends
+                        .iter()
+                        .map(|b| {
+                            let ip = b
+                                .ip
+                                .parse::<Ipv6Addr>()
+                                .with_context(|| format!("bad backend ip {:?}", b.ip))?;
+                            Ok((ip, b.port))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    ctl.add_service6(svc_id, v6, svc.port, proto, &backends).await?;
+                }
+            }
         }
 
         info!(
