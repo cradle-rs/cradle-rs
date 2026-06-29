@@ -19,8 +19,10 @@
 //! `u16`. `bpf_l3/l4_csum_replace` consume `from`/`to` in this same order.
 
 use aya_ebpf::{
-    bindings::{TC_ACT_PIPE, TC_ACT_SHOT},
-    helpers::generated::{bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect},
+    bindings::{bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, TC_ACT_PIPE, TC_ACT_SHOT},
+    helpers::generated::{
+        bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh,
+    },
     macros::{classifier, map},
     maps::{lpm_trie::Key, HashMap, LpmTrie, LruHashMap},
     programs::TcContext,
@@ -79,6 +81,7 @@ const L4_OFF: usize = EthHdr::LEN + 20;
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+const AF_INET: u32 = 2;
 const BPF_F_PSEUDO_HDR: u64 = 16;
 const BPF_F_MARK_MANGLED_0: u64 = 32;
 
@@ -353,21 +356,6 @@ fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
     let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&fib.nexthop_id).ok_or(())? };
     let oif = nh.oif;
 
-    let neigh_addr = if nh.gateway_v4 != 0 {
-        nh.gateway_v4
-    } else {
-        u32::from_be_bytes(dst)
-    };
-    let neigh: NeighEntry = unsafe {
-        *NEIGH4
-            .get_ptr(&Neigh4Key {
-                ifindex: oif,
-                addr: neigh_addr,
-            })
-            .ok_or(())?
-    };
-    let port: PortConfig = unsafe { *PORTS.get_ptr(&oif).ok_or(())? };
-
     // Decrement TTL and patch the IPv4 header checksum (RFC 1624 incremental).
     // The 16-bit word at IP offset 8 is [ttl, proto]; on the little-endian BPF
     // target it loads as `ttl | (proto << 8)`, so decrementing the whole word
@@ -383,10 +371,33 @@ fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
     ctx.l3_csum_replace(IP_CSUM_OFF, old_word as u64, new_word as u64, 2)
         .map_err(|_| ())?;
 
-    ctx.store(ETH_DST_OFF, &neigh.mac, 0).map_err(|_| ())?;
-    ctx.store(ETH_SRC_OFF, &port.mac, 0).map_err(|_| ())?;
-
-    Ok(unsafe { bpf_redirect(oif, 0) } as i32)
+    // Let the kernel resolve the L2 neighbor for the next hop and rewrite the
+    // ethernet header for the egress link. The data plane therefore needs no
+    // static ARP table — the kernel's neighbor subsystem (which the kernel and
+    // zebra-rs already populate) supplies the MACs. The next hop is the gateway
+    // for via-routes, or the destination itself for connected routes. The
+    // address bytes are network order; `from_ne_bytes` on the little-endian BPF
+    // target lays them out as the `__be32` the helper expects.
+    let nh_octets: [u8; 4] = if nh.gateway_v4 != 0 {
+        nh.gateway_v4.to_be_bytes()
+    } else {
+        dst
+    };
+    let mut params = bpf_redir_neigh {
+        nh_family: AF_INET,
+        __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
+            ipv4_nh: u32::from_ne_bytes(nh_octets),
+        },
+    };
+    let ret = unsafe {
+        bpf_redirect_neigh(
+            oif,
+            &mut params,
+            core::mem::size_of::<bpf_redir_neigh>() as i32,
+            0,
+        )
+    };
+    Ok(ret as i32)
 }
 
 #[cfg(not(test))]

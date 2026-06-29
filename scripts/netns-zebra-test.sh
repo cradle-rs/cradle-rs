@@ -53,9 +53,7 @@ cat > "$CCFG" <<EOF
 {
   "ports":     [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true} ],
   "nexthops":  [ {"id":100,"oif":"fwd1"}, {"id":101,"oif":"fwd2"} ],
-  "routes":    [ {"prefix":"10.0.1.0/24","nexthop":100}, {"prefix":"10.0.2.0/24","nexthop":101} ],
-  "neighbors": [ {"oif":"fwd1","ip":"10.0.1.1","mac":"$CLMAC"},
-                 {"oif":"fwd2","ip":"10.0.2.1","mac":"$SRVMAC"} ]
+  "routes":    [ {"prefix":"10.0.1.0/24","nexthop":100}, {"prefix":"10.0.2.0/24","nexthop":101} ]
 }
 EOF
 

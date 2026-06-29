@@ -69,9 +69,6 @@ cat > "$CFG" <<EOF
   "routes":    [ {"prefix":"10.0.1.0/24","nexthop":1},
                  {"prefix":"10.0.2.0/24","nexthop":2},
                  {"prefix":"10.0.3.0/24","nexthop":3} ],
-  "neighbors": [ {"oif":"fwd1","ip":"10.0.1.1","mac":"$CLMAC"},
-                 {"oif":"fwd2","ip":"10.0.2.1","mac":"$B1MAC"},
-                 {"oif":"fwd3","ip":"10.0.3.1","mac":"$B2MAC"} ],
   "services":  [ {"vip":"10.0.9.9","port":8080,"proto":"tcp",
                   "backends":[ {"ip":"10.0.2.1","port":8080}, {"ip":"10.0.3.1","port":8080} ]} ]
 }
