@@ -77,6 +77,18 @@ message Service {
   repeated Backend backends = 5;
 }
 
+message StatsRequest {}
+
+// One datapath counter: a packet count at a forwarding decision point.
+message StatEntry {
+  string name = 1;
+  uint64 packets = 2;
+}
+
+message StatsReply {
+  repeated StatEntry entries = 1;
+}
+
 service Cradle {
   rpc SetPort(Port) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
@@ -88,4 +100,5 @@ service Cradle {
   rpc DelRoute6(Route6Del) returns (Empty);
   rpc SetNeighbor4(Neighbor4) returns (Empty);
   rpc AddService(Service) returns (Empty);
+  rpc GetStats(StatsRequest) returns (StatsReply);
 }

@@ -29,7 +29,20 @@ use crate::{
     },
     util,
 };
-use cradle_common::{PORT_F_L2, PORT_F_L3};
+use cradle_common::{PORT_F_L2, PORT_F_L3, STAT_MAX};
+
+/// Display names for the datapath stat counters, indexed by `STAT_*` (must match
+/// the indices defined in `cradle_common`).
+const STAT_NAMES: [&str; STAT_MAX as usize] = [
+    "l2_forward",
+    "l2_flood",
+    "l3v4_forward",
+    "l3v6_forward",
+    "l3_local",
+    "l4_dnat",
+    "l4_snat",
+    "drop",
+];
 
 /// Shared, cheaply-cloneable handle to the data plane.
 #[derive(Clone)]
@@ -199,6 +212,16 @@ impl Control {
             .await
             .service6_add(svc_id, vip, port, proto, backends)?;
         Ok(())
+    }
+
+    /// Snapshot the datapath packet counters as `(name, packets)` pairs.
+    pub async fn stats(&self) -> Result<Vec<(String, u64)>> {
+        let vals = self.dp.lock().await.stats()?;
+        Ok(STAT_NAMES
+            .iter()
+            .zip(vals)
+            .map(|(name, packets)| (name.to_string(), packets))
+            .collect())
     }
 
     /// Serve the gRPC control API (TCP or unix socket) until Ctrl-C.
@@ -391,5 +414,20 @@ impl Cradle for GrpcService {
             }
         }
         Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn get_stats(
+        &self,
+        _req: Request<pb::StatsRequest>,
+    ) -> Result<Response<pb::StatsReply>, Status> {
+        let entries = self
+            .control
+            .stats()
+            .await
+            .map_err(st)?
+            .into_iter()
+            .map(|(name, packets)| pb::StatEntry { name, packets })
+            .collect();
+        Ok(Response::new(pb::StatsReply { entries }))
     }
 }

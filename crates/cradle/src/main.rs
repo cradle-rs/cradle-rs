@@ -69,6 +69,8 @@ pub enum CtlOp {
         /// Path to the JSON config.
         config: PathBuf,
     },
+    /// Dump the data-plane packet counters.
+    Stats,
 }
 
 #[tokio::main]

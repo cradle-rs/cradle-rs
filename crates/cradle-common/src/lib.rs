@@ -257,6 +257,21 @@ pub struct CtEntry6 {
     pub last_seen: u64,
 }
 
+// ============================ observability stats ==========================
+
+// Indices into the per-CPU `STATS` array (u64 packet counters), bumped at each
+// datapath decision point. Keep in sync with `STAT_NAMES` in the cradle crate.
+pub const STAT_L2_FORWARD: u32 = 0;
+pub const STAT_L2_FLOOD: u32 = 1;
+pub const STAT_L3V4_FORWARD: u32 = 2;
+pub const STAT_L3V6_FORWARD: u32 = 3;
+pub const STAT_L3_LOCAL: u32 = 4;
+pub const STAT_L4_DNAT: u32 = 5;
+pub const STAT_L4_SNAT: u32 = 6;
+pub const STAT_DROP: u32 = 7;
+/// Number of stat slots (the `STATS` map's `max_entries`).
+pub const STAT_MAX: u32 = 8;
+
 // ============================ user-space Pod impls =========================
 
 #[cfg(feature = "user")]

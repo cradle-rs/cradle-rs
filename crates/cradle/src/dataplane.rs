@@ -14,14 +14,14 @@ use anyhow::{Context as _, Result};
 use aya::{
     maps::{
         lpm_trie::{Key, LpmTrie},
-        HashMap, MapData,
+        HashMap, MapData, PerCpuArray,
     },
     Ebpf,
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop,
     NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, LB_ALGO_RANDOM,
-    NEIGH_STATE_REACHABLE, NH_F_V6,
+    NEIGH_STATE_REACHABLE, NH_F_V6, STAT_MAX,
 };
 
 use crate::util;
@@ -40,6 +40,7 @@ pub struct Dataplane {
     backends: HashMap<MapData, BackendKey, Backend>,
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
     backends6: HashMap<MapData, BackendKey, Backend6>,
+    stats: PerCpuArray<MapData, u64>,
 }
 
 impl Dataplane {
@@ -70,7 +71,19 @@ impl Dataplane {
             backends6: HashMap::try_from(
                 bpf.take_map("BACKENDS6").context("map BACKENDS6 missing")?,
             )?,
+            stats: PerCpuArray::try_from(bpf.take_map("STATS").context("map STATS missing")?)?,
         })
+    }
+
+    /// Read the per-CPU datapath packet counters, summed across CPUs and indexed
+    /// by the `STAT_*` constants (see `cradle_common`).
+    pub fn stats(&self) -> Result<Vec<u64>> {
+        let mut out = Vec::with_capacity(STAT_MAX as usize);
+        for i in 0..STAT_MAX {
+            let per_cpu = self.stats.get(&i, 0)?;
+            out.push(per_cpu.iter().copied().sum());
+        }
+        Ok(out)
     }
 
     /// Install an L4 service VIP and its backend set. `svc_id` namespaces the

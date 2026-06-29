@@ -749,6 +749,32 @@ async fn stop_cradle(world: &mut World, namespace: String) {
     println!("✓ cradle stopped in namespace {}", world.ns(&namespace));
 }
 
+/// Poll `cradle ctl stats` over gRPC and assert the named counter is nonzero.
+#[then(expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should be nonzero")]
+async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    for _ in 0..15 {
+        if let Ok(out) =
+            netns::exec_in_netns(&scoped, &cradle, &["ctl", "--grpc", &ep, "stats"]).await
+        {
+            for line in out.lines() {
+                let mut it = line.split_whitespace();
+                if it.next() == Some(stat.as_str())
+                    && let Some(v) = it.next().and_then(|s| s.parse::<u64>().ok())
+                    && v > 0
+                {
+                    println!("✓ cradle stat {} = {} in {}", stat, v, scoped);
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!("cradle stat {} did not become nonzero in {}", stat, scoped);
+}
+
 // ----------------- cradle gRPC + zebra-rs integration steps ---------------
 
 fn config_in(world: &World, file: &str) -> String {
