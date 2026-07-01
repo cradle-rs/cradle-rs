@@ -11,8 +11,9 @@
 //! A routed port therefore needs no manual route/neighbor configuration.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use nix::ifaddrs::getifaddrs;
 use tracing::info;
 
@@ -73,6 +74,35 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32) -> Result<()> {
             info!("port {name}: derived v6 {ip}/{plen}");
         }
     }
+    Ok(())
+}
+
+/// Install a kernel `local` route for an L7 VIP, so packets steered to the
+/// user-space transparent proxy by `bpf_sk_assign` are delivered to that local
+/// socket rather than forwarded.
+///
+/// TPROXY subtlety: `bpf_sk_assign` sets `skb->sk`, but the kernel still runs a
+/// routing lookup afterward. Without a matching `local` route the non-local VIP
+/// is classified for forwarding and dropped (there is no route, or forwarding is
+/// off). A `local <vip>/32 dev lo` entry makes the lookup return `RTN_LOCAL`, so
+/// the packet is delivered locally to the assigned socket.
+///
+/// Equivalent to `ip route replace local <vip>/32 dev lo`, run in cradle's
+/// current network namespace. Idempotent (`replace`); needs CAP_NET_ADMIN, which
+/// cradle already holds to load the datapath.
+pub fn add_local_route_v4(vip: Ipv4Addr) -> Result<()> {
+    let dst = format!("{vip}/32");
+    let out = Command::new("ip")
+        .args(["route", "replace", "local", &dst, "dev", "lo"])
+        .output()
+        .with_context(|| format!("running `ip route replace local {dst} dev lo`"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip route replace local {dst} dev lo` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    info!("installed local route {dst} dev lo (L7 VIP delivery)");
     Ok(())
 }
 

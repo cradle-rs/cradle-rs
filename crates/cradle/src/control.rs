@@ -82,6 +82,14 @@ impl Control {
         routes: Vec<crate::l7::L7Route>,
     ) -> Result<()> {
         self.dp.lock().await.l7_service_add(vip, port)?;
+        // TPROXY (bpf_sk_assign) needs the VIP to route locally; otherwise the
+        // kernel forwards the non-local destination and drops it. Install the
+        // `local <vip>/32 dev lo` route ourselves so operators and tests don't
+        // have to. Best-effort: warn (rather than fail service config) if the
+        // route can't be installed, since L7 will simply not deliver until it is.
+        if let Err(e) = crate::kernel::add_local_route_v4(vip) {
+            warn!("L7 {vip}:{port}: could not install local route: {e:#} (TPROXY may not deliver)");
+        }
         self.routes
             .lock()
             .await
