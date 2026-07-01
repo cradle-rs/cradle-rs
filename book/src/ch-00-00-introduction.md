@@ -11,21 +11,23 @@ libbpf anywhere in the toolchain.
 
 Two existing systems bracket the problem, and neither closes it:
 
-- **Cilium** proves you can run the whole **L2–L7 data plane in eBPF**: pinned
+- **Cilium** proves you can run the whole **L3–L7 data plane in eBPF**: pinned
   BPF maps as the shared-state contract, tail-call staging under the verifier
-  limit, socket load balancing, conntrack/NAT, and L7 via a proxy redirect. But
-  its **routing-protocol integration is the weak seam** — the BGP control plane
-  is *advertisement-only* and, by Cilium's own docs and open proposals, **does
-  not install learned routes into the data plane**. Native routing falls back to
-  the kernel FIB plus out-of-band route distribution.
+  limit, socket load balancing, conntrack/NAT, and L7 via a proxy redirect — over
+  a flat L3 fabric (its L2 story is ARP-based service announcement, not eBPF
+  switching). But its **routing-protocol integration is the weak seam** — the BGP
+  control plane is *advertisement-only* and, by Cilium's own docs and open
+  proposals, **does not install learned routes into the data plane**. Native
+  routing falls back to the kernel FIB plus out-of-band route distribution.
 
 - **zebra-rs** is the inverse: a mature, multi-protocol Rust routing control
   plane (BGP / OSPF / IS-IS / EVPN / SRv6 / MPLS) with a single clean data-plane
   chokepoint — `FibHandle` — and an existing precedent of feeding aya eBPF
   programs from the control plane through BPF maps.
 
-**cradle-rs is the part neither has built:** a Cilium-class eBPF L2–L7 data
-plane whose forwarding is *actually driven by* a real routing stack. **Learned**
+**cradle-rs is the part neither has built:** a Cilium-class eBPF **L2–L7** data
+plane — adding true L2 switching below Cilium's L3 floor — whose forwarding is
+*actually driven by* a real routing stack. **Learned**
 routes — not just advertised ones — program the eBPF FIB. Nobody has done this
 end to end in pure Rust.
 
