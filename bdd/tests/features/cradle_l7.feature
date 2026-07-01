@@ -32,7 +32,8 @@ Feature: L7 HTTP proxy via eBPF TPROXY (bpf_sk_assign)
     And I add route "default" via "10.0.3.254" in namespace "b"
     And I disable IPv4 forwarding in namespace "fwd"
     And I disable reverse path filtering in namespace "fwd"
-    And I add local route "10.0.9.9/32" in namespace "fwd"
+    # No manual `local` route: cradle installs `local 10.0.9.9/32 dev lo` itself
+    # when the L7 service is configured (see add_local_route_v4).
     And I serve HTTP "backend-a" in namespace "a" bound to "0.0.0.0"
     And I serve HTTP "backend-b" in namespace "b" bound to "0.0.0.0"
     And I start cradle in namespace "fwd" with config "l7.json" serving gRPC as "ctl"
