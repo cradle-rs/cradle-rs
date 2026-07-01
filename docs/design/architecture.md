@@ -6,9 +6,11 @@
 
 Two existing systems bracket the problem:
 
-- **Cilium** proves you can run the entire **L2–L7 data plane in eBPF** — pinned
+- **Cilium** proves you can run the entire **L3–L7 data plane in eBPF** — pinned
   BPF maps as the shared-state contract, identity-based policy, tail-call
-  staging, socket-LB, conntrack/NAT, and L7 via a proxy redirect. But its
+  staging, socket-LB, conntrack/NAT, and L7 via a proxy redirect, over a flat L3
+  fabric (its L2 story is ARP-based service announcement, not eBPF switching).
+  But its
   **routing-protocol integration is the weak seam**: the BGP control plane is
   *advertisement-only* and, by Cilium's own docs and open CFPs (#34841, #31091),
   **does not install learned routes into the data plane**. Native routing falls
@@ -21,7 +23,8 @@ Two existing systems bracket the problem:
   via BPF maps (`offload/xdp-bfd-echo`, `offload/tc-evpn-replicate`).
 
 **cradle-rs is the part neither has built:** a fully-Rust, Cilium-class eBPF
-L2–L7 data plane whose forwarding is *actually driven by* a real routing stack —
+**L2–L7** data plane — adding true L2 switching below Cilium's L3 floor — whose
+forwarding is *actually driven by* a real routing stack —
 **learned** routes (not just advertised ones) program the eBPF FIB. The whole
 stack stays in Rust (aya), which nobody has done end to end.
 
