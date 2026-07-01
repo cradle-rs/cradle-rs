@@ -2,8 +2,9 @@
 
 eBPF-based networking for L2–L7 with routing-protocol integration — in Rust.
 
-A Cilium-class eBPF L2–L7 data plane whose forwarding is driven by a real
-multi-protocol routing stack ([zebra-rs](https://github.com/zebra-rs/zebra-rs)).
+A Cilium-class eBPF **L2–L7** data plane — adding true L2 switching below
+Cilium's L3 floor — whose forwarding is driven by a real multi-protocol routing
+stack ([zebra-rs](https://github.com/zebra-rs/zebra-rs)).
 Where Cilium's BGP control plane only *advertises* routes, cradle-rs installs
 **learned** routes directly into the eBPF data plane. The whole stack is Rust:
 the data plane uses [aya](https://aya-rs.dev) (no clang/libbpf required).
