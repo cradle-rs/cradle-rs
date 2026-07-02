@@ -12,6 +12,8 @@ Status: **comparative analysis**, not a proposal. Companion to
 > IEICE Technical Report, 2026 — including its source-level analysis of VPP's
 > `ip4_mtrie` and `bihash` (FD.io VPP, `src/vnet/fib/`, `src/vppinfra/`).
 
+(日本語訳: [`forwarding-table-updates.ja.md`](forwarding-table-updates.ja.md))
+
 ## The three prior models, condensed
 
 **sdplane — RIB pointer swap under userspace RCU.** Run-to-completion workers
