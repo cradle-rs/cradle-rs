@@ -215,6 +215,20 @@ that moves 800k routes to a new nexthop rewrites *one nexthop entry or group
 member*, never the big arrays. The indirection that made ECMP clean is what
 makes DIR-24-8 maintainable.
 
+## Snapshot semantics — considered, deferred
+
+Per-slot updates mean a multi-slot expansion transiently mixes old and new
+covers — the standard eventual-consistency window. The eBPF idiom for
+sdplane-style *whole-table snapshots* (zero microloops) exists: an
+`ARRAY_OF_MAPS` outer map holding the FIB, where flipping the outer entry is
+a RIB-pointer swap. It imports the matching trade — O(N) rebuild per swap and
+double memory while both generations live — which is the wrong trade at DFZ
+churn rates, so this design stays with O(Δ) in-place updates. (See
+[`forwarding-table-updates.md`](forwarding-table-updates.md) for the full
+sdplane / VPP / cradle comparison; DIR-24-8's fill-then-flip group ordering
+is VPP mtrie's complete-then-publish discipline, and full preallocation is
+what deletes mtrie's pool-expansion barrier from cradle's model.)
+
 ## What does NOT change
 
 - **`proto/cradle.proto`** — `AddRoute4`/`DelRoute4`/`SetNexthop*` are
