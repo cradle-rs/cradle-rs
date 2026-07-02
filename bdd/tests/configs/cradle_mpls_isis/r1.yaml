@@ -1,0 +1,24 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_mpls_isis_ctl1.sock"
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: r1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 1
+    - if-name: r1a
+      ipv4:
+        enable: true
+      metric: 10
+    - if-name: r1b
+      network-type: point-to-point
+      ipv4:
+        enable: true
+      metric: 10
