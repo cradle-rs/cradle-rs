@@ -21,23 +21,25 @@
 use aya_ebpf::{
     bindings::{
         bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, bpf_sock_tuple,
-        bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1, TC_ACT_OK,
-        TC_ACT_PIPE, TC_ACT_SHOT,
+        bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1, xdp_action,
+        TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
     },
     helpers::generated::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
-        bpf_sk_release, bpf_skc_lookup_tcp,
+        bpf_sk_release, bpf_skc_lookup_tcp, bpf_xdp_adjust_head,
     },
-    macros::{classifier, map},
+    macros::{classifier, map, xdp},
     maps::{lpm_trie::Key, HashMap, LpmTrie, LruHashMap, PerCpuArray},
-    programs::TcContext,
+    programs::{TcContext, XdpContext},
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, CtEntry, CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry,
-    L2MemberKey, Neigh4Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
-    ServiceKey6, CT_F_DNAT, CT_F_SNAT, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
-    PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD,
-    STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX,
+    mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CtEntry, CtEntry6, CtKey, CtKey6,
+    FdbEntry, FdbKey, FibEntry, L2MemberKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop,
+    NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, CT_F_DNAT, CT_F_SNAT,
+    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MPLS_OP_POP, MPLS_OP_POP_L3,
+    MPLS_OP_SWAP, NH_F_V6, PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_L2_FLOOD, STAT_L2_FORWARD,
+    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
+    STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_SWAP,
 };
 use network_types::eth::EthHdr;
 
@@ -59,6 +61,12 @@ static NHGROUP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 static NHGROUP_MEMBER: HashMap<NhGroupKey, u32> = HashMap::with_max_entries(8192, 0);
 #[map]
 static NEIGH4: HashMap<Neigh4Key, NeighEntry> = HashMap::with_max_entries(4096, 0);
+#[map]
+static NEIGH6: HashMap<Neigh6Key, NeighEntry> = HashMap::with_max_entries(4096, 0);
+
+// --- MPLS: incoming-label map (ILM), keyed by the 20-bit top label ---
+#[map]
+static MPLS_FIB: HashMap<u32, MplsEntry> = HashMap::with_max_entries(4096, 0);
 
 // --- L2 ---
 #[map]
@@ -95,6 +103,7 @@ static L7_SERVICES: HashMap<ServiceKey, u8> = HashMap::with_max_entries(1024, 0)
 const MAX_L2_MEMBERS: u16 = 64;
 
 const ETH_P_IP: u16 = 0x0800;
+const ETH_P_MPLS_UC: u16 = 0x8847;
 const ETH_TYPE_OFF: usize = 12;
 const ETH_DST_OFF: usize = 0;
 const ETH_SRC_OFF: usize = 6;
@@ -642,6 +651,7 @@ fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
     match u16::from_be(ethertype) {
         ETH_P_IP => l3_forward_v4(ctx),
         ETH_P_IPV6 => l3_forward_v6(ctx),
+        ETH_P_MPLS_UC => mpls_forward(ctx),
         _ => Ok(TC_ACT_PIPE as i32), // ARP, ... -> stack
     }
 }
@@ -836,6 +846,169 @@ fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
         )
     };
     Ok(ret as i32)
+}
+
+// ============================= MPLS forwarding =============================
+
+/// Offset of the top MPLS label stack entry (right after the Ethernet header).
+const MPLS_LSE_OFF: usize = EthHdr::LEN;
+
+/// Forward an MPLS frame (EtherType 0x8847): look up the top label in the
+/// ILM (`MPLS_FIB`) and swap / pop / pop-to-IP per the entry's operation.
+/// Unknown labels and TTL expiry punt to the host stack (`TC_ACT_PIPE`).
+#[inline(always)]
+fn mpls_forward(ctx: &TcContext) -> Result<i32, ()> {
+    let lse_be: u32 = ctx.load(MPLS_LSE_OFF).map_err(|_| ())?;
+    let (label, tc, s, ttl) = mpls_lse_unpack(u32::from_be(lse_be));
+    if ttl <= 1 {
+        return Ok(TC_ACT_PIPE as i32); // host generates the TTL-exceeded
+    }
+
+    let ent: MplsEntry = match MPLS_FIB.get_ptr(&label) {
+        Some(e) => unsafe { *e },
+        None => return Ok(TC_ACT_PIPE as i32), // unknown label: punt
+    };
+    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&ent.nexthop_id).ok_or(())? };
+
+    match ent.op {
+        MPLS_OP_SWAP => {
+            // Phase 1: single-label swap rewritten in place (multi-label SR
+            // stacks that grow the frame are Phase 2).
+            if nh.num_labels != 1 {
+                stat_inc(STAT_DROP);
+                return Ok(TC_ACT_SHOT as i32);
+            }
+            let new_lse = mpls_lse(nh.labels[0], tc, s, ttl - 1).to_be();
+            ctx.store(MPLS_LSE_OFF, &new_lse, 0).map_err(|_| ())?;
+            stat_inc(STAT_MPLS_SWAP);
+            mpls_l2_xmit(ctx, &nh)
+        }
+        // POP / POP_L3 shrink the frame, and `bpf_skb_adjust_room` refuses
+        // any skb whose protocol isn't IPv4/IPv6 (-ENOTSUPP) — a TC program
+        // cannot shrink an MPLS frame. Pops therefore run in the XDP stage
+        // (`cradle_mpls_pop`, below) before the skb exists; an MPLS frame
+        // reaching here with a pop ILM entry means XDP isn't attached — punt.
+        _ => Ok(TC_ACT_PIPE as i32),
+    }
+}
+
+/// Egress a (still-)labeled MPLS frame. `bpf_redirect_neigh` cannot build an
+/// MPLS Ethernet header (there is no MPLS `nh_family`), so the rewrite is
+/// explicit: destination MAC from the control-plane-fed neighbor maps, source
+/// MAC from the egress port, EtherType 0x8847, then a plain redirect. A
+/// neighbor/port miss punts to the host, which resolves the neighbor and (via
+/// the control plane) backfills the map — the LSP "warms up" like a connected
+/// route.
+#[inline(always)]
+fn mpls_l2_xmit(ctx: &TcContext, nh: &NextHop) -> Result<i32, ()> {
+    let dst_mac = if nh.flags & NH_F_V6 != 0 {
+        match NEIGH6.get_ptr(&Neigh6Key {
+            ifindex: nh.oif,
+            addr: nh.gateway_v6,
+        }) {
+            Some(e) => unsafe { (*e).mac },
+            None => return Ok(TC_ACT_PIPE as i32),
+        }
+    } else {
+        match NEIGH4.get_ptr(&Neigh4Key {
+            ifindex: nh.oif,
+            addr: nh.gateway_v4,
+        }) {
+            Some(e) => unsafe { (*e).mac },
+            None => return Ok(TC_ACT_PIPE as i32),
+        }
+    };
+    let src_mac = match PORTS.get_ptr(&nh.oif) {
+        Some(p) => unsafe { (*p).mac },
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    ctx.store(ETH_DST_OFF, &dst_mac, 0).map_err(|_| ())?;
+    ctx.store(ETH_SRC_OFF, &src_mac, 0).map_err(|_| ())?;
+    let ethertype = ETH_P_MPLS_UC.to_be();
+    ctx.store(ETH_TYPE_OFF, &ethertype, 0).map_err(|_| ())?;
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as i32)
+}
+
+// ============================ MPLS pop (XDP stage) =========================
+//
+// `bpf_skb_adjust_room` returns -ENOTSUPP for any skb whose protocol isn't
+// IPv4/IPv6, so a TC classifier cannot shrink an MPLS frame. The pop
+// operations therefore run at XDP, where `bpf_xdp_adjust_head` is
+// unrestricted: shift the Ethernet addresses over the popped label entry,
+// write the exposed EtherType, drop the 4 leading bytes, and XDP_PASS.
+// Generic XDP re-runs eth_type_trans when the Ethernet header changed, so
+// the popped frame enters the stack — and the TC classifier — as plain IP
+// (POP_L3, routed by the existing FIB path) or as MPLS with the next label
+// on top (POP). Swap and (Phase 2) push don't shrink an MPLS skb, so they
+// stay in TC.
+
+/// Bounds-checked pointer into XDP packet data.
+#[inline(always)]
+fn xdp_ptr<T>(ctx: &XdpContext, off: usize) -> Result<*mut T, ()> {
+    let start = ctx.data();
+    if start + off + core::mem::size_of::<T>() > ctx.data_end() {
+        return Err(());
+    }
+    Ok((start + off) as *mut T)
+}
+
+#[xdp]
+pub fn cradle_mpls_pop(ctx: XdpContext) -> u32 {
+    match try_mpls_pop(&ctx) {
+        Ok(act) => act,
+        Err(()) => xdp_action::XDP_PASS,
+    }
+}
+
+#[inline(always)]
+fn try_mpls_pop(ctx: &XdpContext) -> Result<u32, ()> {
+    let ethertype = unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? };
+    if u16::from_be(ethertype) != ETH_P_MPLS_UC {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let lse = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF)? });
+    let (label, _tc, s, ttl) = mpls_lse_unpack(lse);
+    if ttl <= 1 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let ent: MplsEntry = match MPLS_FIB.get_ptr(&label) {
+        Some(e) => unsafe { *e },
+        None => return Ok(xdp_action::XDP_PASS), // unknown label: not ours
+    };
+    match ent.op {
+        MPLS_OP_POP if s == 0 => pop_head(ctx, ETH_P_MPLS_UC),
+        MPLS_OP_POP_L3 if s == 1 => {
+            // The nibble after the label stack selects the exposed EtherType.
+            // (Pipe-model TTL: the inner IP TTL is untouched by the pop; the
+            // IP forwarding stage decrements it like any routed packet.)
+            let ver = unsafe { *xdp_ptr::<u8>(ctx, MPLS_LSE_OFF + 4)? };
+            match ver >> 4 {
+                4 => pop_head(ctx, ETH_P_IP),
+                6 => pop_head(ctx, ETH_P_IPV6),
+                _ => {
+                    stat_inc(STAT_DROP);
+                    Ok(xdp_action::XDP_DROP)
+                }
+            }
+        }
+        // Swap (TC's job), or a pop that doesn't match the stack depth
+        // (POP on bottom-of-stack / POP_L3 with labels remaining): pass.
+        _ => Ok(xdp_action::XDP_PASS),
+    }
+}
+
+/// Remove the top label stack entry: move the 12 Ethernet address bytes over
+/// it, write the EtherType the pop exposes, then trim the 4 leading bytes.
+#[inline(always)]
+fn pop_head(ctx: &XdpContext, new_ethertype: u16) -> Result<u32, ()> {
+    let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
+    unsafe { *xdp_ptr::<[u8; 12]>(ctx, 4)? = macs };
+    unsafe { *xdp_ptr::<u16>(ctx, 4 + ETH_TYPE_OFF)? = new_ethertype.to_be() };
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, 4) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_MPLS_POP);
+    Ok(xdp_action::XDP_PASS)
 }
 
 #[cfg(not(test))]

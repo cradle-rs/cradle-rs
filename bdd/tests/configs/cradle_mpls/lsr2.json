@@ -1,0 +1,15 @@
+{
+  "ports": [
+    { "name": "lsr2a", "l3": true },
+    { "name": "lsr2b", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "lsr2a", "gateway": "10.0.1.1" }
+  ],
+  "routes": [
+    { "prefix": "10.0.0.0/24", "nexthop": 1 }
+  ],
+  "ilm": [
+    { "in_label": 17, "nexthop": 1, "action": "pop-l3" }
+  ]
+}

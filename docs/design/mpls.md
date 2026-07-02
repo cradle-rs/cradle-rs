@@ -3,9 +3,13 @@
 > Label-switched forwarding in the eBPF data plane, driven by the zebra-rs
 > MPLS control plane (static label bindings, SR-MPLS, labeled BGP, L3VPN).
 
-Status: **design / not yet implemented.** This document proposes the map
-contract, data-plane logic, control-plane API, and a phased plan. It builds on
-the L2–L7 datapath described in [`architecture.md`](architecture.md).
+Status: **Phase 1 implemented** — transit swap in the TC classifier, pop /
+PHP-to-IP in a native-XDP stage (`cradle_mpls_pop`; see "Packet geometry" for
+why pops can't run at TC), `MPLS_FIB` + `NEIGH6`,
+`AddIlm`/`DelIlm`/`SetNeighbor6`, `labels` on nexthops, static JSON config,
+`cradle_mpls` BDD. Phase 1 bounds transit **swap to a single label** (a
+multi-label swap stack drops; SR stacks arrive with Phase 2's imposition
+work). Phases 2–4 below remain design.
 
 ## Goal and scope
 
@@ -162,24 +166,50 @@ match u16::from_be(ethertype) {
 }
 ```
 
-### `mpls_forward`
+### `mpls_forward` (TC) — swap
 
 1. Load the top label entry at `EthHdr::LEN`. Extract `label`, `s` (BOS), `ttl`.
 2. **TTL**: if `ttl <= 1`, `TC_ACT_PIPE` to the stack (let the host generate the
    ICMP/label TTL-exceeded). Otherwise decrement for the imposed/swapped entry.
 3. Look up `MPLS_FIB[label]`; miss ⇒ `TC_ACT_PIPE` (punt) or `TC_ACT_SHOT`.
 4. Resolve `nexthop_id → NextHop`.
-5. Dispatch on `op`:
-   - **SWAP** — rewrite the top entry's label to `nh.labels[0]` (carry TC, set
-     TTL). If `nh.num_labels > 1`, grow the stack by `4*(num_labels-1)` bytes
-     (`adjust_room`, `BPF_ADJ_ROOM_MAC`) and write the extra SR labels. Egress
-     MPLS via `mpls_l2_xmit` (explicit rewrite, below).
-   - **POP** — shrink by 4 bytes, clear the outer entry, forward the remaining
-     labeled stack via `mpls_l2_xmit`.
-   - **POP_L3** — shrink by 4 bytes, set EtherType to `0x0800`/`0x86dd` from the
-     first nibble of the exposed payload, then forward as IP. If `vrf_id == 0`,
-     fall into the existing `l3_forward_v4/v6`; otherwise a VRF lookup (Phase 3).
-     IP egress reuses `bpf_redirect_neigh` — no neighbor map needed here.
+5. **SWAP** — rewrite the top entry's label to `nh.labels[0]` in place (carry
+   TC and BOS, decrement TTL). Egress MPLS via `mpls_l2_xmit` (explicit
+   rewrite, below). Phase 1 bounds this to a single-label swap; a stack-growing
+   swap (extra SR labels via `adjust_room` grow) is Phase 2.
+
+### `cradle_mpls_pop` (XDP) — pop and PHP
+
+The pops do **not** run at TC, for a reason discovered in implementation:
+`bpf_skb_adjust_room` returns `-ENOTSUPP` for any skb whose `skb->protocol`
+is not IPv4/IPv6 — a TC program cannot resize an MPLS frame at all. Both pop
+operations therefore run in a small XDP program attached to L3 ports, where
+`bpf_xdp_adjust_head` is unrestricted:
+
+- parse EtherType `0x8847` + top LSE, look up `MPLS_FIB[label]` (same maps,
+  shared with the TC classifier);
+- **POP** (`s == 0`) — shift the 12 Ethernet-address bytes 4 bytes forward
+  over the LSE, keep EtherType `0x8847`, `bpf_xdp_adjust_head(+4)`,
+  `XDP_PASS` — the frame re-enters the stack with the next label on top;
+- **POP_L3** (`s == 1`) — same shift, EtherType from the exposed payload's
+  version nibble (`0x0800`/`0x86dd`), adjust, `XDP_PASS` — the frame enters
+  the stack as *plain IP*, so the existing TC path routes it
+  (`l3_forward_v4/v6` → `bpf_redirect_neigh`; per-VRF lookup is Phase 3).
+  Pipe-model TTL: the inner IP TTL is untouched by the pop.
+
+After an `adjust_head` the veth native-XDP receive path re-runs
+`eth_type_trans`, so `skb->protocol` matches the popped frame and the TC
+stages compose naturally. One more implementation-discovered constraint:
+the program attaches in **native (driver) mode** — generic XDP is skipped
+entirely for TC-redirected skbs (`netif_receive_generic_xdp` bails on
+`skb_is_redirected`, set by the previous hop's `bpf_redirect` since ~6.3),
+which is exactly how a mid-LSP frame arrives on a veth chain. veth supports
+native XDP; on drivers that don't, cradle falls back to generic mode with a
+logged caveat.
+
+The TC/XDP split rule is simple: **operations that shrink an MPLS-protocol
+frame live in XDP; everything else lives in TC** (swap rewrites in place;
+Phase 2's push grows an *IP* skb, which `adjust_room` does support).
 
 ### Ingress push (from the IP path)
 
@@ -203,16 +233,22 @@ A neighbor miss ⇒ `TC_ACT_PIPE` (punt to the host stack, which resolves the
 neighbor and, via the control-plane tee, backfills `NEIGH{4,6}`) so the LSP
 "warms up" the same way IP connected routes do.
 
-### Packet geometry with `bpf_skb_adjust_room`
+### Packet geometry
 
 Push and pop change the frame length between the MAC header and the payload.
-`TcContext::adjust_room(len_diff, BPF_ADJ_ROOM_MAC, 0)` inserts/removes
-`len_diff` bytes right after the Ethernet header — exactly the label-stack
-region. Rules the implementation must follow (standard for skb-resizing helpers):
+The available resizing tools differ by hook, and this drives the TC/XDP split
+above:
 
-- call `adjust_room` **before** writing the new bytes;
-- **re-load** any cached packet pointers/offsets afterward (the skb may move);
-- keep every write inside re-validated bounds so the verifier is satisfied.
+- **TC `adjust_room(len_diff, BPF_ADJ_ROOM_MAC, 0)`** inserts/removes bytes
+  right after the Ethernet header — but **only on IPv4/IPv6 skbs**
+  (`-ENOTSUPP` otherwise). Usable for the Phase 2 ingress push (the skb is
+  still IP when labels are imposed); unusable for pops (the skb is MPLS).
+- **XDP `bpf_xdp_adjust_head(delta)`** moves the packet start with no
+  protocol restriction — the pop mechanism.
+
+Standard resizing rules apply at both hooks: resize before writing the new
+bytes, re-derive all packet pointers afterward, keep every access inside
+re-validated bounds.
 
 ### Verifier budget
 

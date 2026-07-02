@@ -47,15 +47,38 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         oif: nh.oif.clone(),
                         oif_index: 0,
                         v6: false,
+                        labels: nh.labels.clone(),
                     })
                     .await?;
             }
             for n in &cfg.neighbors {
+                let is_v6 = n.ip.parse::<std::net::IpAddr>().map(|ip| ip.is_ipv6()).unwrap_or(false);
+                if is_v6 {
+                    client
+                        .set_neighbor6(pb::Neighbor6 {
+                            oif: n.oif.clone(),
+                            ip: n.ip.clone(),
+                            mac: n.mac.clone(),
+                        })
+                        .await?;
+                } else {
+                    client
+                        .set_neighbor4(pb::Neighbor4 {
+                            oif: n.oif.clone(),
+                            ip: n.ip.clone(),
+                            mac: n.mac.clone(),
+                        })
+                        .await?;
+                }
+            }
+            for i in &cfg.ilm {
+                let op = config::ilm_action(&i.action)?;
                 client
-                    .set_neighbor4(pb::Neighbor4 {
-                        oif: n.oif.clone(),
-                        ip: n.ip.clone(),
-                        mac: n.mac.clone(),
+                    .add_ilm(pb::Ilm {
+                        in_label: i.in_label,
+                        nexthop_id: i.nexthop,
+                        action: op as u32,
+                        vrf_table_id: i.vrf,
                     })
                     .await?;
             }

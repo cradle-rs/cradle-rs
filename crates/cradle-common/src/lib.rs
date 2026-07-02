@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 //! cradle-common — the cradle-rs **data-plane contract**.
 //!
 //! Plain-old-data types used as eBPF map keys/values by *both* the kernel
@@ -67,10 +67,24 @@ pub struct NextHop {
     pub oif: u32,
     /// `NH_F_*` flags.
     pub flags: u32,
+    /// MPLS out-label stack, index 0 = top/outermost. For a transit swap the
+    /// swap value is `labels[0]`; for imposition (Phase 2) the whole stack is
+    /// pushed. Values are bare 20-bit labels (no TC/S/TTL bits).
+    pub labels: [u32; MAX_LABELS],
+    /// Number of valid entries in `labels`; 0 = no label operation.
+    pub num_labels: u8,
+    pub _pad: [u8; 3],
 }
 
 pub const NH_F_V6: u32 = 1 << 0;
 pub const NH_F_ONLINK: u32 = 1 << 1;
+/// Nexthop imposes/swaps an MPLS label stack (`labels`/`num_labels`).
+pub const NH_F_MPLS: u32 = 1 << 2;
+
+/// Maximum out-label stack depth (bounds the datapath's parse/push loops for
+/// the verifier). Covers SR-MPLS depths seen in practice; deeper is rejected
+/// by the control plane.
+pub const MAX_LABELS: usize = 3;
 
 /// Neighbor (L2 resolution) key for IPv4: (interface, gateway/dst address).
 #[repr(C)]
@@ -78,6 +92,14 @@ pub const NH_F_ONLINK: u32 = 1 << 1;
 pub struct Neigh4Key {
     pub ifindex: u32,
     pub addr: u32,
+}
+
+/// Neighbor (L2 resolution) key for IPv6: (interface, gateway/dst address).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Neigh6Key {
+    pub ifindex: u32,
+    pub addr: [u8; 16],
 }
 
 /// Neighbor entry: the resolved destination MAC.
@@ -90,6 +112,54 @@ pub struct NeighEntry {
 }
 
 pub const NEIGH_STATE_REACHABLE: u8 = 1;
+
+// ============================== MPLS: label FIB =============================
+
+/// Incoming-label map (ILM) entry: the operation applied to a frame whose top
+/// label matched the `MPLS_FIB` key (the 20-bit label value in a `u32`).
+///
+/// Deliberately small — the out-label stack lives on the nexthop
+/// (`NextHop.labels`), so one labeled nexthop is shared by every ILM entry
+/// and IP route imposing the same stack.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MplsEntry {
+    /// Index into the `NEXTHOPS` map. For `MPLS_OP_SWAP` the nexthop's
+    /// `labels[0]` is the swap value.
+    pub nexthop_id: u32,
+    /// VRF/table id for `MPLS_OP_POP_L3` disposition (0 = global; per-VRF
+    /// lookup is Phase 3).
+    pub vrf_id: u32,
+    /// `MPLS_OP_*`.
+    pub op: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Pop the incoming label, impose the nexthop's out-label stack, stay MPLS.
+pub const MPLS_OP_SWAP: u8 = 0;
+/// Pop to IP and forward (PHP-to-IP / L3VPN egress).
+pub const MPLS_OP_POP_L3: u8 = 1;
+/// Pop one label, forward the remaining (still labeled) stack.
+pub const MPLS_OP_POP: u8 = 2;
+
+/// Pack an MPLS label stack entry: Label(20) | TC(3) | S(1) | TTL(8).
+/// Returns the host-order `u32` whose big-endian bytes are the wire LSE.
+#[inline]
+pub const fn mpls_lse(label: u32, tc: u8, s: u8, ttl: u8) -> u32 {
+    (label & 0xf_ffff) << 12 | ((tc as u32) & 0x7) << 9 | ((s as u32) & 0x1) << 8 | ttl as u32
+}
+
+/// Unpack an MPLS label stack entry (host-order value of the big-endian wire
+/// word) into `(label, tc, s, ttl)`.
+#[inline]
+pub const fn mpls_lse_unpack(lse: u32) -> (u32, u8, u8, u8) {
+    (
+        lse >> 12,
+        (lse >> 9 & 0x7) as u8,
+        (lse >> 8 & 0x1) as u8,
+        (lse & 0xff) as u8,
+    )
+}
 
 // ============================ L2: switching / FDB ==========================
 
@@ -270,8 +340,12 @@ pub const STAT_L4_DNAT: u32 = 5;
 pub const STAT_L4_SNAT: u32 = 6;
 pub const STAT_DROP: u32 = 7;
 pub const STAT_L7_REDIRECT: u32 = 8;
+pub const STAT_MPLS_SWAP: u32 = 9;
+pub const STAT_MPLS_POP: u32 = 10;
+/// Reserved for Phase 2 imposition (ingress LER push).
+pub const STAT_MPLS_PUSH: u32 = 11;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 9;
+pub const STAT_MAX: u32 = 12;
 
 // ============================== L7 proxy ===================================
 
@@ -293,9 +367,36 @@ mod user {
     }
 
     pod!(
-        FibEntry, NextHop, Neigh4Key, NeighEntry, NhGroupKey,
+        FibEntry, NextHop, Neigh4Key, Neigh6Key, NeighEntry, NhGroupKey,
+        MplsEntry,
         FdbKey, FdbEntry, PortConfig, L2MemberKey,
         ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
         ServiceKey6, Backend6, CtKey6, CtEntry6,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lse_round_trip() {
+        for (label, tc, s, ttl) in [
+            (16, 0, 1, 64),
+            (0xf_ffff, 7, 1, 255),
+            (0, 0, 0, 0),
+            (17, 3, 0, 1),
+        ] {
+            let lse = mpls_lse(label, tc, s, ttl);
+            assert_eq!(mpls_lse_unpack(lse), (label, tc, s, ttl));
+        }
+    }
+
+    #[test]
+    fn lse_wire_layout() {
+        // RFC 3032: label 16, TC 0, S 1, TTL 64 => 0x00 01 01 40 on the wire.
+        assert_eq!(mpls_lse(16, 0, 1, 64).to_be_bytes(), [0x00, 0x01, 0x01, 0x40]);
+        // Label field is masked to 20 bits.
+        assert_eq!(mpls_lse(0x1f_ffff, 0, 0, 0) >> 12, 0xf_ffff);
+    }
 }

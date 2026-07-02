@@ -28,6 +28,7 @@ message Nexthop {
   string oif = 3;         // output interface name (used when oif_index == 0)
   uint32 oif_index = 4;   // output ifindex; preferred when non-zero
   bool v6 = 5;            // IPv6 nexthop (gateway parsed as IPv6)
+  repeated uint32 labels = 6;  // MPLS out-label stack, [0] = outermost
 }
 
 // A nexthop group for ECMP: ordered member nexthop ids. A route whose flags
@@ -62,6 +63,27 @@ message Neighbor4 {
   string oif = 1;
   string ip = 2;
   string mac = 3;
+}
+
+message Neighbor6 {
+  string oif = 1;
+  string ip = 2;
+  string mac = 3;
+}
+
+// An incoming-label map (ILM) entry — mirrors zebra-rs's FibHandle
+// ilm_add/ilm_replace/ilm_del. `action` is MPLS_OP_*: 0 = swap (the nexthop's
+// labels are the out stack), 1 = pop-to-IP (PHP / L3VPN egress),
+// 2 = pop one label.
+message Ilm {
+  uint32 in_label = 1;      // 20-bit incoming label (the LFIB key)
+  uint32 nexthop_id = 2;    // resolved nexthop; its labels are the swap stack
+  uint32 action = 3;        // MPLS_OP_SWAP | POP_L3 | POP
+  uint32 vrf_table_id = 4;  // for POP_L3 into a VRF (0 = global)
+}
+
+message IlmDel {
+  uint32 in_label = 1;
 }
 
 message Backend {
@@ -114,6 +136,9 @@ service Cradle {
   rpc AddRoute6(Route6) returns (Empty);
   rpc DelRoute6(Route6Del) returns (Empty);
   rpc SetNeighbor4(Neighbor4) returns (Empty);
+  rpc SetNeighbor6(Neighbor6) returns (Empty);
+  rpc AddIlm(Ilm) returns (Empty);
+  rpc DelIlm(IlmDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);

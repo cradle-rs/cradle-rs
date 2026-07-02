@@ -34,4 +34,6 @@ sudo ./target/debug/cradle --iface <dev>   # attach the datapath (CAP_BPF/NET_AD
 
 Phase 0 (foundation): workspace, map contract, aya build pipeline, and a TC
 `clsact` datapath skeleton — validated build → load → attach on Linux 6.8.
-L3/L2/L4 stages and zebra-rs integration are in progress.
+L3/L2/L4 stages and zebra-rs integration are in progress. MPLS transit
+(label swap / pop / PHP-to-IP via a static ILM) is implemented
+([design](docs/design/mpls.md)).
