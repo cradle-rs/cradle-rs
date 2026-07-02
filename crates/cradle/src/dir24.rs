@@ -15,7 +15,7 @@
 //!   that loaded the old `TBL24` word never indexes a group being rewritten
 //!   for a different /24.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use anyhow::{bail, Result};
 use cradle_common::{fibw_entry, fibw_group, FibEntry, FibWord};
@@ -136,6 +136,56 @@ impl Dir24Engine {
         Ok(out)
     }
 
+    /// Install/replace many routes in one plan — the bulk initial-load path.
+    /// Equivalent to per-route `route_add`, but each affected /24 block is
+    /// recomputed **once per batch** instead of once per covering route, and
+    /// the group-capacity pre-check spans the whole batch (so a failed batch
+    /// leaves no partial state).
+    pub fn route_add_bulk(&mut self, routes: &[(u32, u8, FibEntry)]) -> Result<Vec<SlotWrite>> {
+        // Whole-batch capacity pre-check: adds never free groups, so demand
+        // is exactly the distinct group-less blocks gaining a long route.
+        let mut new_group_blocks: HashSet<u32> = HashSet::new();
+        for &(addr, len, _) in routes {
+            if len > 32 {
+                bail!("bad prefix length {len}");
+            }
+            if len > 24 {
+                let blk = (addr & mask(len)) >> 8;
+                if !self.groups.contains_key(&blk) {
+                    new_group_blocks.insert(blk);
+                }
+            }
+        }
+        let avail = self.free.len() + self.quarantine.len();
+        if new_group_blocks.len() > avail {
+            bail!(
+                "TBL8 group pool exhausted: batch needs {} new groups, {} available",
+                new_group_blocks.len(),
+                avail
+            );
+        }
+
+        let mut out = Vec::new();
+        let mut affected: BTreeSet<u32> = BTreeSet::new();
+        for &(addr, len, entry) in routes {
+            let addr = addr & mask(len);
+            if len == 0 {
+                self.shadow.insert((addr, len), entry);
+                out.push(SlotWrite::Default(fibw_entry(entry.nexthop_id, entry.flags)));
+                continue;
+            }
+            let prev = self.shadow.insert((addr, len), entry);
+            if len > 24 && prev.is_none() {
+                *self.long_count.entry(addr >> 8).or_insert(0) += 1;
+            }
+            affected.extend(Self::affected_blocks(addr, len));
+        }
+        for blk in affected {
+            self.sync_block(blk, &mut out)?;
+        }
+        Ok(out)
+    }
+
     /// Reference longest-prefix-match over the shadow (includes `/0`).
     /// Also the oracle the property tests compare the tables against.
     pub fn lookup(&self, addr: u32) -> Option<FibEntry> {
@@ -150,6 +200,16 @@ impl Dir24Engine {
     /// Number of groups currently backing blocks.
     pub fn groups_in_use(&self) -> usize {
         self.groups.len()
+    }
+
+    /// Number of routes in the shadow (including `/0` if present).
+    pub fn route_count(&self) -> usize {
+        self.shadow.len()
+    }
+
+    /// Groups available for allocation (free list + quarantine).
+    pub fn tbl8_free(&self) -> usize {
+        self.free.len() + self.quarantine.len()
     }
 
     /// The /24 blocks a prefix covers (a route with `len ≤ 24` covers whole
@@ -418,6 +478,70 @@ mod tests {
         // Same block is fine (group already allocated).
         sim.apply(&eng.route_add(0x0a000020, 32, e(3, 0)).unwrap());
         assert_eq!(sim.lookup(0x0a000020), Some((3, 0)));
+    }
+
+    #[test]
+    fn bulk_matches_serial() {
+        for seed in [3u64, 11, 20260702] {
+            let mut rng = seed;
+            let lens = [8u8, 12, 16, 20, 22, 24, 25, 26, 28, 30, 32];
+            let mut routes: Vec<(u32, u8, FibEntry)> = Vec::new();
+            for _ in 0..600 {
+                let r = splitmix64(&mut rng);
+                let len = lens[(r >> 4) as usize % lens.len()];
+                let addr = (0x0a000000 | (r >> 16) as u32 & 0x007f_ffff) & mask(len);
+                routes.push((addr, len, e((r >> 40) as u32 & 0xffff, (r as u32 >> 1) & 0xf)));
+            }
+            routes.push((0, 0, e(999, 0))); // default route rides the bulk too
+
+            let n_groups = 512;
+            let mut serial = Dir24Engine::new(n_groups);
+            let mut serial_sim = Sim::new(n_groups);
+            for &(a, l, ent) in &routes {
+                serial_sim.apply(&serial.route_add(a, l, ent).unwrap());
+            }
+            let mut bulk = Dir24Engine::new(n_groups);
+            let mut bulk_sim = Sim::new(n_groups);
+            bulk_sim.apply(&bulk.route_add_bulk(&routes).unwrap());
+
+            assert_eq!(bulk.route_count(), serial.route_count());
+            assert_eq!(bulk.groups_in_use(), serial.groups_in_use());
+            let mut probes = Vec::new();
+            for &(a, l, _) in &routes {
+                let last = a | !mask(l);
+                probes.extend_from_slice(&[a, last, a.wrapping_sub(1), last.wrapping_add(1)]);
+            }
+            for _ in 0..64 {
+                probes.push(splitmix64(&mut rng) as u32);
+            }
+            for &a in &probes {
+                assert_eq!(
+                    bulk_sim.lookup(a),
+                    serial_sim.lookup(a),
+                    "seed {seed} addr {a:#010x}"
+                );
+                assert_eq!(bulk_sim.lookup(a), expect(&bulk, a), "seed {seed} addr {a:#010x}");
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_exhaustion_is_clean() {
+        let mut eng = Dir24Engine::new(2);
+        // Three distinct blocks need three groups: must fail without state.
+        let batch = [
+            (0x0a000010u32, 32u8, e(1, 0)),
+            (0x0a000110, 32, e(2, 0)),
+            (0x0a000210, 32, e(3, 0)),
+        ];
+        assert!(eng.route_add_bulk(&batch).is_err());
+        assert_eq!(eng.route_count(), 0, "failed bulk leaked into shadow");
+        assert_eq!(eng.groups_in_use(), 0);
+        // Two blocks fit.
+        let mut sim = Sim::new(2);
+        sim.apply(&eng.route_add_bulk(&batch[..2]).unwrap());
+        assert_eq!(sim.lookup(0x0a000010), Some((1, 0)));
+        assert_eq!(sim.lookup(0x0a000110), Some((2, 0)));
     }
 
     /// The main correctness argument: random add/del sequences, and after

@@ -775,6 +775,79 @@ async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String,
     panic!("cradle stat {} did not become nonzero in {}", stat, scoped);
 }
 
+/// Generate and bulk-install a synthetic DFZ-shaped route table via
+/// `cradle ctl gen-routes` (deterministic per seed; see large-fib.md).
+#[when(
+    expr = "I generate {int} routes with seed {int} nexthop {int} via gRPC as {string} in namespace {string}"
+)]
+async fn cradle_gen_routes(
+    world: &mut World,
+    count: u64,
+    seed: u64,
+    nexthop: u32,
+    sock: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let out = netns::exec_in_netns(
+        &scoped,
+        &cradle,
+        &[
+            "ctl",
+            "--grpc",
+            &ep,
+            "gen-routes",
+            "--count",
+            &count.to_string(),
+            "--seed",
+            &seed.to_string(),
+            "--nexthop-id",
+            &nexthop.to_string(),
+        ],
+    )
+    .await
+    .expect("gen-routes failed");
+    println!("✓ {} in {}", out.trim(), scoped);
+}
+
+/// Delete one IPv4 route via `cradle ctl del-route`.
+#[when(expr = "I delete cradle route {string} via gRPC as {string} in namespace {string}")]
+async fn cradle_del_route(world: &mut World, prefix: String, sock: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    netns::exec_in_netns(&scoped, &cradle, &["ctl", "--grpc", &ep, "del-route", &prefix])
+        .await
+        .expect("del-route failed");
+    println!("✓ route {} deleted in {}", prefix, scoped);
+}
+
+/// Assert the dir24 shadow holds at least N routes (`cradle ctl fib`).
+#[then(
+    expr = "the cradle fib route count via gRPC as {string} in namespace {string} should be at least {int}"
+)]
+async fn cradle_fib_route_count(world: &mut World, sock: String, namespace: String, min: u64) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let out = netns::exec_in_netns(&scoped, &cradle, &["ctl", "--grpc", &ep, "fib"])
+        .await
+        .expect("ctl fib failed");
+    for line in out.lines() {
+        let mut it = line.split_whitespace();
+        if it.next() == Some("routes4")
+            && let Some(v) = it.next().and_then(|s| s.parse::<u64>().ok())
+        {
+            assert!(v >= min, "fib route count {} < {} in {}", v, min, scoped);
+            println!("✓ fib route count {} >= {} in {}", v, min, scoped);
+            return;
+        }
+    }
+    panic!("no routes4 line in ctl fib output: {out}");
+}
+
 // ----------------- cradle gRPC + zebra-rs integration steps ---------------
 
 fn config_in(world: &World, file: &str) -> String {

@@ -218,6 +218,17 @@ impl Control {
         Ok(())
     }
 
+    /// Bulk-install IPv4 routes (`(addr, len, nexthop_id, flags)` each).
+    pub async fn add_routes4(&self, routes: &[(Ipv4Addr, u8, u32, u32)]) -> Result<()> {
+        self.dp.lock().await.route4_add_bulk(routes)?;
+        Ok(())
+    }
+
+    /// IPv4 FIB engine state: `(mode, routes, tbl8_used, tbl8_free)`.
+    pub async fn fib_summary(&self) -> (&'static str, u64, u32, u32) {
+        self.dp.lock().await.fib_summary()
+    }
+
     pub async fn set_nexthop_idx_v6(
         &self,
         id: u32,
@@ -444,6 +455,33 @@ impl Cradle for GrpcService {
         let (addr, len) = util::parse_ipv4_prefix(&r.prefix).map_err(st)?;
         self.control.del_route4(addr, len).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_route4_batch(
+        &self,
+        req: Request<pb::Route4Batch>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let b = req.into_inner();
+        let mut routes = Vec::with_capacity(b.routes.len());
+        for r in &b.routes {
+            let (addr, len) = util::parse_ipv4_prefix(&r.prefix).map_err(st)?;
+            routes.push((addr, len, r.nexthop_id, r.flags));
+        }
+        self.control.add_routes4(&routes).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn get_fib_summary(
+        &self,
+        _req: Request<pb::FibSummaryRequest>,
+    ) -> Result<Response<pb::FibSummary>, Status> {
+        let (mode, routes4, tbl8_used, tbl8_free) = self.control.fib_summary().await;
+        Ok(Response::new(pb::FibSummary {
+            fib4_mode: mode.to_string(),
+            routes4,
+            tbl8_used,
+            tbl8_free,
+        }))
     }
 
     async fn add_route6(&self, req: Request<pb::Route6>) -> Result<Response<pb::Empty>, Status> {

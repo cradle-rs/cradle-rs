@@ -184,9 +184,18 @@ impl Config {
             let op = ilm_action(&i.action)?;
             ctl.add_ilm(i.in_label, i.nexthop, op, i.vrf).await?;
         }
-        for r in &self.routes {
-            let (addr, len) = util::parse_ipv4_prefix(&r.prefix)?;
-            ctl.add_route4(addr, len, r.nexthop, 0).await?;
+        // Bulk-install: the bootstrap config is an initial load, so all
+        // routes go down in one plan (one block sync per affected /24).
+        let routes = self
+            .routes
+            .iter()
+            .map(|r| {
+                let (addr, len) = util::parse_ipv4_prefix(&r.prefix)?;
+                Ok((addr, len, r.nexthop, 0u32))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !routes.is_empty() {
+            ctl.add_routes4(&routes).await?;
         }
         for (i, svc) in self.services.iter().enumerate() {
             let proto = proto_num(&svc.proto)?;

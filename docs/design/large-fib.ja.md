@@ -5,13 +5,21 @@
 > ルックアップ、パケットごとのロック無し、フル DFZ 容量 — しかも `FibHandle`
 > の継ぎ目は不変のまま。
 
-ステータス: **フェーズ 1 実装済み** — シャドウ + 展開エンジン
-(`crates/cradle/src/dir24.rs`、参照 LPM に対するプロパティテスト付き)、
-`TBL24`/`TBL8`/`DEFAULT4` のパック化ワードデータパス、ロード時サイジング
-付き `--fib4-mode` / `"fib4_mode"`、3 つのカウンタ、および両エンジンパスを
-アサートする `cradle_dir24` BDD スモーク。LPM がデフォルトモードのまま。
-フェーズ 1 のマップ書き込みは要素単位(`BPF_MAP_UPDATE_BATCH` と
-`ctl fib summary` はフェーズ 2)。以下のフェーズ 2〜4 は設計のままである。[`architecture.md`](architecture.md) の L3 パスの
+ステータス: **フェーズ 1〜2 実装済み。** フェーズ 1: シャドウ + 展開
+エンジン(`crates/cradle/src/dir24.rs`、参照 LPM に対するプロパティテスト
+付き)、`TBL24`/`TBL8`/`DEFAULT4` のパック化ワードデータパス、ロード時
+サイジング付き `--fib4-mode` / `"fib4_mode"`、3 つのカウンタ、
+`cradle_dir24` BDD スモーク。フェーズ 2: バルク初期ロードパス
+(`route_add_bulk` — バッチごとに影響 /24 ブロックを 1 回だけ同期)、
+`AddRoute4Batch` RPC(設定ウォーカーが使用)、`GetFibSummary` /
+`cradle ctl fib`、DFZ 形状の `ctl gen-routes` ジェネレータ、そして
+`cradle_bigfib` BDD(**100 万経路の FIB** をロードし、3 つのルックアップ
+パスすべてで転送し、負荷中の撤回まで検証。実測: **100 万経路をリリース
+ビルドで 2.0 秒 / デバッグで 9.5 秒、約 49 万経路/秒**、要素単位のマップ
+書き込みのまま — `BPF_MAP_UPDATE_BATCH` の代替案はこの規模では不要と実測
+された)。LPM がデフォルトモードのまま。フェーズ 2 の残り:
+`BPF_PROG_TEST_RUN` ルックアップレイテンシハーネス(後続 PR)。以下の
+フェーズ 3〜4 は設計のままである。[`architecture.md`](architecture.md) の L3 パスの
 上に構築される。オーバーレイ設計([`mpls.md`](mpls.md)、[`srv6.md`](srv6.md)、
 [`evpn-vxlan.md`](evpn-vxlan.md))はいずれも本設計に依存しないが、三者が収束
 する共有の per-VRF FIB は、グローバルテーブルの行き先がここであることを
