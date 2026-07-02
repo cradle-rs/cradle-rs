@@ -26,8 +26,10 @@ const CONNECTED_NH_BASE_V4: u32 = 1_000_000;
 const CONNECTED_NH_BASE_V6: u32 = 2_000_000;
 
 /// Install local + connected routes for `name` (ifindex `ifindex`) from its
-/// current kernel addresses (IPv4 and global IPv6).
-pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32) -> Result<()> {
+/// current kernel addresses (IPv4 and global IPv6). `vrf` scopes the derived
+/// v4 routes to that VRF table (0 = global); v6 has no VRF table yet, so v6
+/// derivation is skipped for VRF-bound ports rather than leaked globally.
+pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Result<()> {
     for ifa in getifaddrs()? {
         if ifa.interface_name != name {
             continue;
@@ -41,16 +43,19 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32) -> Result<()> {
             // u32 that `Ipv4Addr::from` expects (on this little-endian host).
             let ip = Ipv4Addr::from(sin.as_ref().sin_addr.s_addr.to_be());
             let plen = min.as_ref().sin_addr.s_addr.count_ones() as u8;
-            dp.route4_add(ip, 32, 0, FIB_F_LOCAL)?;
+            dp.route4_add(vrf, ip, 32, 0, FIB_F_LOCAL)?;
             if plen < 32 {
                 let mask_bits = if plen == 0 { 0 } else { u32::MAX << (32 - plen as u32) };
                 let net = Ipv4Addr::from(u32::from(ip) & mask_bits);
                 let nh = CONNECTED_NH_BASE_V4 + ifindex;
                 dp.nexthop_set(nh, None, ifindex, &[])?;
-                dp.route4_add(net, plen, nh, 0)?;
+                dp.route4_add(vrf, net, plen, nh, 0)?;
             }
-            info!("port {name}: derived v4 {ip}/{plen}");
+            info!("port {name}: derived v4 {ip}/{plen} (vrf {vrf})");
         } else if let (Some(sin6), Some(min6)) = (addr.as_sockaddr_in6(), mask.as_sockaddr_in6()) {
+            if vrf != 0 {
+                continue; // no FIB6_VRF yet — don't leak v6 into the global table
+            }
             let ip = Ipv6Addr::from(sin6.as_ref().sin6_addr.s6_addr);
             // Skip loopback and link-local (fe80::/10); those don't participate
             // in global forwarding here.

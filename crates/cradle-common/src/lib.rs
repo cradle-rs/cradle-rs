@@ -149,6 +149,28 @@ pub struct Neigh6Key {
     pub addr: [u8; 16],
 }
 
+/// Per-VRF IPv4 LPM key: the VRF id prefixes the address, so one trie holds
+/// every VRF table — a route `addr/len` in VRF `v` is inserted with
+/// `prefix_len = 32 + len` (the VRF bits always match exactly).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Vrf4Key {
+    pub vrf_id: u32,
+    pub addr: [u8; 4],
+}
+
+/// XDP→TC metadata: VRF context attached by the XDP MPLS stage when a
+/// VPN-label decap selects a VRF table (`bpf_xdp_adjust_meta`; TC reads the
+/// `data_meta..data` window). `magic` guards against foreign metadata.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CradleXdpMeta {
+    pub magic: u32,
+    pub vrf_id: u32,
+}
+
+pub const XDP_META_MAGIC: u32 = 0xC7AD_1E01;
+
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -249,6 +271,9 @@ pub struct PortConfig {
     pub vlan: u16,
     /// `PORT_F_*` flags.
     pub flags: u32,
+    /// VRF table this L3 port belongs to (0 = global): ingress lookups use
+    /// the per-VRF FIB instead of the global one.
+    pub vrf_id: u32,
 }
 
 /// Participate in L2 switching.
@@ -397,8 +422,10 @@ pub const STAT_FIB4_TBL24_HIT: u32 = 12;
 pub const STAT_FIB4_TBL8_HIT: u32 = 13;
 /// DIR-24-8: fell through to the `DEFAULT4` route.
 pub const STAT_FIB4_DEFAULT: u32 = 14;
+/// Resolved in a per-VRF FIB table.
+pub const STAT_FIB4_VRF_HIT: u32 = 15;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 15;
+pub const STAT_MAX: u32 = 16;
 
 // ============================== L7 proxy ===================================
 
@@ -421,7 +448,7 @@ mod user {
 
     pod!(
         FibEntry, NextHop, Neigh4Key, Neigh6Key, NeighEntry, NhGroupKey,
-        MplsEntry,
+        MplsEntry, Vrf4Key,
         FdbKey, FdbEntry, PortConfig, L2MemberKey,
         ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
         ServiceKey6, Backend6, CtKey6, CtEntry6,

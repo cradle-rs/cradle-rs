@@ -26,22 +26,23 @@ use aya_ebpf::{
     },
     helpers::generated::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
-        bpf_sk_release, bpf_skc_lookup_tcp, bpf_xdp_adjust_head,
+        bpf_sk_release, bpf_skc_lookup_tcp, bpf_xdp_adjust_head, bpf_xdp_adjust_meta,
     },
     macros::{classifier, map, xdp},
     maps::{lpm_trie::Key, Array, HashMap, LpmTrie, LruHashMap, PerCpuArray},
     programs::{TcContext, XdpContext},
 };
 use cradle_common::{
-    fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CtEntry, CtEntry6,
-    CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, MplsEntry, Neigh4Key,
-    Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
-    FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP,
-    NH_F_MPLS, NH_F_V6, PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT,
-    STAT_FIB4_TBL8_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
+    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, MplsEntry,
+    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
+    ServiceKey6, Vrf4Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK, FIBW_TBL8,
+    FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MPLS_OP_POP,
+    MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_V6, PORT_F_L2, PORT_F_L3, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_L2_FLOOD,
+    STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
+    STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    XDP_META_MAGIC,
 };
 use network_types::eth::EthHdr;
 
@@ -54,6 +55,11 @@ static PORTS: HashMap<u32, PortConfig> = HashMap::with_max_entries(256, 0);
 static FIB4: LpmTrie<[u8; 4], FibEntry> = LpmTrie::with_max_entries(4096, 0);
 #[map]
 static FIB6: LpmTrie<[u8; 16], FibEntry> = LpmTrie::with_max_entries(4096, 0);
+
+// --- L3 per-VRF v4 FIB: one LPM trie holds every VRF table via the
+// vrf-prefixed key (mpls.md Phase 3; shared seam with SRv6/EVPN designs). ---
+#[map]
+static FIB4_VRF: LpmTrie<Vrf4Key, FibEntry> = LpmTrie::with_max_entries(4096, 0);
 
 // --- L3 DIR-24-8 v4 engine (large-fib.md). Declared at 1 entry; the loader
 // upsizes them (TBL24 → 2^24, TBL8 → groups*256) only in dir24 mode, so
@@ -276,7 +282,7 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
         // place (service DNAT / reverse SNAT) so routing then targets the real
         // endpoint. Failures fall through to plain routing.
         let _ = l4_nat(ctx);
-        l3_forward(ctx)
+        l3_forward(ctx, port.vrf_id)
     } else {
         Ok(TC_ACT_PIPE as i32)
     }
@@ -661,13 +667,32 @@ fn v6_csum_fixup(
 // ============================== L3 forwarding ==============================
 
 #[inline(always)]
-fn l3_forward(ctx: &TcContext) -> Result<i32, ()> {
+fn l3_forward(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     match u16::from_be(ethertype) {
-        ETH_P_IP => l3_forward_v4(ctx),
+        ETH_P_IP => l3_forward_v4(ctx, port_vrf),
         ETH_P_IPV6 => l3_forward_v6(ctx),
         ETH_P_MPLS_UC => mpls_forward(ctx),
         _ => Ok(TC_ACT_PIPE as i32), // ARP, ... -> stack
+    }
+}
+
+/// VRF context attached by the XDP MPLS stage (VPN-label decap): read from
+/// the skb's `data_meta..data` window, guarded by the magic. 0 = none.
+#[inline(always)]
+fn tc_meta_vrf(ctx: &TcContext) -> u32 {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return 0;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe {
+        if (*m).magic != XDP_META_MAGIC {
+            return 0;
+        }
+        (*m).vrf_id
     }
 }
 
@@ -724,10 +749,20 @@ fn flow_hash_v6(ctx: &TcContext, src: &[u8; 16], dst: &[u8; 16]) -> u32 {
     fmix32(h)
 }
 
-/// v4 route lookup — the DIR-24-8 arrays when enabled in `DP_CONFIG`
-/// (1–2 flat array loads + a `DEFAULT4` fallthrough), else the LPM trie.
+/// v4 route lookup. A non-zero `vrf_id` (from the ingress port's binding or
+/// the XDP decap metadata) selects the per-VRF LPM table; the global table
+/// is the DIR-24-8 arrays when enabled in `DP_CONFIG` (1–2 flat array loads
+/// + a `DEFAULT4` fallthrough), else the LPM trie.
 #[inline(always)]
-fn fib4_lookup(dst: [u8; 4]) -> Option<FibEntry> {
+fn fib4_lookup(vrf_id: u32, dst: [u8; 4]) -> Option<FibEntry> {
+    if vrf_id != 0 {
+        let key = Key::new(64, Vrf4Key { vrf_id, addr: dst });
+        let fib = FIB4_VRF.get(&key).copied();
+        if fib.is_some() {
+            stat_inc(STAT_FIB4_VRF_HIT);
+        }
+        return fib;
+    }
     let dir24 = match DP_CONFIG.get(0) {
         Some(w) => *w & DPC_FIB4_DIR24 != 0,
         None => false,
@@ -761,9 +796,11 @@ fn fib4_lookup(dst: [u8; 4]) -> Option<FibEntry> {
 }
 
 #[inline(always)]
-fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
+fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
-    let fib = match fib4_lookup(dst) {
+    // Port binding wins; else VRF context from a VPN-label decap (XDP meta).
+    let vrf_id = if port_vrf != 0 { port_vrf } else { tc_meta_vrf(ctx) };
+    let fib = match fib4_lookup(vrf_id, dst) {
         Some(fib) => fib,
         None => return Ok(TC_ACT_PIPE as i32),
     };
@@ -1064,7 +1101,8 @@ pub fn cradle_mpls(ctx: XdpContext) -> u32 {
 
 #[inline(always)]
 fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
-    // Bounded pop loop: each iteration handles the (new) top label or exits.
+    // Only *local* label chains loop (nexthop-less pops: this node owns the
+    // label underneath — UHP/egress stacks). Everything else exits directly.
     for _ in 0..=MAX_LABELS {
         let ethertype = unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? };
         if u16::from_be(ethertype) != ETH_P_MPLS_UC {
@@ -1084,51 +1122,137 @@ fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             None => return Ok(xdp_action::XDP_PASS),
         };
 
-        // Pop-to-IP needs the exposed EtherType up front so a bad payload
-        // can drop before the frame is mutated.
-        let pop_ip = |ctx: &XdpContext| -> Result<u16, ()> {
-            let ver = unsafe { *xdp_ptr::<u8>(ctx, MPLS_LSE_OFF + 4)? };
-            match ver >> 4 {
-                4 => Ok(ETH_P_IP),
-                6 => Ok(ETH_P_IPV6),
-                _ => Err(()),
-            }
-        };
-
         match ent.op {
-            MPLS_OP_POP if s == 0 => pop_head(ctx, ETH_P_MPLS_UC)?,
-            MPLS_OP_POP_L3 if s == 1 => match pop_ip(ctx) {
-                Ok(et) => pop_head(ctx, et)?,
-                Err(()) => {
-                    stat_inc(STAT_DROP);
-                    return Ok(xdp_action::XDP_DROP);
-                }
-            },
-            // zebra-shaped PHP: a swap with an empty out stack — whether the
-            // pop exposes IP or another label is the packet's S bit's call.
-            MPLS_OP_SWAP if nh.num_labels == 0 => {
+            // Explicit decap (gRPC / zebra DecapVrf): pop to IP and route
+            // locally — in the entry's VRF when set — whatever the nexthop.
+            MPLS_OP_POP_L3 if s == 1 => return pop_decap_local(ctx, ent.vrf_id),
+            // PHP shapes — a pop with a *real* nexthop means "pop and
+            // forward the remaining stack there". The labels underneath
+            // belong to the next hop (label spaces are per-node): they must
+            // never be looked up here.
+            MPLS_OP_SWAP | MPLS_OP_POP if nh.num_labels == 0 && nh.oif != 0 => {
+                return pop_and_forward(ctx, &nh, s);
+            }
+            // Nexthop-less pops: this node owns whatever is underneath.
+            MPLS_OP_SWAP | MPLS_OP_POP if nh.num_labels == 0 => {
                 if s == 1 {
-                    match pop_ip(ctx) {
-                        Ok(et) => pop_head(ctx, et)?,
-                        Err(()) => {
-                            stat_inc(STAT_DROP);
-                            return Ok(xdp_action::XDP_DROP);
-                        }
-                    }
-                } else {
-                    pop_head(ctx, ETH_P_MPLS_UC)?;
+                    return pop_decap_local(ctx, ent.vrf_id);
                 }
+                pop_head(ctx, ETH_P_MPLS_UC)?; // and loop: the next label is ours
             }
             // SR stack: pop the incoming label, impose N > 1 labels — the
             // frame grows, so it completes here (L2 rewrite + redirect).
             MPLS_OP_SWAP if nh.num_labels > 1 => return grow_swap(ctx, &nh, s, ttl),
             // Single-label swap (TC's in-place job) or a depth-mismatched
-            // explicit pop: hand the frame up.
+            // explicit op: hand the frame up.
             _ => return Ok(xdp_action::XDP_PASS),
         }
-        // A pop succeeded: loop — the next label (or the IP payload) is on top.
     }
     Ok(xdp_action::XDP_PASS)
+}
+
+/// EtherType the pop would expose, from the payload's version nibble.
+#[inline(always)]
+fn popped_ethertype(ctx: &XdpContext) -> Result<u16, ()> {
+    let ver = unsafe { *xdp_ptr::<u8>(ctx, MPLS_LSE_OFF + 4)? };
+    match ver >> 4 {
+        4 => Ok(ETH_P_IP),
+        6 => Ok(ETH_P_IPV6),
+        _ => Err(()),
+    }
+}
+
+/// Resolve the egress L2 addresses for a nexthop from the control-plane
+/// neighbor/port state. `None` = miss (caller punts, frame untouched).
+#[inline(always)]
+fn xdp_resolve_l2(nh: &NextHop) -> Option<([u8; 6], [u8; 6])> {
+    let dst_mac = if nh.flags & NH_F_V6 != 0 {
+        unsafe {
+            (*NEIGH6.get_ptr(&Neigh6Key {
+                ifindex: nh.oif,
+                addr: nh.gateway_v6,
+            })?)
+            .mac
+        }
+    } else {
+        unsafe {
+            (*NEIGH4.get_ptr(&Neigh4Key {
+                ifindex: nh.oif,
+                addr: nh.gateway_v4,
+            })?)
+            .mac
+        }
+    };
+    let src_mac = unsafe { (*PORTS.get_ptr(&nh.oif)?).mac };
+    Some((dst_mac, src_mac))
+}
+
+/// Bounds-checked pointer into the XDP metadata area.
+#[inline(always)]
+fn xdp_meta_ptr(ctx: &XdpContext) -> Result<*mut CradleXdpMeta, ()> {
+    let meta = unsafe { (*ctx.ctx).data_meta } as usize;
+    let data = unsafe { (*ctx.ctx).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return Err(());
+    }
+    Ok(meta as *mut CradleXdpMeta)
+}
+
+/// Pop the bottom-of-stack label to IP for *local* routing. A VRF-scoped
+/// decap (L3VPN) attaches the VRF id as XDP metadata, which the TC FIB
+/// stage reads — failure to attach drops rather than mis-routing a VPN
+/// packet in the global table.
+#[inline(always)]
+fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
+    let et = match popped_ethertype(ctx) {
+        Ok(et) => et,
+        Err(()) => {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+    };
+    pop_head(ctx, et)?;
+    if vrf_id != 0 {
+        if unsafe {
+            bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32))
+        } != 0
+        {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        let meta = xdp_meta_ptr(ctx)?;
+        unsafe {
+            (*meta).magic = XDP_META_MAGIC;
+            (*meta).vrf_id = vrf_id;
+        }
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// PHP: pop one label and forward the remaining frame — still-MPLS or the
+/// exposed IP — via the ILM's nexthop. Pipe-model TTL: nothing inner is
+/// touched.
+#[inline(always)]
+fn pop_and_forward(ctx: &XdpContext, nh: &NextHop, s: u8) -> Result<u32, ()> {
+    // Resolve egress L2 first: a miss punts with the frame untouched.
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    let et = if s == 0 {
+        ETH_P_MPLS_UC
+    } else {
+        match popped_ethertype(ctx) {
+            Ok(et) => et,
+            Err(()) => {
+                stat_inc(STAT_DROP);
+                return Ok(xdp_action::XDP_DROP);
+            }
+        }
+    };
+    pop_head(ctx, et)?;
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
 /// Remove the top label stack entry: move the 12 Ethernet address bytes over
@@ -1158,26 +1282,8 @@ fn grow_swap(ctx: &XdpContext, nh: &NextHop, s_in: u8, ttl_in: u8) -> Result<u32
     }
     // Resolve egress L2 first: a neighbor/port miss punts before mutation
     // (TC then sees the untouched frame and punts to the host).
-    let dst_mac = if nh.flags & NH_F_V6 != 0 {
-        match NEIGH6.get_ptr(&Neigh6Key {
-            ifindex: nh.oif,
-            addr: nh.gateway_v6,
-        }) {
-            Some(e) => unsafe { (*e).mac },
-            None => return Ok(xdp_action::XDP_PASS),
-        }
-    } else {
-        match NEIGH4.get_ptr(&Neigh4Key {
-            ifindex: nh.oif,
-            addr: nh.gateway_v4,
-        }) {
-            Some(e) => unsafe { (*e).mac },
-            None => return Ok(xdp_action::XDP_PASS),
-        }
-    };
-    let src_mac = match PORTS.get_ptr(&nh.oif) {
-        Some(p) => unsafe { (*p).mac },
-        None => return Ok(xdp_action::XDP_PASS),
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
+        return Ok(xdp_action::XDP_PASS);
     };
 
     let grow = 4 * (n as i32 - 1);

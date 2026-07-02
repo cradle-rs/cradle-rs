@@ -49,6 +49,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "fib4_tbl24_hit",
     "fib4_tbl8_hit",
     "fib4_default",
+    "fib4_vrf_hit",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -148,7 +149,14 @@ impl Control {
         Ok(())
     }
 
-    pub async fn set_port(&self, name: &str, mac: Option<&str>, l3: bool, vlan: u16) -> Result<()> {
+    pub async fn set_port(
+        &self,
+        name: &str,
+        mac: Option<&str>,
+        l3: bool,
+        vlan: u16,
+        vrf_id: u32,
+    ) -> Result<()> {
         let ifindex = util::ifindex_of(name)?;
         let mac = match mac {
             Some(m) if !m.is_empty() => util::parse_mac(m)?,
@@ -157,11 +165,12 @@ impl Control {
         let flags = if l3 { PORT_F_L3 } else { PORT_F_L2 };
         self.attach(name, ifindex, l3).await?;
         let mut dp = self.dp.lock().await;
-        dp.port_set(ifindex, mac, flags, vlan)?;
+        dp.port_set(ifindex, mac, flags, vlan, vrf_id)?;
         // Routed ports auto-derive their local + connected routes from the
-        // kernel, so no manual route/neighbor config is needed.
+        // kernel (into the port's VRF table when bound), so no manual
+        // route/neighbor config is needed.
         if l3 {
-            crate::kernel::derive_port(&mut dp, name, ifindex)?;
+            crate::kernel::derive_port(&mut dp, name, ifindex, vrf_id)?;
         }
         Ok(())
     }
@@ -201,6 +210,7 @@ impl Control {
 
     pub async fn add_route4(
         &self,
+        vrf: u32,
         addr: Ipv4Addr,
         prefix_len: u8,
         nexthop_id: u32,
@@ -209,17 +219,17 @@ impl Control {
         self.dp
             .lock()
             .await
-            .route4_add(addr, prefix_len, nexthop_id, flags)?;
+            .route4_add(vrf, addr, prefix_len, nexthop_id, flags)?;
         Ok(())
     }
 
-    pub async fn del_route4(&self, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
-        self.dp.lock().await.route4_del(addr, prefix_len)?;
+    pub async fn del_route4(&self, vrf: u32, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.route4_del(vrf, addr, prefix_len)?;
         Ok(())
     }
 
-    /// Bulk-install IPv4 routes (`(addr, len, nexthop_id, flags)` each).
-    pub async fn add_routes4(&self, routes: &[(Ipv4Addr, u8, u32, u32)]) -> Result<()> {
+    /// Bulk-install IPv4 routes (`(vrf, addr, len, nexthop_id, flags)` each).
+    pub async fn add_routes4(&self, routes: &[(u32, Ipv4Addr, u8, u32, u32)]) -> Result<()> {
         self.dp.lock().await.route4_add_bulk(routes)?;
         Ok(())
     }
@@ -383,7 +393,7 @@ impl Cradle for GrpcService {
     async fn set_port(&self, req: Request<pb::Port>) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
         self.control
-            .set_port(&p.name, Some(&p.mac), p.l3, p.vlan as u16)
+            .set_port(&p.name, Some(&p.mac), p.l3, p.vlan as u16, p.vrf_id)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -457,7 +467,7 @@ impl Cradle for GrpcService {
         let r = req.into_inner();
         let (addr, len) = util::parse_ipv4_prefix(&r.prefix).map_err(st)?;
         self.control
-            .add_route4(addr, len, r.nexthop_id, r.flags)
+            .add_route4(r.vrf_table_id, addr, len, r.nexthop_id, r.flags)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -466,7 +476,10 @@ impl Cradle for GrpcService {
     async fn del_route4(&self, req: Request<pb::Route4Del>) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
         let (addr, len) = util::parse_ipv4_prefix(&r.prefix).map_err(st)?;
-        self.control.del_route4(addr, len).await.map_err(st)?;
+        self.control
+            .del_route4(r.vrf_table_id, addr, len)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 
@@ -478,7 +491,7 @@ impl Cradle for GrpcService {
         let mut routes = Vec::with_capacity(b.routes.len());
         for r in &b.routes {
             let (addr, len) = util::parse_ipv4_prefix(&r.prefix).map_err(st)?;
-            routes.push((addr, len, r.nexthop_id, r.flags));
+            routes.push((r.vrf_table_id, addr, len, r.nexthop_id, r.flags));
         }
         self.control.add_routes4(&routes).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))

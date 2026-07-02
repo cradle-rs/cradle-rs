@@ -3,18 +3,22 @@
 > Label-switched forwarding in the eBPF data plane, driven by the zebra-rs
 > MPLS control plane (static label bindings, SR-MPLS, labeled BGP, L3VPN).
 
-Status: **Phases 1–2 implemented.** Phase 1: transit swap in the TC
+Status: **Phases 1–3 implemented.** Phase 1: transit swap in the TC
 classifier, pops in a native-XDP stage, `MPLS_FIB` + `NEIGH6`,
 `AddIlm`/`DelIlm`/`SetNeighbor6`, `labels` on nexthops, static JSON config.
 Phase 2: **ingress imposition** (TC push — the skb is still IP, so
 `adjust_room` grow is allowed), **SR stacks** (multi-label push; XDP
-grow-swap completing with an in-XDP L2 rewrite + redirect; a bounded pop
-loop resolving chained pops in one pass), **PHP by S bit** (a swap with an
-empty out stack — zebra's PHP shape — pops to IP or to the next label per
-packet), and the **zebra-rs `CradleFib` MPLS tee** (labeled nexthops, ILM
-add/replace/del, and resolved-neighbor feed). Proven by the `cradle_mpls`
-(all-static, full operation matrix) and `cradle_mpls_zebra` (zebra-driven
-LSP) BDD features. Phases 3–4 below remain design.
+grow-swap completing with an in-XDP L2 rewrite + redirect), **PHP by S bit**,
+and the **zebra-rs `CradleFib` MPLS tee** (labeled nexthops, ILM
+add/replace/del, resolved-neighbor feed). Phase 3: **L3VPN** — the per-VRF
+IPv4 FIB (`FIB4_VRF`, the vrf-prefixed LPM key), VRF-bound ports, the
+XDP→TC decap metadata channel, the pop-semantics matrix below (PHP
+pop-and-forward vs local chains — a correctness fix Phase 3 forced), and
+VRF-scoped routes over the tee (which had silently filed VRF routes into
+the global FIB). Proven by `cradle_mpls` / `cradle_mpls_zebra` /
+`cradle_mpls_isis` (Phases 1–2) and `cradle_l3vpn` (static) +
+`cradle_l3vpn_zebra` (full iBGP VPNv4 over IS-IS SR) BDD features. Phase 4
+below remains design.
 
 ## Goal and scope
 
@@ -361,22 +365,55 @@ stack. Nothing MPLS-specific lives in cradle's policy: zebra-rs decides the labe
 operations; cradle executes them in eBPF. This is the whole thesis — a real
 routing stack driving the eBPF data plane — applied to labels.
 
-## VRF / L3VPN (Phase 3)
+## VRF / L3VPN (Phase 3 — implemented)
 
-L3VPN egress needs a per-VRF IP lookup after popping the VPN label. Today cradle
-has a single global `FIB4`/`FIB6`. Two options, in increasing order of work:
+L3VPN needs a per-VRF IP lookup at both edges: ingress (the CE-facing port
+selects the customer table, whose routes carry `[transport, vpn]` stacks)
+and egress (the popped VPN label selects the table for the exposed packet).
+The implemented design:
 
-1. **Per-CE / per-prefix label** (no VRF lookup): zebra allocates the VPN label
-   per CE nexthop, so `MPLS_FIB[vpn_label]` = `POP_L3` to a specific nexthop —
-   pop and `bpf_redirect_neigh` to the CE. Works within the MVP map contract; the
-   common case for many deployments.
-2. **Per-VRF label** (true VRF FIB): make `FIB4`/`FIB6` keyed by `(table_id,
-   prefix)` (an outer hash of LPM tries, or a `table_id` prefix in the key).
-   `MplsEntry.vrf_id` selects the table; `POP_L3` pops then looks up in that VRF.
-   This is a larger change and is scoped to Phase 3.
+- **`FIB4_VRF`** — one LPM trie holds every VRF table via the vrf-prefixed
+  key `Vrf4Key { vrf_id, addr }` with `prefix_len = 32 + route_len` (the VRF
+  bits always match exactly). Per-VRF tables stay LPM tries (they are
+  small); [`large-fib.md`](large-fib.md)'s "pass a table handle" constraint
+  holds — a full-feed VRF can get a DIR instance later. `FIB6_VRF` arrives
+  with SRv6 `End.DT46`.
+- **VRF context, two sources**: the ingress `PortConfig.vrf_id` (port
+  binding, gRPC `Port.vrf_id`), or — for VPN-label decap — **XDP→TC
+  metadata**: the XDP stage attaches `CradleXdpMeta { magic, vrf_id }` via
+  `bpf_xdp_adjust_meta` after the pop, and the TC FIB stage reads the
+  `data_meta..data` window. Port wins; both zero ⇒ global. A decap that
+  cannot attach its metadata drops rather than mis-routing a VPN packet in
+  the global table.
+- **The pop-semantics matrix** (a correctness fix this phase forced — the
+  Phase 2 pop loop re-examined every exposed label locally, which is wrong
+  for PHP of a transport label over a VPN label; label spaces are
+  per-node). The ILM's nexthop is the discriminator, matching zebra's own
+  model (PHP ILMs carry a real adjacency; local/decap ILMs are
+  nexthop-less):
 
-The map contract above already carries `vrf_id` on `MplsEntry` so Phase 1/2 don't
-need an ABI break to reach Phase 3.
+  | ILM op | S bit | nexthop oif | behavior |
+  |---|---|---|---|
+  | SWAP, n>1 | any | real | grow-swap: impose + L2 rewrite + redirect |
+  | SWAP, n==1 | any | real | XDP_PASS → TC in-place swap |
+  | SWAP n==0 / POP | any | ≠0 | **pop-and-forward** the remaining frame (MPLS or exposed IP) via the ILM nexthop — never re-examined locally |
+  | SWAP n==0 / POP | 0 | ==0 | pop and continue locally (UHP/egress label chains) |
+  | SWAP, n==0 | 1 | ==0 | decap locally (+ VRF meta when `vrf_id≠0`) |
+  | POP_L3 | 1 | any | force-local decap + VRF meta — the gRPC/`DecapVrf` shape |
+
+- **The tee**: `Route4`/`Route4Del` carry `vrf_table_id` (0 = global,
+  mirroring `Ilm`); zebra's `route_install`/`route_del` pass the kernel
+  `table_id` they always had (normalizing `{0, 254} → 0`), which is
+  byte-identical to the `DecapVrf` ILM's table id — fixing a live
+  mis-programming where VRF routes teed into the global FIB. v6 VRF routes
+  are skipped (no `FIB6_VRF` yet) rather than leaked.
+
+One deployment note discovered in the integration BDD: **router-originated
+TCP entering an XDP-forwarded core** (the PEs' own iBGP session) leaves the
+stack with deferred (partial) checksums on veth, which an XDP redirect never
+resolves — the far end drops the segments while ICMP and transit traffic
+flow fine. The BDD disables TX checksum offload on the PEs' core-facing
+veths; hardware NICs and transit traffic are unaffected.
 
 ## Testing (BDD)
 
@@ -407,8 +444,10 @@ array) to prove the datapath, then a zebra-rs static label binding
    S-bit PHP), and the zebra-rs `CradleFib` MPLS tee — labeled nexthops,
    `ilm_add/replace/del`, and the resolved-neighbor feed `mpls_l2_xmit`
    depends on (`cradle_mpls_zebra` BDD).
-3. **Phase 3 — L3VPN.** Per-VRF FIB tables and `POP_L3` VRF lookup; the
-   per-CE-label shortcut lands earlier, in Phase 1, as a special case.
+3. **Phase 3 — L3VPN** *(done)*. `FIB4_VRF` (vrf-prefixed LPM), VRF-bound
+   ports, XDP→TC decap metadata, the pop-semantics matrix, and VRF-scoped
+   routes over the tee — proven end-to-end by `cradle_l3vpn` (static) and
+   `cradle_l3vpn_zebra` (iBGP VPNv4 over IS-IS SR).
 4. **Phase 4 — depth & offload.** Tail-call the MPLS program if the verifier
    budget demands it; raise `MAX_LABELS`; entropy/EL label handling.
 ```

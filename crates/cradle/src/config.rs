@@ -65,12 +65,18 @@ pub struct Port {
     pub l3: bool,
     #[serde(default)]
     pub vlan: u16,
+    /// VRF table an L3 port belongs to (0 = global).
+    #[serde(default)]
+    pub vrf: u32,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Nexthop {
     pub id: u32,
-    pub oif: String,
+    /// Output interface. Absent = an oif-less nexthop (e.g. an ILM
+    /// decap/local-chain target that never egresses through it).
+    #[serde(default)]
+    pub oif: Option<String>,
     #[serde(default)]
     pub gateway: Option<String>,
     /// MPLS out-label stack, `[0]` = outermost (swap value / imposition).
@@ -92,6 +98,9 @@ pub struct Ilm {
 pub struct Route {
     pub prefix: String,
     pub nexthop: u32,
+    /// VRF table (0 = global).
+    #[serde(default)]
+    pub vrf: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +169,7 @@ impl Config {
     /// Apply this configuration in-process via the control plane.
     pub async fn apply_control(&self, ctl: &Control) -> Result<()> {
         for p in &self.ports {
-            ctl.set_port(&p.name, None, p.l3, p.vlan).await?;
+            ctl.set_port(&p.name, None, p.l3, p.vlan, p.vrf).await?;
         }
         for (vlan, members) in l2_domains(&self.ports) {
             ctl.set_l2_domain(vlan, &members).await?;
@@ -170,7 +179,10 @@ impl Config {
                 Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                 None => None,
             };
-            ctl.set_nexthop(nh.id, gw, &nh.oif, &nh.labels).await?;
+            match &nh.oif {
+                Some(oif) => ctl.set_nexthop(nh.id, gw, oif, &nh.labels).await?,
+                None => ctl.set_nexthop_idx(nh.id, gw, 0, &nh.labels).await?,
+            }
         }
         for n in &self.neighbors {
             let ip: IpAddr = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
@@ -191,7 +203,7 @@ impl Config {
             .iter()
             .map(|r| {
                 let (addr, len) = util::parse_ipv4_prefix(&r.prefix)?;
-                Ok((addr, len, r.nexthop, 0u32))
+                Ok((r.vrf, addr, len, r.nexthop, 0u32))
             })
             .collect::<Result<Vec<_>>>()?;
         if !routes.is_empty() {

@@ -28,6 +28,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         mac: String::new(),
                         l3: p.l3,
                         vlan: p.vlan as u32,
+                        vrf_id: p.vrf,
                     })
                     .await?;
             }
@@ -44,7 +45,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     .set_nexthop(pb::Nexthop {
                         id: nh.id,
                         gateway: nh.gateway.clone().unwrap_or_default(),
-                        oif: nh.oif.clone(),
+                        oif: nh.oif.clone().unwrap_or_default(),
                         oif_index: 0,
                         v6: false,
                         labels: nh.labels.clone(),
@@ -94,6 +95,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                                 prefix: r.prefix.clone(),
                                 nexthop_id: r.nexthop,
                                 flags: 0,
+                                vrf_table_id: r.vrf,
                             })
                             .collect(),
                     })
@@ -160,7 +162,12 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
             println!("{:<14} {}", "tbl8_free", s.tbl8_free);
         }
         CtlOp::DelRoute { prefix } => {
-            client.del_route4(pb::Route4Del { prefix: prefix.clone() }).await?;
+            client
+                .del_route4(pb::Route4Del {
+                    prefix: prefix.clone(),
+                    vrf_table_id: 0,
+                })
+                .await?;
             println!("deleted {prefix}");
         }
         CtlOp::GenRoutes {
@@ -228,6 +235,7 @@ async fn gen_routes(
                 prefix: format!("{}/{}", std::net::Ipv4Addr::from(addr), len),
                 nexthop_id,
                 flags: 0,
+                vrf_table_id: 0,
             });
         }
         client
