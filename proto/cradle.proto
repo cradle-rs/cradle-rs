@@ -49,6 +49,22 @@ message Route4Del {
   string prefix = 1;
 }
 
+// Bulk route install — the initial-load path. In dir24 mode each affected
+// /24 block is recomputed once per batch instead of once per route.
+message Route4Batch {
+  repeated Route4 routes = 1;
+}
+
+message FibSummaryRequest {}
+
+// IPv4 FIB engine state (`cradle ctl fib`).
+message FibSummary {
+  string fib4_mode = 1;  // "lpm" | "dir24"
+  uint64 routes4 = 2;    // dir24 shadow route count (0 in lpm mode)
+  uint32 tbl8_used = 3;
+  uint32 tbl8_free = 4;
+}
+
 message Route6 {
   string prefix = 1;   // "addr/len"
   uint32 nexthop_id = 2;
@@ -132,7 +148,9 @@ service Cradle {
   rpc SetNexthop(Nexthop) returns (Empty);
   rpc SetNexthopGroup(NexthopGroup) returns (Empty);
   rpc AddRoute4(Route4) returns (Empty);
+  rpc AddRoute4Batch(Route4Batch) returns (Empty);
   rpc DelRoute4(Route4Del) returns (Empty);
+  rpc GetFibSummary(FibSummaryRequest) returns (FibSummary);
   rpc AddRoute6(Route6) returns (Empty);
   rpc DelRoute6(Route6Del) returns (Empty);
   rpc SetNeighbor4(Neighbor4) returns (Empty);

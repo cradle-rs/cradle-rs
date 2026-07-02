@@ -82,12 +82,18 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
-            for r in &cfg.routes {
+            if !cfg.routes.is_empty() {
                 client
-                    .add_route4(pb::Route4 {
-                        prefix: r.prefix.clone(),
-                        nexthop_id: r.nexthop,
-                        flags: 0,
+                    .add_route4_batch(pb::Route4Batch {
+                        routes: cfg
+                            .routes
+                            .iter()
+                            .map(|r| pb::Route4 {
+                                prefix: r.prefix.clone(),
+                                nexthop_id: r.nexthop,
+                                flags: 0,
+                            })
+                            .collect(),
                     })
                     .await?;
             }
@@ -141,6 +147,99 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                 println!("{:<14} {}", e.name, e.packets);
             }
         }
+        CtlOp::Fib => {
+            let s = client
+                .get_fib_summary(pb::FibSummaryRequest {})
+                .await?
+                .into_inner();
+            println!("{:<14} {}", "fib4_mode", s.fib4_mode);
+            println!("{:<14} {}", "routes4", s.routes4);
+            println!("{:<14} {}", "tbl8_used", s.tbl8_used);
+            println!("{:<14} {}", "tbl8_free", s.tbl8_free);
+        }
+        CtlOp::DelRoute { prefix } => {
+            client.del_route4(pb::Route4Del { prefix: prefix.clone() }).await?;
+            println!("deleted {prefix}");
+        }
+        CtlOp::GenRoutes {
+            count,
+            seed,
+            nexthop_id,
+            chunk,
+        } => {
+            gen_routes(&mut client, count, seed, nexthop_id, chunk).await?;
+        }
     }
+    Ok(())
+}
+
+/// Generate and bulk-install a synthetic route table with a DFZ-like
+/// prefix-length distribution (deterministic per seed). Addresses are spread
+/// over 20.0.0.0–89.255.255.255 — away from the RFC1918 space the tests use
+/// and from 99.0.0.0/8, which the BDD reserves for its DEFAULT4 probe; only
+/// lengths /16../24 are emitted (a real DFZ propagates almost nothing longer
+/// than /24, and shorter-than-/16 expansion is a Phase 3 churn topic).
+async fn gen_routes(
+    client: &mut CradleClient<tonic::transport::Channel>,
+    count: u64,
+    seed: u64,
+    nexthop_id: u32,
+    chunk: usize,
+) -> Result<()> {
+    // Cumulative per-mille weights, roughly the public-DFZ histogram.
+    const LENS: [(u8, u32); 9] = [
+        (24, 620),
+        (23, 740),
+        (22, 860),
+        (21, 920),
+        (20, 960),
+        (19, 985),
+        (18, 995),
+        (17, 998),
+        (16, 1000),
+    ];
+    fn splitmix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    let mut rng = seed;
+    let mut seen: std::collections::HashSet<(u32, u8)> = std::collections::HashSet::new();
+    let start = std::time::Instant::now();
+    let mut batch: Vec<pb::Route4> = Vec::with_capacity(chunk);
+    while (seen.len() as u64) < count {
+        batch.clear();
+        while batch.len() < chunk && (seen.len() as u64) < count {
+            let r = splitmix64(&mut rng);
+            let dice = (r % 1000) as u32;
+            let len = LENS.iter().find(|&&(_, cum)| dice < cum).unwrap().0;
+            let mask = u32::MAX << (32 - len as u32);
+            let addr = (((20 + (r >> 10) % 70) as u32) << 24 | (r >> 17) as u32 & 0x00ff_ffff)
+                & mask;
+            if !seen.insert((addr, len)) {
+                continue;
+            }
+            batch.push(pb::Route4 {
+                prefix: format!("{}/{}", std::net::Ipv4Addr::from(addr), len),
+                nexthop_id,
+                flags: 0,
+            });
+        }
+        client
+            .add_route4_batch(pb::Route4Batch {
+                routes: batch.clone(),
+            })
+            .await?;
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "installed {} routes in {:.2?} ({:.0} routes/s)",
+        seen.len(),
+        elapsed,
+        seen.len() as f64 / elapsed.as_secs_f64()
+    );
     Ok(())
 }

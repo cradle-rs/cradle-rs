@@ -85,6 +85,29 @@ pub enum CtlOp {
     },
     /// Dump the data-plane packet counters.
     Stats,
+    /// Show the IPv4 FIB engine summary (mode, routes, TBL8 groups).
+    Fib,
+    /// Delete one IPv4 route.
+    DelRoute {
+        /// Prefix, e.g. "10.0.9.16/28".
+        prefix: String,
+    },
+    /// Generate and bulk-install a synthetic route table with a DFZ-like
+    /// prefix-length distribution (deterministic per seed).
+    GenRoutes {
+        /// Number of routes to install.
+        #[arg(long, default_value_t = 1_000_000)]
+        count: u64,
+        /// RNG seed (same seed => same table).
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Nexthop id every generated route points at (must exist).
+        #[arg(long)]
+        nexthop_id: u32,
+        /// Routes per AddRoute4Batch RPC.
+        #[arg(long, default_value_t = 8192)]
+        chunk: usize,
+    },
 }
 
 #[tokio::main]

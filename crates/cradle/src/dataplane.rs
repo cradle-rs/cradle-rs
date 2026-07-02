@@ -337,6 +337,40 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Install many IPv4 routes at once — the bulk initial-load path.
+    /// `(addr, prefix_len, nexthop_id, flags)` per route.
+    pub fn route4_add_bulk(&mut self, routes: &[(Ipv4Addr, u8, u32, u32)]) -> Result<()> {
+        if let Some(eng) = self.dir24.as_mut() {
+            let batch: Vec<(u32, u8, FibEntry)> = routes
+                .iter()
+                .map(|&(addr, len, nexthop_id, flags)| {
+                    (u32::from(addr), len, FibEntry { nexthop_id, flags })
+                })
+                .collect();
+            let plan = eng.route_add_bulk(&batch)?;
+            self.dir24_apply(&plan)?;
+            return Ok(());
+        }
+        for &(addr, len, nexthop_id, flags) in routes {
+            let key = Key::new(len as u32, addr.octets());
+            self.fib4.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+        }
+        Ok(())
+    }
+
+    /// IPv4 FIB engine state: `(mode, routes, tbl8_used, tbl8_free)`.
+    pub fn fib_summary(&self) -> (&'static str, u64, u32, u32) {
+        match &self.dir24 {
+            Some(eng) => (
+                "dir24",
+                eng.route_count() as u64,
+                eng.groups_in_use() as u32,
+                eng.tbl8_free() as u32,
+            ),
+            None => ("lpm", 0, 0, 0),
+        }
+    }
+
     /// Install/replace an IPv6 nexthop. `gateway == None` means on-link.
     pub fn nexthop_set_v6(
         &mut self,

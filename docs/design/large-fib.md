@@ -4,13 +4,20 @@
 > with a DPDK-style DIR-24-8 direct-index FIB — O(1)–O(2) flat array lookups,
 > no per-packet lock, full-DFZ capacity — behind the unchanged `FibHandle` seam.
 
-Status: **Phase 1 implemented** — the shadow + expansion engine
+Status: **Phases 1–2 implemented.** Phase 1: the shadow + expansion engine
 (`crates/cradle/src/dir24.rs`, property-tested against a reference LPM), the
 `TBL24`/`TBL8`/`DEFAULT4` packed-word datapath, `--fib4-mode` /
-`"fib4_mode"` with load-time sizing, the three counters, and the
-`cradle_dir24` BDD smoke (both engine paths asserted). LPM remains the
-default mode. Phase 1 writes map slots per element (`BPF_MAP_UPDATE_BATCH`
-and `ctl fib summary` land with Phase 2); Phases 2–4 below remain design. It builds on the L3 path in
+`"fib4_mode"` with load-time sizing, the three counters, the `cradle_dir24`
+BDD smoke. Phase 2: the bulk initial-load path (`route_add_bulk` — one block
+sync per affected /24 per batch), the `AddRoute4Batch` RPC (used by the
+config walkers), `GetFibSummary` / `cradle ctl fib`, the `ctl gen-routes`
+DFZ-shaped generator, and the `cradle_bigfib` BDD (a **1,000,000-route FIB**
+loaded, forwarded through on all three lookup paths, and withdrawn-under-load;
+measured: **1M routes in 2.0 s release / 9.5 s debug, ~490k routes/s**, via
+per-element map writes — the `BPF_MAP_UPDATE_BATCH` contingency was measured
+unnecessary at this scale). LPM remains the default mode. Remaining from
+Phase 2: the `BPF_PROG_TEST_RUN` lookup-latency harness (follow-up PR);
+Phases 3–4 below remain design. It builds on the L3 path in
 [`architecture.md`](architecture.md) and is a prerequisite none of the overlay
 designs ([`mpls.md`](mpls.md), [`srv6.md`](srv6.md),
 [`evpn-vxlan.md`](evpn-vxlan.md)) depend on — but the shared per-VRF FIB they
