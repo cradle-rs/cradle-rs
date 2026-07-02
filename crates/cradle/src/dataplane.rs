@@ -19,9 +19,9 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, FibEntry, L2MemberKey, Neigh4Key, NeighEntry, NextHop,
-    NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, LB_ALGO_RANDOM,
-    NEIGH_STATE_REACHABLE, NH_F_V6, STAT_MAX,
+    Backend, Backend6, BackendKey, FibEntry, L2MemberKey, MplsEntry, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
+    LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_V6, STAT_MAX,
 };
 
 use crate::util;
@@ -33,6 +33,8 @@ pub struct Dataplane {
     nhgroup: HashMap<MapData, u32, u32>,
     nhgroup_member: HashMap<MapData, NhGroupKey, u32>,
     neigh4: HashMap<MapData, Neigh4Key, NeighEntry>,
+    neigh6: HashMap<MapData, Neigh6Key, NeighEntry>,
+    mpls_fib: HashMap<MapData, u32, MplsEntry>,
     ports: HashMap<MapData, u32, PortConfig>,
     l2_members: HashMap<MapData, L2MemberKey, u32>,
     l2_count: HashMap<MapData, u16, u32>,
@@ -59,6 +61,10 @@ impl Dataplane {
                 bpf.take_map("NHGROUP_MEMBER").context("map NHGROUP_MEMBER missing")?,
             )?,
             neigh4: HashMap::try_from(bpf.take_map("NEIGH4").context("map NEIGH4 missing")?)?,
+            neigh6: HashMap::try_from(bpf.take_map("NEIGH6").context("map NEIGH6 missing")?)?,
+            mpls_fib: HashMap::try_from(
+                bpf.take_map("MPLS_FIB").context("map MPLS_FIB missing")?,
+            )?,
             ports: HashMap::try_from(bpf.take_map("PORTS").context("map PORTS missing")?)?,
             l2_members: HashMap::try_from(
                 bpf.take_map("L2_MEMBERS").context("map L2_MEMBERS missing")?,
@@ -219,13 +225,25 @@ impl Dataplane {
 
     /// Install/replace a nexthop. `gateway == None` means an on-link/connected
     /// nexthop (the neighbor is resolved by the packet's destination).
-    pub fn nexthop_set(&mut self, id: u32, gateway: Option<Ipv4Addr>, oif: u32) -> Result<()> {
+    /// A non-empty `labels` is the MPLS out-label stack (swap value /
+    /// imposition stack, `[0]` = outermost).
+    pub fn nexthop_set(
+        &mut self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: u32,
+        labels: &[u32],
+    ) -> Result<()> {
         let gateway_v4 = gateway.map(|a| u32::from_be_bytes(a.octets())).unwrap_or(0);
+        let (labels, num_labels, flags) = pack_labels(labels)?;
         let nh = NextHop {
             gateway_v4,
             gateway_v6: [0; 16],
             oif,
-            flags: 0,
+            flags,
+            labels,
+            num_labels,
+            _pad: [0; 3],
         };
         self.nexthops.insert(id, nh, 0)?;
         Ok(())
@@ -270,12 +288,22 @@ impl Dataplane {
     }
 
     /// Install/replace an IPv6 nexthop. `gateway == None` means on-link.
-    pub fn nexthop_set_v6(&mut self, id: u32, gateway: Option<Ipv6Addr>, oif: u32) -> Result<()> {
+    pub fn nexthop_set_v6(
+        &mut self,
+        id: u32,
+        gateway: Option<Ipv6Addr>,
+        oif: u32,
+        labels: &[u32],
+    ) -> Result<()> {
+        let (labels, num_labels, label_flags) = pack_labels(labels)?;
         let nh = NextHop {
             gateway_v4: 0,
             gateway_v6: gateway.map(|a| a.octets()).unwrap_or([0; 16]),
             oif,
-            flags: NH_F_V6,
+            flags: NH_F_V6 | label_flags,
+            labels,
+            num_labels,
+            _pad: [0; 3],
         };
         self.nexthops.insert(id, nh, 0)?;
         Ok(())
@@ -318,4 +346,64 @@ impl Dataplane {
         )?;
         Ok(())
     }
+
+    /// Set the neighbor (ND) entry for `ip` reachable out `ifindex`.
+    pub fn neigh6_set(&mut self, ifindex: u32, ip: Ipv6Addr, mac: [u8; 6]) -> Result<()> {
+        let key = Neigh6Key {
+            ifindex,
+            addr: ip.octets(),
+        };
+        self.neigh6.insert(
+            key,
+            NeighEntry {
+                mac,
+                state: NEIGH_STATE_REACHABLE,
+                _pad: 0,
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Install/replace an incoming-label map (ILM) entry: frames arriving with
+    /// top label `in_label` get `op` applied via `nexthop_id`.
+    pub fn ilm_add(&mut self, in_label: u32, nexthop_id: u32, op: u8, vrf_id: u32) -> Result<()> {
+        if in_label >= 1 << 20 {
+            anyhow::bail!("MPLS label {in_label} exceeds 20 bits");
+        }
+        self.mpls_fib.insert(
+            in_label,
+            MplsEntry {
+                nexthop_id,
+                vrf_id,
+                op,
+                _pad: [0; 3],
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Remove an ILM entry.
+    pub fn ilm_del(&mut self, in_label: u32) -> Result<()> {
+        self.mpls_fib.remove(&in_label)?;
+        Ok(())
+    }
+}
+
+/// Validate and pack an out-label stack into the fixed `NextHop` fields:
+/// `(labels array, num_labels, NH_F_MPLS-or-0)`.
+fn pack_labels(labels: &[u32]) -> Result<([u32; MAX_LABELS], u8, u32)> {
+    if labels.len() > MAX_LABELS {
+        anyhow::bail!("label stack too deep: {} > {}", labels.len(), MAX_LABELS);
+    }
+    for &l in labels {
+        if l >= 1 << 20 {
+            anyhow::bail!("MPLS label {l} exceeds 20 bits");
+        }
+    }
+    let mut arr = [0u32; MAX_LABELS];
+    arr[..labels.len()].copy_from_slice(labels);
+    let flags = if labels.is_empty() { 0 } else { NH_F_MPLS };
+    Ok((arr, labels.len() as u8, flags))
 }

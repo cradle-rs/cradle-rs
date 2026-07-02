@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use aya::{
-    programs::{tc, SchedClassifier, TcAttachType},
+    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpMode},
     Ebpf,
 };
 use tokio::sync::Mutex;
@@ -29,7 +29,7 @@ use crate::{
     },
     util,
 };
-use cradle_common::{PORT_F_L2, PORT_F_L3, STAT_MAX};
+use cradle_common::{MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, STAT_MAX};
 
 /// Display names for the datapath stat counters, indexed by `STAT_*` (must match
 /// the indices defined in `cradle_common`).
@@ -43,6 +43,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "l4_snat",
     "drop",
     "l7_redirect",
+    "mpls_swap",
+    "mpls_pop",
+    "mpls_push",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -98,7 +101,9 @@ impl Control {
     }
 
     /// Attach the datapath classifier to a port's clsact ingress (idempotent).
-    async fn attach(&self, name: &str, ifindex: u32) -> Result<()> {
+    /// L3 ports additionally get the XDP MPLS-pop stage (`bpf_skb_adjust_room`
+    /// can't shrink an MPLS frame at TC, so pops run before the skb exists).
+    async fn attach(&self, name: &str, ifindex: u32, l3: bool) -> Result<()> {
         let mut attached = self.attached.lock().await;
         if !attached.insert(ifindex) {
             return Ok(());
@@ -114,6 +119,29 @@ impl Control {
         prog.attach(name, TcAttachType::Ingress)
             .with_context(|| format!("attaching to {name}"))?;
         info!("attached cradle datapath to {name} (clsact ingress)");
+        if l3 {
+            let xdp: &mut Xdp = bpf
+                .program_mut("cradle_mpls_pop")
+                .context("program cradle_mpls_pop not found")?
+                .try_into()?;
+            // Native mode: generic XDP is skipped for TC-redirected skbs
+            // (netif_receive_generic_xdp bails on skb_is_redirected), so a
+            // frame forwarded by the previous hop's TC stage would bypass a
+            // generic-mode pop. veth supports native XDP; fall back to
+            // generic (with that caveat) on drivers that don't.
+            match xdp.attach(name, XdpMode::Driver) {
+                Ok(_) => info!("attached cradle MPLS pop stage to {name} (XDP native)"),
+                Err(e) => {
+                    warn!(
+                        "native XDP attach on {name} failed ({e}); falling back to generic \
+                         (frames redirected by an upstream TC hop bypass the pop stage)"
+                    );
+                    xdp.attach(name, XdpMode::Skb)
+                        .with_context(|| format!("attaching XDP MPLS pop to {name}"))?;
+                    info!("attached cradle MPLS pop stage to {name} (XDP generic)");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -124,7 +152,7 @@ impl Control {
             _ => util::mac_of(name)?,
         };
         let flags = if l3 { PORT_F_L3 } else { PORT_F_L2 };
-        self.attach(name, ifindex).await?;
+        self.attach(name, ifindex, l3).await?;
         let mut dp = self.dp.lock().await;
         dp.port_set(ifindex, mac, flags, vlan)?;
         // Routed ports auto-derive their local + connected routes from the
@@ -144,9 +172,15 @@ impl Control {
         Ok(())
     }
 
-    pub async fn set_nexthop(&self, id: u32, gateway: Option<Ipv4Addr>, oif: &str) -> Result<()> {
+    pub async fn set_nexthop(
+        &self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: &str,
+        labels: &[u32],
+    ) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
-        self.set_nexthop_idx(id, gateway, oif).await
+        self.set_nexthop_idx(id, gateway, oif, labels).await
     }
 
     /// Set a nexthop by output ifindex directly (used by control planes such as
@@ -156,8 +190,9 @@ impl Control {
         id: u32,
         gateway: Option<Ipv4Addr>,
         oif: u32,
+        labels: &[u32],
     ) -> Result<()> {
-        self.dp.lock().await.nexthop_set(id, gateway, oif)?;
+        self.dp.lock().await.nexthop_set(id, gateway, oif, labels)?;
         Ok(())
     }
 
@@ -185,8 +220,9 @@ impl Control {
         id: u32,
         gateway: Option<Ipv6Addr>,
         oif: u32,
+        labels: &[u32],
     ) -> Result<()> {
-        self.dp.lock().await.nexthop_set_v6(id, gateway, oif)?;
+        self.dp.lock().await.nexthop_set_v6(id, gateway, oif, labels)?;
         Ok(())
     }
 
@@ -217,6 +253,24 @@ impl Control {
     pub async fn set_neighbor4(&self, oif: &str, ip: Ipv4Addr, mac: [u8; 6]) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
         self.dp.lock().await.neigh4_set(oif, ip, mac)?;
+        Ok(())
+    }
+
+    pub async fn set_neighbor6(&self, oif: &str, ip: Ipv6Addr, mac: [u8; 6]) -> Result<()> {
+        let oif = util::ifindex_of(oif)?;
+        self.dp.lock().await.neigh6_set(oif, ip, mac)?;
+        Ok(())
+    }
+
+    /// Install an ILM (incoming-label map) entry.
+    pub async fn add_ilm(&self, in_label: u32, nexthop_id: u32, op: u8, vrf_id: u32) -> Result<()> {
+        self.dp.lock().await.ilm_add(in_label, nexthop_id, op, vrf_id)?;
+        Ok(())
+    }
+
+    /// Remove an ILM entry.
+    pub async fn del_ilm(&self, in_label: u32) -> Result<()> {
+        self.dp.lock().await.ilm_del(in_label)?;
         Ok(())
     }
 
@@ -336,7 +390,7 @@ impl Cradle for GrpcService {
                 util::ifindex_of(&n.oif).map_err(st)?
             };
             self.control
-                .set_nexthop_idx_v6(n.id, gw, oif)
+                .set_nexthop_idx_v6(n.id, gw, oif, &n.labels)
                 .await
                 .map_err(st)?;
         } else {
@@ -347,11 +401,14 @@ impl Cradle for GrpcService {
             };
             if n.oif_index != 0 {
                 self.control
-                    .set_nexthop_idx(n.id, gw, n.oif_index)
+                    .set_nexthop_idx(n.id, gw, n.oif_index, &n.labels)
                     .await
                     .map_err(st)?;
             } else {
-                self.control.set_nexthop(n.id, gw, &n.oif).await.map_err(st)?;
+                self.control
+                    .set_nexthop(n.id, gw, &n.oif, &n.labels)
+                    .await
+                    .map_err(st)?;
             }
         }
         Ok(Response::new(pb::Empty {}))
@@ -414,6 +471,49 @@ impl Cradle for GrpcService {
             .set_neighbor4(&n.oif, ip, mac)
             .await
             .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_neighbor6(
+        &self,
+        req: Request<pb::Neighbor6>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let n = req.into_inner();
+        let ip = n.ip.parse().map_err(st)?;
+        let mac = util::parse_mac(&n.mac).map_err(st)?;
+        self.control
+            .set_neighbor6(&n.oif, ip, mac)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_ilm(&self, req: Request<pb::Ilm>) -> Result<Response<pb::Empty>, Status> {
+        let i = req.into_inner();
+        if i.in_label >= 1 << 20 {
+            return Err(Status::invalid_argument(format!(
+                "MPLS label {} exceeds 20 bits",
+                i.in_label
+            )));
+        }
+        let op = match i.action {
+            a if a == MPLS_OP_SWAP as u32 => MPLS_OP_SWAP,
+            a if a == MPLS_OP_POP_L3 as u32 => MPLS_OP_POP_L3,
+            a if a == MPLS_OP_POP as u32 => MPLS_OP_POP,
+            other => {
+                return Err(Status::invalid_argument(format!("bad ILM action {other}")));
+            }
+        };
+        self.control
+            .add_ilm(i.in_label, i.nexthop_id, op, i.vrf_table_id)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_ilm(&self, req: Request<pb::IlmDel>) -> Result<Response<pb::Empty>, Status> {
+        let i = req.into_inner();
+        self.control.del_ilm(i.in_label).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

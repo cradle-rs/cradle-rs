@@ -28,6 +28,8 @@ pub struct Config {
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
     #[serde(default)]
+    pub ilm: Vec<Ilm>,
+    #[serde(default)]
     pub services: Vec<Service>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
@@ -66,6 +68,19 @@ pub struct Nexthop {
     pub oif: String,
     #[serde(default)]
     pub gateway: Option<String>,
+    /// MPLS out-label stack, `[0]` = outermost (swap value / imposition).
+    #[serde(default)]
+    pub labels: Vec<u32>,
+}
+
+/// An incoming-label map entry: `action` is `"swap"`, `"pop"` or `"pop-l3"`.
+#[derive(Debug, Deserialize)]
+pub struct Ilm {
+    pub in_label: u32,
+    pub nexthop: u32,
+    pub action: String,
+    #[serde(default)]
+    pub vrf: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +135,16 @@ pub fn proto_num(proto: &str) -> Result<u8> {
     }
 }
 
+/// Parse an ILM action string to its `MPLS_OP_*` value.
+pub fn ilm_action(action: &str) -> Result<u8> {
+    match action {
+        "swap" => Ok(cradle_common::MPLS_OP_SWAP),
+        "pop" => Ok(cradle_common::MPLS_OP_POP),
+        "pop-l3" => Ok(cradle_common::MPLS_OP_POP_L3),
+        other => anyhow::bail!("unknown ILM action {other:?} (want swap|pop|pop-l3)"),
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let s = fs::read_to_string(path)
@@ -140,12 +165,19 @@ impl Config {
                 Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                 None => None,
             };
-            ctl.set_nexthop(nh.id, gw, &nh.oif).await?;
+            ctl.set_nexthop(nh.id, gw, &nh.oif, &nh.labels).await?;
         }
         for n in &self.neighbors {
-            let ip = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
+            let ip: IpAddr = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
             let mac = util::parse_mac(&n.mac)?;
-            ctl.set_neighbor4(&n.oif, ip, mac).await?;
+            match ip {
+                IpAddr::V4(v4) => ctl.set_neighbor4(&n.oif, v4, mac).await?,
+                IpAddr::V6(v6) => ctl.set_neighbor6(&n.oif, v6, mac).await?,
+            }
+        }
+        for i in &self.ilm {
+            let op = ilm_action(&i.action)?;
+            ctl.add_ilm(i.in_label, i.nexthop, op, i.vrf).await?;
         }
         for r in &self.routes {
             let (addr, len) = util::parse_ipv4_prefix(&r.prefix)?;
@@ -210,10 +242,11 @@ impl Config {
         }
 
         info!(
-            "applied config: {} ports, {} nexthops, {} neighbors, {} routes, {} services, {} l7-services",
+            "applied config: {} ports, {} nexthops, {} neighbors, {} ilm, {} routes, {} services, {} l7-services",
             self.ports.len(),
             self.nexthops.len(),
             self.neighbors.len(),
+            self.ilm.len(),
             self.routes.len(),
             self.services.len(),
             self.l7_services.len(),
