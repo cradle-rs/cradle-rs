@@ -14,21 +14,32 @@ use anyhow::{Context as _, Result};
 use aya::{
     maps::{
         lpm_trie::{Key, LpmTrie},
-        HashMap, MapData, PerCpuArray,
+        Array, HashMap, MapData, PerCpuArray,
     },
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, FibEntry, L2MemberKey, MplsEntry, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_V6, STAT_MAX,
+    Backend, Backend6, BackendKey, FibEntry, FibWord, L2MemberKey, MplsEntry, Neigh4Key,
+    Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
+    DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE,
+    NH_F_MPLS, NH_F_V6, STAT_MAX,
 };
 
-use crate::util;
+use crate::{
+    dir24::{Dir24Engine, SlotWrite},
+    util,
+};
 
 pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
     fib6: LpmTrie<MapData, [u8; 16], FibEntry>,
+    tbl24: Array<MapData, FibWord>,
+    tbl8: Array<MapData, FibWord>,
+    default4: Array<MapData, FibWord>,
+    dp_config: Array<MapData, u32>,
+    /// DIR-24-8 expansion engine — `Some` when the dir24 v4 engine is active;
+    /// `route4_add/del` dispatch on it internally so callers are agnostic.
+    dir24: Option<Dir24Engine>,
     nexthops: HashMap<MapData, u32, NextHop>,
     nhgroup: HashMap<MapData, u32, u32>,
     nhgroup_member: HashMap<MapData, NhGroupKey, u32>,
@@ -55,6 +66,13 @@ impl Dataplane {
         Ok(Self {
             fib4: LpmTrie::try_from(bpf.take_map("FIB4").context("map FIB4 missing")?)?,
             fib6: LpmTrie::try_from(bpf.take_map("FIB6").context("map FIB6 missing")?)?,
+            tbl24: Array::try_from(bpf.take_map("TBL24").context("map TBL24 missing")?)?,
+            tbl8: Array::try_from(bpf.take_map("TBL8").context("map TBL8 missing")?)?,
+            default4: Array::try_from(bpf.take_map("DEFAULT4").context("map DEFAULT4 missing")?)?,
+            dp_config: Array::try_from(
+                bpf.take_map("DP_CONFIG").context("map DP_CONFIG missing")?,
+            )?,
+            dir24: None,
             nexthops: HashMap::try_from(bpf.take_map("NEXTHOPS").context("map NEXTHOPS missing")?)?,
             nhgroup: HashMap::try_from(bpf.take_map("NHGROUP").context("map NHGROUP missing")?)?,
             nhgroup_member: HashMap::try_from(
@@ -267,6 +285,28 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Switch the v4 FIB to the DIR-24-8 engine. Load-time only: the maps
+    /// must have been sized by the loader (`--fib4-mode dir24`) and no v4
+    /// routes may have been installed yet.
+    pub fn set_fib4_mode_dir24(&mut self) -> Result<()> {
+        self.dir24 = Some(Dir24Engine::new(DIR24_TBL8_GROUPS));
+        self.dp_config.set(0, DPC_FIB4_DIR24, 0)?;
+        Ok(())
+    }
+
+    /// Apply a DIR-24-8 slot-write plan. Plan order is the readers' safety
+    /// (fill-then-flip); `Array::set` is a per-element atomic word store.
+    fn dir24_apply(&mut self, plan: &[SlotWrite]) -> Result<()> {
+        for w in plan {
+            match *w {
+                SlotWrite::Tbl24 { idx, word } => self.tbl24.set(idx, word, 0)?,
+                SlotWrite::Tbl8 { idx, word } => self.tbl8.set(idx, word, 0)?,
+                SlotWrite::Default(word) => self.default4.set(0, word, 0)?,
+            }
+        }
+        Ok(())
+    }
+
     /// Install an IPv4 route `addr/prefix_len` pointing at `nexthop_id`.
     pub fn route4_add(
         &mut self,
@@ -275,6 +315,11 @@ impl Dataplane {
         nexthop_id: u32,
         flags: u32,
     ) -> Result<()> {
+        if let Some(eng) = self.dir24.as_mut() {
+            let plan = eng.route_add(u32::from(addr), prefix_len, FibEntry { nexthop_id, flags })?;
+            self.dir24_apply(&plan)?;
+            return Ok(());
+        }
         let key = Key::new(prefix_len as u32, addr.octets());
         self.fib4.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
         Ok(())
@@ -282,6 +327,11 @@ impl Dataplane {
 
     /// Remove an IPv4 route.
     pub fn route4_del(&mut self, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        if let Some(eng) = self.dir24.as_mut() {
+            let plan = eng.route_del(u32::from(addr), prefix_len)?;
+            self.dir24_apply(&plan)?;
+            return Ok(());
+        }
         let key = Key::new(prefix_len as u32, addr.octets());
         self.fib4.remove(&key)?;
         Ok(())

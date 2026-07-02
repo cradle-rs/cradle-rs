@@ -29,17 +29,18 @@ use aya_ebpf::{
         bpf_sk_release, bpf_skc_lookup_tcp, bpf_xdp_adjust_head,
     },
     macros::{classifier, map, xdp},
-    maps::{lpm_trie::Key, HashMap, LpmTrie, LruHashMap, PerCpuArray},
+    maps::{lpm_trie::Key, Array, HashMap, LpmTrie, LruHashMap, PerCpuArray},
     programs::{TcContext, XdpContext},
 };
 use cradle_common::{
-    mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CtEntry, CtEntry6, CtKey, CtKey6,
-    FdbEntry, FdbKey, FibEntry, L2MemberKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop,
-    NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, CT_F_DNAT, CT_F_SNAT,
-    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MPLS_OP_POP, MPLS_OP_POP_L3,
-    MPLS_OP_SWAP, NH_F_V6, PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_SWAP,
+    fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CtEntry, CtEntry6,
+    CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, MplsEntry, Neigh4Key,
+    Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
+    CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
+    FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6,
+    PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT,
+    STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL,
+    STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_SWAP,
 };
 use network_types::eth::EthHdr;
 
@@ -52,6 +53,19 @@ static PORTS: HashMap<u32, PortConfig> = HashMap::with_max_entries(256, 0);
 static FIB4: LpmTrie<[u8; 4], FibEntry> = LpmTrie::with_max_entries(4096, 0);
 #[map]
 static FIB6: LpmTrie<[u8; 16], FibEntry> = LpmTrie::with_max_entries(4096, 0);
+
+// --- L3 DIR-24-8 v4 engine (large-fib.md). Declared at 1 entry; the loader
+// upsizes them (TBL24 → 2^24, TBL8 → groups*256) only in dir24 mode, so
+// lpm-mode loads never pay the memory. ---
+#[map]
+static TBL24: Array<FibWord> = Array::with_max_entries(1, 0);
+#[map]
+static TBL8: Array<FibWord> = Array::with_max_entries(1, 0);
+#[map]
+static DEFAULT4: Array<FibWord> = Array::with_max_entries(1, 0);
+// Datapath configuration word(s), written by user space: DPC_* bits.
+#[map]
+static DP_CONFIG: Array<u32> = Array::with_max_entries(1, 0);
 #[map]
 static NEXTHOPS: HashMap<u32, NextHop> = HashMap::with_max_entries(4096, 0);
 // Nexthop groups for ECMP: group_id -> member count, and (group_id, slot) -> nexthop id.
@@ -709,11 +723,47 @@ fn flow_hash_v6(ctx: &TcContext, src: &[u8; 16], dst: &[u8; 16]) -> u32 {
     fmix32(h)
 }
 
+/// v4 route lookup — the DIR-24-8 arrays when enabled in `DP_CONFIG`
+/// (1–2 flat array loads + a `DEFAULT4` fallthrough), else the LPM trie.
+#[inline(always)]
+fn fib4_lookup(dst: [u8; 4]) -> Option<FibEntry> {
+    let dir24 = match DP_CONFIG.get(0) {
+        Some(w) => *w & DPC_FIB4_DIR24 != 0,
+        None => false,
+    };
+    if !dir24 {
+        return FIB4.get(Key::new(32, dst)).copied();
+    }
+
+    let idx24 = u32::from_be_bytes(dst) >> 8;
+    let mut w: FibWord = *TBL24.get(idx24)?;
+    if w & FIBW_TBL8 != 0 {
+        let group = w & FIBW_ID_MASK;
+        w = *TBL8.get(group * 256 + dst[3] as u32)?;
+        if w & FIBW_VALID != 0 {
+            stat_inc(STAT_FIB4_TBL8_HIT);
+        }
+    } else if w & FIBW_VALID != 0 {
+        stat_inc(STAT_FIB4_TBL24_HIT);
+    }
+    if w & FIBW_VALID == 0 {
+        // No covering route: the default route lives outside the table
+        // (never expanded into 16.7M slots).
+        w = *DEFAULT4.get(0)?;
+        if w & FIBW_VALID == 0 {
+            return None;
+        }
+        stat_inc(STAT_FIB4_DEFAULT);
+    }
+    let (nexthop_id, flags) = fibw_unpack(w);
+    Some(FibEntry { nexthop_id, flags })
+}
+
 #[inline(always)]
 fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
-    let fib = match FIB4.get(Key::new(32, dst)) {
-        Some(fib) => *fib,
+    let fib = match fib4_lookup(dst) {
+        Some(fib) => fib,
         None => return Ok(TC_ACT_PIPE as i32),
     };
 

@@ -46,6 +46,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "mpls_swap",
     "mpls_pop",
     "mpls_push",
+    "fib4_tbl24_hit",
+    "fib4_tbl8_hit",
+    "fib4_default",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
