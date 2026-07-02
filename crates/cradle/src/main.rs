@@ -149,8 +149,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         // DIR-24-8: full-size direct-index tables (large-fib.md). In lpm
         // mode they stay at their declared 1 entry — no memory cost.
         loader
-            .set_max_entries("TBL24", 1 << 24)
-            .set_max_entries("TBL8", cradle_common::DIR24_TBL8_GROUPS * 256);
+            .map_max_entries("TBL24", 1 << 24)
+            .map_max_entries("TBL8", cradle_common::DIR24_TBL8_GROUPS * 256);
     }
     let mut bpf = loader
         .load(aya::include_bytes_aligned!(concat!(
@@ -167,13 +167,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
         prog.load().context("loading cradle_tc")?;
     }
     {
-        // MPLS pop stage — XDP, because a TC program cannot shrink an MPLS
+        // MPLS stage — XDP, because a TC program cannot shrink an MPLS
         // frame (bpf_skb_adjust_room is IP-only). Attached per L3 port.
         let prog: &mut aya::programs::Xdp = bpf
-            .program_mut("cradle_mpls_pop")
-            .context("program cradle_mpls_pop not found")?
+            .program_mut("cradle_mpls")
+            .context("program cradle_mpls not found")?
             .try_into()?;
-        prog.load().context("loading cradle_mpls_pop")?;
+        prog.load().context("loading cradle_mpls")?;
     }
 
     let mut dp = Dataplane::from_ebpf(&mut bpf)?;
