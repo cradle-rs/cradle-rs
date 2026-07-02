@@ -13,6 +13,8 @@ designs ([`mpls.md`](mpls.md), [`srv6.md`](srv6.md),
 all converge on should be built knowing this is where the global table is
 going.
 
+(日本語訳: [`large-fib.ja.md`](large-fib.ja.md))
+
 ## Goal and scope
 
 cradle's differentiator is that **learned** routes program the eBPF FIB — and
