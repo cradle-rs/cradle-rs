@@ -14,8 +14,10 @@ Feature: eBPF MPLS label switching (push, swap, SR stacks, pop)
   - 10.0.3.0/24: push [16] (TC grow on an IP frame) → swap 16→[17] (TC
     in-place) → explicit pop-l3 (XDP shrink) — the single-label path.
   - 10.0.4.0/24: push [26,28] (multi-label) → swap 26→[27,29] (XDP
-    grow-swap + redirect; wire stack becomes 27,29,28) → three zebra-shaped
-    "swap with no out-labels" ILMs popped by S-bit dispatch in one XDP pass.
+    grow-swap + redirect; wire stack becomes 27,29,28) → per3 owns all three
+    remaining labels: its "swap with no out-labels" ILMs carry an *oif-less*
+    nexthop, so the pops chain locally in one XDP pass (the UHP/egress
+    shape; a pop ILM with a real nexthop would instead pop-and-forward).
   Counters prove which hop did which operation; the reverse path is plain
   eBPF IPv4 forwarding.
 

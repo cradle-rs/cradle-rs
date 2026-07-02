@@ -21,8 +21,8 @@ use aya::{
 use cradle_common::{
     Backend, Backend6, BackendKey, FibEntry, FibWord, L2MemberKey, MplsEntry, Neigh4Key,
     Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE,
-    NH_F_MPLS, NH_F_V6, STAT_MAX,
+    Vrf4Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, LB_ALGO_RANDOM, MAX_LABELS,
+    NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_V6, STAT_MAX,
 };
 
 use crate::{
@@ -33,6 +33,7 @@ use crate::{
 pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
     fib6: LpmTrie<MapData, [u8; 16], FibEntry>,
+    fib4_vrf: LpmTrie<MapData, Vrf4Key, FibEntry>,
     tbl24: Array<MapData, FibWord>,
     tbl8: Array<MapData, FibWord>,
     default4: Array<MapData, FibWord>,
@@ -66,6 +67,9 @@ impl Dataplane {
         Ok(Self {
             fib4: LpmTrie::try_from(bpf.take_map("FIB4").context("map FIB4 missing")?)?,
             fib6: LpmTrie::try_from(bpf.take_map("FIB6").context("map FIB6 missing")?)?,
+            fib4_vrf: LpmTrie::try_from(
+                bpf.take_map("FIB4_VRF").context("map FIB4_VRF missing")?,
+            )?,
             tbl24: Array::try_from(bpf.take_map("TBL24").context("map TBL24 missing")?)?,
             tbl8: Array::try_from(bpf.take_map("TBL8").context("map TBL8 missing")?)?,
             default4: Array::try_from(bpf.take_map("DEFAULT4").context("map DEFAULT4 missing")?)?,
@@ -216,11 +220,26 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Register an interface (by ifindex) with its MAC, `PORT_F_*` flags, and
-    /// L2 VLAN/bridge domain.
-    pub fn port_set(&mut self, ifindex: u32, mac: [u8; 6], flags: u32, vlan: u16) -> Result<()> {
-        self.ports
-            .insert(ifindex, PortConfig { mac, vlan, flags }, 0)?;
+    /// Register an interface (by ifindex) with its MAC, `PORT_F_*` flags,
+    /// L2 VLAN/bridge domain, and (for L3 ports) VRF binding (0 = global).
+    pub fn port_set(
+        &mut self,
+        ifindex: u32,
+        mac: [u8; 6],
+        flags: u32,
+        vlan: u16,
+        vrf_id: u32,
+    ) -> Result<()> {
+        self.ports.insert(
+            ifindex,
+            PortConfig {
+                mac,
+                vlan,
+                flags,
+                vrf_id,
+            },
+            0,
+        )?;
         Ok(())
     }
 
@@ -308,13 +327,27 @@ impl Dataplane {
     }
 
     /// Install an IPv4 route `addr/prefix_len` pointing at `nexthop_id`.
+    /// `vrf != 0` targets that VRF's table (the vrf-prefixed LPM trie —
+    /// never the DIR-24-8 engine, which is global-only).
     pub fn route4_add(
         &mut self,
+        vrf: u32,
         addr: Ipv4Addr,
         prefix_len: u8,
         nexthop_id: u32,
         flags: u32,
     ) -> Result<()> {
+        if vrf != 0 {
+            let key = Key::new(
+                32 + prefix_len as u32,
+                Vrf4Key {
+                    vrf_id: vrf,
+                    addr: addr.octets(),
+                },
+            );
+            self.fib4_vrf.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+            return Ok(());
+        }
         if let Some(eng) = self.dir24.as_mut() {
             let plan = eng.route_add(u32::from(addr), prefix_len, FibEntry { nexthop_id, flags })?;
             self.dir24_apply(&plan)?;
@@ -326,7 +359,18 @@ impl Dataplane {
     }
 
     /// Remove an IPv4 route.
-    pub fn route4_del(&mut self, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
+    pub fn route4_del(&mut self, vrf: u32, addr: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        if vrf != 0 {
+            let key = Key::new(
+                32 + prefix_len as u32,
+                Vrf4Key {
+                    vrf_id: vrf,
+                    addr: addr.octets(),
+                },
+            );
+            self.fib4_vrf.remove(&key)?;
+            return Ok(());
+        }
         if let Some(eng) = self.dir24.as_mut() {
             let plan = eng.route_del(u32::from(addr), prefix_len)?;
             self.dir24_apply(&plan)?;
@@ -338,20 +382,28 @@ impl Dataplane {
     }
 
     /// Install many IPv4 routes at once — the bulk initial-load path.
-    /// `(addr, prefix_len, nexthop_id, flags)` per route.
-    pub fn route4_add_bulk(&mut self, routes: &[(Ipv4Addr, u8, u32, u32)]) -> Result<()> {
+    /// `(vrf, addr, prefix_len, nexthop_id, flags)` per route; the global
+    /// subset (`vrf == 0`) rides the dir24 bulk plan when that engine is on.
+    pub fn route4_add_bulk(&mut self, routes: &[(u32, Ipv4Addr, u8, u32, u32)]) -> Result<()> {
+        for &(vrf, addr, len, nexthop_id, flags) in routes.iter().filter(|r| r.0 != 0) {
+            self.route4_add(vrf, addr, len, nexthop_id, flags)?;
+        }
         if let Some(eng) = self.dir24.as_mut() {
             let batch: Vec<(u32, u8, FibEntry)> = routes
                 .iter()
-                .map(|&(addr, len, nexthop_id, flags)| {
+                .filter(|r| r.0 == 0)
+                .map(|&(_, addr, len, nexthop_id, flags)| {
                     (u32::from(addr), len, FibEntry { nexthop_id, flags })
                 })
                 .collect();
-            let plan = eng.route_add_bulk(&batch)?;
-            self.dir24_apply(&plan)?;
+            if !batch.is_empty() {
+                let plan = eng.route_add_bulk(&batch)?;
+                self.dir24_apply(&plan)?;
+            }
             return Ok(());
         }
-        for &(addr, len, nexthop_id, flags) in routes {
+        for &(vrf, addr, len, nexthop_id, flags) in routes.iter().filter(|r| r.0 == 0) {
+            let _ = vrf;
             let key = Key::new(len as u32, addr.octets());
             self.fib4.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
         }

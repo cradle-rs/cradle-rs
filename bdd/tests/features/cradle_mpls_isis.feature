@@ -17,9 +17,10 @@ Feature: IS-IS SR-MPLS labels drive the eBPF label switch
   SRGB default 16000 ⇒ r3's prefix-SID resolves to label 16003. r1 imposes
   16003 (its route to 3.3.3.3 rides a transit neighbor); r2 is the
   penultimate hop — IS-IS expresses PHP as an ILM with an empty out-label
-  stack, which the data plane pops by the packet's S bit; r3 delivers
-  locally. One warm-up ping seeds r1's ARP so the teed neighbor feeds the
-  MPLS egress rewrite.
+  stack and a real adjacency nexthop, so the data plane pops and forwards
+  the exposed packet via that nexthop; r3 delivers locally. Warm-up pings
+  seed r1's and r2's ARP so the teed neighbors feed the label-switched
+  egress rewrites (push on r1, pop-and-forward on r2).
 
   Scenario: An IS-IS prefix-SID LSP forwards via the eBPF data plane
     Given a clean test environment
@@ -52,6 +53,7 @@ Feature: IS-IS SR-MPLS labels drive the eBPF label switch
     And I start zebra-rs in namespace "r3" with config "r3.yaml" teeing to cradle as "ctl3"
     And I wait 10 seconds
     And I execute "ping -c 1 -W 2 192.168.1.2" in namespace "r1"
+    And I execute "ping -c 1 -W 2 192.168.2.2" in namespace "r2"
     Then mpls ilm in namespace "r2" should contain label 16003
     And ping from "cl" to "3.3.3.3" should eventually succeed
     And the cradle stat "mpls_push" in namespace "r1" via gRPC as "ctl1" should be nonzero

@@ -1,0 +1,19 @@
+{
+  "ports": [
+    { "name": "pe2a", "l3": true },
+    { "name": "pe2b", "l3": true, "vrf": 20 }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe2a", "gateway": "192.168.2.1", "labels": [117, 101] },
+    { "id": 2 }
+  ],
+  "neighbors": [
+    { "oif": "pe2a", "ip": "192.168.2.1", "mac": "02:00:00:00:0a:02" }
+  ],
+  "ilm": [
+    { "in_label": 100, "nexthop": 2, "action": "pop-l3", "vrf": 20 }
+  ],
+  "routes": [
+    { "prefix": "10.0.1.0/24", "nexthop": 1, "vrf": 20 }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "ports": [
+    { "name": "pa", "l3": true },
+    { "name": "pb", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pb", "gateway": "192.168.2.2" },
+    { "id": 2, "oif": "pa", "gateway": "192.168.1.1" }
+  ],
+  "neighbors": [
+    { "oif": "pb", "ip": "192.168.2.2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "pa", "ip": "192.168.1.1", "mac": "02:00:00:00:01:0b" }
+  ],
+  "ilm": [
+    { "in_label": 116, "nexthop": 1, "action": "swap" },
+    { "in_label": 117, "nexthop": 2, "action": "swap" }
+  ]
+}
