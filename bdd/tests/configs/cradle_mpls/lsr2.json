@@ -4,12 +4,18 @@
     { "name": "lsr2b", "l3": true }
   ],
   "nexthops": [
-    { "id": 1, "oif": "lsr2a", "gateway": "10.0.1.1" }
+    { "id": 1, "oif": "lsr2b", "gateway": "10.0.2.2", "labels": [17] },
+    { "id": 2, "oif": "lsr2b", "gateway": "10.0.2.2", "labels": [27, 29] },
+    { "id": 3, "oif": "lsr2a", "gateway": "10.0.1.1" }
   ],
-  "routes": [
-    { "prefix": "10.0.0.0/24", "nexthop": 1 }
+  "neighbors": [
+    { "oif": "lsr2b", "ip": "10.0.2.2", "mac": "02:00:00:00:03:0a" }
   ],
   "ilm": [
-    { "in_label": 17, "nexthop": 1, "action": "pop-l3" }
+    { "in_label": 16, "nexthop": 1, "action": "swap" },
+    { "in_label": 26, "nexthop": 2, "action": "swap" }
+  ],
+  "routes": [
+    { "prefix": "10.0.0.0/24", "nexthop": 3 }
   ]
 }

@@ -59,6 +59,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                             oif: n.oif.clone(),
                             ip: n.ip.clone(),
                             mac: n.mac.clone(),
+                            oif_index: 0,
                         })
                         .await?;
                 } else {
@@ -67,6 +68,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                             oif: n.oif.clone(),
                             ip: n.ip.clone(),
                             mac: n.mac.clone(),
+                            oif_index: 0,
                         })
                         .await?;
                 }

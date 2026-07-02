@@ -20,9 +20,9 @@
 
 use aya_ebpf::{
     bindings::{
-        bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, bpf_sock_tuple,
-        bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1, xdp_action,
-        TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
+        bpf_adj_room_mode::BPF_ADJ_ROOM_MAC, bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1,
+        bpf_sock_tuple, bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1,
+        xdp_action, TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
     },
     helpers::generated::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
@@ -37,10 +37,11 @@ use cradle_common::{
     CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, MplsEntry, Neigh4Key,
     Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
     CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
-    FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6,
-    PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT,
-    STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL,
-    STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_SWAP,
+    FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP,
+    NH_F_MPLS, NH_F_V6, PORT_F_L2, PORT_F_L3, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT,
+    STAT_FIB4_TBL8_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP,
 };
 use network_types::eth::EthHdr;
 
@@ -791,6 +792,18 @@ fn l3_forward_v4(ctx: &TcContext) -> Result<i32, ()> {
     let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
     let oif = nh.oif;
 
+    // MPLS imposition (ingress LER): a labeled nexthop pushes its out-label
+    // stack and egresses MPLS. Pipe-model TTL — the inner IP TTL is left
+    // untouched; the label TTL is seeded from it (a dying packet still punts
+    // for the ICMP first).
+    if nh.flags & NH_F_MPLS != 0 && nh.num_labels > 0 {
+        let ttl: u8 = ctx.load(IP_TTL_OFF).map_err(|_| ())?;
+        if ttl <= 1 {
+            return Ok(TC_ACT_PIPE as i32);
+        }
+        return mpls_push(ctx, &nh, ttl);
+    }
+
     // Decrement TTL and patch the IPv4 header checksum (RFC 1624 incremental).
     // The 16-bit word at IP offset 8 is [ttl, proto]; on the little-endian BPF
     // target it loads as `ttl | (proto << 8)`, so decrementing the whole word
@@ -865,6 +878,16 @@ fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
     let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
     let oif = nh.oif;
 
+    // MPLS imposition — as in the v4 path; the label TTL seeds from the
+    // hop limit.
+    if nh.flags & NH_F_MPLS != 0 && nh.num_labels > 0 {
+        let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
+        if hop <= 1 {
+            return Ok(TC_ACT_PIPE as i32);
+        }
+        return mpls_push(ctx, &nh, hop);
+    }
+
     // Decrement the hop limit (IPv6 has no header checksum to patch).
     let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
     if hop <= 1 {
@@ -921,25 +944,47 @@ fn mpls_forward(ctx: &TcContext) -> Result<i32, ()> {
     let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&ent.nexthop_id).ok_or(())? };
 
     match ent.op {
-        MPLS_OP_SWAP => {
-            // Phase 1: single-label swap rewritten in place (multi-label SR
-            // stacks that grow the frame are Phase 2).
-            if nh.num_labels != 1 {
-                stat_inc(STAT_DROP);
-                return Ok(TC_ACT_SHOT as i32);
-            }
+        // Single-label swap: in-place LSE rewrite, no length change — TC's
+        // one MPLS job. Everything that resizes an MPLS frame lives in the
+        // XDP stage (`cradle_mpls`): pops/PHP shrink (bpf_skb_adjust_room is
+        // -ENOTSUPP for non-IP skbs) and multi-label SR swaps grow. A frame
+        // reaching here for those ops means XDP isn't attached — punt.
+        MPLS_OP_SWAP if nh.num_labels == 1 => {
             let new_lse = mpls_lse(nh.labels[0], tc, s, ttl - 1).to_be();
             ctx.store(MPLS_LSE_OFF, &new_lse, 0).map_err(|_| ())?;
             stat_inc(STAT_MPLS_SWAP);
             mpls_l2_xmit(ctx, &nh)
         }
-        // POP / POP_L3 shrink the frame, and `bpf_skb_adjust_room` refuses
-        // any skb whose protocol isn't IPv4/IPv6 (-ENOTSUPP) — a TC program
-        // cannot shrink an MPLS frame. Pops therefore run in the XDP stage
-        // (`cradle_mpls_pop`, below) before the skb exists; an MPLS frame
-        // reaching here with a pop ILM entry means XDP isn't attached — punt.
         _ => Ok(TC_ACT_PIPE as i32),
     }
+}
+
+/// Impose the nexthop's out-label stack on an IP packet (ingress LER) and
+/// egress it as MPLS. The skb is still IPv4/IPv6 here, so the MAC-level
+/// `adjust_room` *grow* passes the kernel's protocol gate — unlike pops,
+/// which must run at XDP (see the hook matrix in docs/design/mpls.md).
+#[inline(always)]
+fn mpls_push(ctx: &TcContext, nh: &NextHop, ttl: u8) -> Result<i32, ()> {
+    let n = nh.num_labels as usize;
+    if n == 0 || n > MAX_LABELS {
+        return Ok(TC_ACT_PIPE as i32);
+    }
+    ctx.skb
+        .adjust_room((4 * n) as i32, BPF_ADJ_ROOM_MAC, 0)
+        .map_err(|_| ())?;
+    // Outermost first; BOS on the innermost; TC bits 0.
+    for i in 0..MAX_LABELS {
+        if i >= n {
+            break;
+        }
+        let s = if i == n - 1 { 1 } else { 0 };
+        let lse = mpls_lse(nh.labels[i], 0, s, ttl).to_be();
+        ctx.store(MPLS_LSE_OFF + 4 * i, &lse, 0).map_err(|_| ())?;
+    }
+    let ethertype = ETH_P_MPLS_UC.to_be();
+    ctx.store(ETH_TYPE_OFF, &ethertype, 0).map_err(|_| ())?;
+    stat_inc(STAT_MPLS_PUSH);
+    mpls_l2_xmit(ctx, nh)
 }
 
 /// Egress a (still-)labeled MPLS frame. `bpf_redirect_neigh` cannot build an
@@ -979,18 +1024,25 @@ fn mpls_l2_xmit(ctx: &TcContext, nh: &NextHop) -> Result<i32, ()> {
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as i32)
 }
 
-// ============================ MPLS pop (XDP stage) =========================
+// ============================ MPLS XDP stage ===============================
 //
-// `bpf_skb_adjust_room` returns -ENOTSUPP for any skb whose protocol isn't
-// IPv4/IPv6, so a TC classifier cannot shrink an MPLS frame. The pop
-// operations therefore run at XDP, where `bpf_xdp_adjust_head` is
-// unrestricted: shift the Ethernet addresses over the popped label entry,
-// write the exposed EtherType, drop the 4 leading bytes, and XDP_PASS.
-// Generic XDP re-runs eth_type_trans when the Ethernet header changed, so
-// the popped frame enters the stack — and the TC classifier — as plain IP
-// (POP_L3, routed by the existing FIB path) or as MPLS with the next label
-// on top (POP). Swap and (Phase 2) push don't shrink an MPLS skb, so they
-// stay in TC.
+// Every MPLS operation that changes the frame's length lives here —
+// `bpf_skb_adjust_room` is -ENOTSUPP for non-IP skbs, so a TC classifier can
+// neither shrink nor grow an MPLS frame, while `bpf_xdp_adjust_head` is
+// unrestricted:
+//
+// * **pops** (explicit POP / POP_L3, and zebra-shaped PHP: a SWAP with an
+//   empty out stack, dispatched on the incoming S bit) shrink the frame.
+//   They run in a bounded loop so chained pops (PHP + stacked labels)
+//   resolve in one pass, then XDP_PASS — the veth native-XDP receive path
+//   re-runs eth_type_trans, so the frame enters TC as plain IP (routed by
+//   the FIB path) or as MPLS with the next label on top.
+// * **multi-label SR swaps** grow the frame; they complete entirely in XDP
+//   (imposed stack + L2 rewrite + bpf_redirect), because passing a
+//   swapped frame up would make TC re-look-up the *outgoing* label.
+//
+// Single-label swaps don't resize and stay in TC; pushes grow *IP* skbs,
+// which adjust_room does allow, and stay in TC too.
 
 /// Bounds-checked pointer into XDP packet data.
 #[inline(always)]
@@ -1003,54 +1055,86 @@ fn xdp_ptr<T>(ctx: &XdpContext, off: usize) -> Result<*mut T, ()> {
 }
 
 #[xdp]
-pub fn cradle_mpls_pop(ctx: XdpContext) -> u32 {
-    match try_mpls_pop(&ctx) {
+pub fn cradle_mpls(ctx: XdpContext) -> u32 {
+    match try_mpls_xdp(&ctx) {
         Ok(act) => act,
         Err(()) => xdp_action::XDP_PASS,
     }
 }
 
 #[inline(always)]
-fn try_mpls_pop(ctx: &XdpContext) -> Result<u32, ()> {
-    let ethertype = unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? };
-    if u16::from_be(ethertype) != ETH_P_MPLS_UC {
-        return Ok(xdp_action::XDP_PASS);
-    }
-    let lse = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF)? });
-    let (label, _tc, s, ttl) = mpls_lse_unpack(lse);
-    if ttl <= 1 {
-        return Ok(xdp_action::XDP_PASS);
-    }
-    let ent: MplsEntry = match MPLS_FIB.get_ptr(&label) {
-        Some(e) => unsafe { *e },
-        None => return Ok(xdp_action::XDP_PASS), // unknown label: not ours
-    };
-    match ent.op {
-        MPLS_OP_POP if s == 0 => pop_head(ctx, ETH_P_MPLS_UC),
-        MPLS_OP_POP_L3 if s == 1 => {
-            // The nibble after the label stack selects the exposed EtherType.
-            // (Pipe-model TTL: the inner IP TTL is untouched by the pop; the
-            // IP forwarding stage decrements it like any routed packet.)
+fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    // Bounded pop loop: each iteration handles the (new) top label or exits.
+    for _ in 0..=MAX_LABELS {
+        let ethertype = unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? };
+        if u16::from_be(ethertype) != ETH_P_MPLS_UC {
+            return Ok(xdp_action::XDP_PASS); // popped to IP (or never MPLS)
+        }
+        let lse = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF)? });
+        let (label, _tc, s, ttl) = mpls_lse_unpack(lse);
+        if ttl <= 1 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        let ent: MplsEntry = match MPLS_FIB.get_ptr(&label) {
+            Some(e) => unsafe { *e },
+            None => return Ok(xdp_action::XDP_PASS), // unknown label: not ours
+        };
+        let nh: NextHop = match NEXTHOPS.get_ptr(&ent.nexthop_id) {
+            Some(n) => unsafe { *n },
+            None => return Ok(xdp_action::XDP_PASS),
+        };
+
+        // Pop-to-IP needs the exposed EtherType up front so a bad payload
+        // can drop before the frame is mutated.
+        let pop_ip = |ctx: &XdpContext| -> Result<u16, ()> {
             let ver = unsafe { *xdp_ptr::<u8>(ctx, MPLS_LSE_OFF + 4)? };
             match ver >> 4 {
-                4 => pop_head(ctx, ETH_P_IP),
-                6 => pop_head(ctx, ETH_P_IPV6),
-                _ => {
+                4 => Ok(ETH_P_IP),
+                6 => Ok(ETH_P_IPV6),
+                _ => Err(()),
+            }
+        };
+
+        match ent.op {
+            MPLS_OP_POP if s == 0 => pop_head(ctx, ETH_P_MPLS_UC)?,
+            MPLS_OP_POP_L3 if s == 1 => match pop_ip(ctx) {
+                Ok(et) => pop_head(ctx, et)?,
+                Err(()) => {
                     stat_inc(STAT_DROP);
-                    Ok(xdp_action::XDP_DROP)
+                    return Ok(xdp_action::XDP_DROP);
+                }
+            },
+            // zebra-shaped PHP: a swap with an empty out stack — whether the
+            // pop exposes IP or another label is the packet's S bit's call.
+            MPLS_OP_SWAP if nh.num_labels == 0 => {
+                if s == 1 {
+                    match pop_ip(ctx) {
+                        Ok(et) => pop_head(ctx, et)?,
+                        Err(()) => {
+                            stat_inc(STAT_DROP);
+                            return Ok(xdp_action::XDP_DROP);
+                        }
+                    }
+                } else {
+                    pop_head(ctx, ETH_P_MPLS_UC)?;
                 }
             }
+            // SR stack: pop the incoming label, impose N > 1 labels — the
+            // frame grows, so it completes here (L2 rewrite + redirect).
+            MPLS_OP_SWAP if nh.num_labels > 1 => return grow_swap(ctx, &nh, s, ttl),
+            // Single-label swap (TC's in-place job) or a depth-mismatched
+            // explicit pop: hand the frame up.
+            _ => return Ok(xdp_action::XDP_PASS),
         }
-        // Swap (TC's job), or a pop that doesn't match the stack depth
-        // (POP on bottom-of-stack / POP_L3 with labels remaining): pass.
-        _ => Ok(xdp_action::XDP_PASS),
+        // A pop succeeded: loop — the next label (or the IP payload) is on top.
     }
+    Ok(xdp_action::XDP_PASS)
 }
 
 /// Remove the top label stack entry: move the 12 Ethernet address bytes over
 /// it, write the EtherType the pop exposes, then trim the 4 leading bytes.
 #[inline(always)]
-fn pop_head(ctx: &XdpContext, new_ethertype: u16) -> Result<u32, ()> {
+fn pop_head(ctx: &XdpContext, new_ethertype: u16) -> Result<(), ()> {
     let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
     unsafe { *xdp_ptr::<[u8; 12]>(ctx, 4)? = macs };
     unsafe { *xdp_ptr::<u16>(ctx, 4 + ETH_TYPE_OFF)? = new_ethertype.to_be() };
@@ -1058,7 +1142,66 @@ fn pop_head(ctx: &XdpContext, new_ethertype: u16) -> Result<u32, ()> {
         return Err(());
     }
     stat_inc(STAT_MPLS_POP);
-    Ok(xdp_action::XDP_PASS)
+    Ok(())
+}
+
+/// SR transit: pop the incoming label and impose the nexthop's multi-label
+/// stack. The frame grows at the head (`adjust_head` with a negative delta —
+/// veth native XDP guarantees XDP_PACKET_HEADROOM), the Ethernet header is
+/// rebuilt from the control-plane neighbor/port state, and the frame is
+/// redirected out — it never re-enters the stack.
+#[inline(always)]
+fn grow_swap(ctx: &XdpContext, nh: &NextHop, s_in: u8, ttl_in: u8) -> Result<u32, ()> {
+    let n = nh.num_labels as usize;
+    if n < 2 || n > MAX_LABELS {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // Resolve egress L2 first: a neighbor/port miss punts before mutation
+    // (TC then sees the untouched frame and punts to the host).
+    let dst_mac = if nh.flags & NH_F_V6 != 0 {
+        match NEIGH6.get_ptr(&Neigh6Key {
+            ifindex: nh.oif,
+            addr: nh.gateway_v6,
+        }) {
+            Some(e) => unsafe { (*e).mac },
+            None => return Ok(xdp_action::XDP_PASS),
+        }
+    } else {
+        match NEIGH4.get_ptr(&Neigh4Key {
+            ifindex: nh.oif,
+            addr: nh.gateway_v4,
+        }) {
+            Some(e) => unsafe { (*e).mac },
+            None => return Ok(xdp_action::XDP_PASS),
+        }
+    };
+    let src_mac = match PORTS.get_ptr(&nh.oif) {
+        Some(p) => unsafe { (*p).mac },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+
+    let grow = 4 * (n as i32 - 1);
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, -grow) } != 0 {
+        return Ok(xdp_action::XDP_PASS); // no headroom: punt untouched
+    }
+    // New layout: [eth 14][labels[0..n] 4n][payload] — the innermost imposed
+    // entry lands on the old top-LSE slot, so only the Ethernet header and
+    // the imposed entries need writing.
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? = ETH_P_MPLS_UC.to_be() };
+    for i in 0..MAX_LABELS {
+        if i >= n {
+            break;
+        }
+        // BOS only on the innermost, and only if the incoming label was BOS
+        // (the imposed stack sits atop whatever remained under it).
+        let s = if i == n - 1 { s_in } else { 0 };
+        let lse = mpls_lse(nh.labels[i], 0, s, ttl_in - 1).to_be();
+        unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 4 * i)? = lse };
+    }
+    stat_inc(STAT_MPLS_SWAP);
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
 #[cfg(not(test))]

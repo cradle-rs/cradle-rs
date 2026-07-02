@@ -3,13 +3,18 @@
 > Label-switched forwarding in the eBPF data plane, driven by the zebra-rs
 > MPLS control plane (static label bindings, SR-MPLS, labeled BGP, L3VPN).
 
-Status: **Phase 1 implemented** — transit swap in the TC classifier, pop /
-PHP-to-IP in a native-XDP stage (`cradle_mpls_pop`; see "Packet geometry" for
-why pops can't run at TC), `MPLS_FIB` + `NEIGH6`,
-`AddIlm`/`DelIlm`/`SetNeighbor6`, `labels` on nexthops, static JSON config,
-`cradle_mpls` BDD. Phase 1 bounds transit **swap to a single label** (a
-multi-label swap stack drops; SR stacks arrive with Phase 2's imposition
-work). Phases 2–4 below remain design.
+Status: **Phases 1–2 implemented.** Phase 1: transit swap in the TC
+classifier, pops in a native-XDP stage, `MPLS_FIB` + `NEIGH6`,
+`AddIlm`/`DelIlm`/`SetNeighbor6`, `labels` on nexthops, static JSON config.
+Phase 2: **ingress imposition** (TC push — the skb is still IP, so
+`adjust_room` grow is allowed), **SR stacks** (multi-label push; XDP
+grow-swap completing with an in-XDP L2 rewrite + redirect; a bounded pop
+loop resolving chained pops in one pass), **PHP by S bit** (a swap with an
+empty out stack — zebra's PHP shape — pops to IP or to the next label per
+packet), and the **zebra-rs `CradleFib` MPLS tee** (labeled nexthops, ILM
+add/replace/del, and resolved-neighbor feed). Proven by the `cradle_mpls`
+(all-static, full operation matrix) and `cradle_mpls_zebra` (zebra-driven
+LSP) BDD features. Phases 3–4 below remain design.
 
 ## Goal and scope
 
@@ -178,24 +183,28 @@ match u16::from_be(ethertype) {
    rewrite, below). Phase 1 bounds this to a single-label swap; a stack-growing
    swap (extra SR labels via `adjust_room` grow) is Phase 2.
 
-### `cradle_mpls_pop` (XDP) — pop and PHP
+### `cradle_mpls` (XDP) — pops, PHP, and SR grow-swaps
 
-The pops do **not** run at TC, for a reason discovered in implementation:
-`bpf_skb_adjust_room` returns `-ENOTSUPP` for any skb whose `skb->protocol`
-is not IPv4/IPv6 — a TC program cannot resize an MPLS frame at all. Both pop
-operations therefore run in a small XDP program attached to L3 ports, where
+Frame-resizing MPLS ops do **not** run at TC, for a reason discovered in
+implementation: `bpf_skb_adjust_room` returns `-ENOTSUPP` for any skb whose
+`skb->protocol` is not IPv4/IPv6 — a TC program cannot resize an MPLS frame
+at all. They run in an XDP program attached to L3 ports, where
 `bpf_xdp_adjust_head` is unrestricted:
 
-- parse EtherType `0x8847` + top LSE, look up `MPLS_FIB[label]` (same maps,
-  shared with the TC classifier);
-- **POP** (`s == 0`) — shift the 12 Ethernet-address bytes 4 bytes forward
-  over the LSE, keep EtherType `0x8847`, `bpf_xdp_adjust_head(+4)`,
-  `XDP_PASS` — the frame re-enters the stack with the next label on top;
-- **POP_L3** (`s == 1`) — same shift, EtherType from the exposed payload's
-  version nibble (`0x0800`/`0x86dd`), adjust, `XDP_PASS` — the frame enters
-  the stack as *plain IP*, so the existing TC path routes it
-  (`l3_forward_v4/v6` → `bpf_redirect_neigh`; per-VRF lookup is Phase 3).
-  Pipe-model TTL: the inner IP TTL is untouched by the pop.
+- **Pop loop** (bounded by `MAX_LABELS + 1`): while the ILM says pop —
+  explicit **POP** (`s == 0`, keep `0x8847`) or **POP_L3** (`s == 1`,
+  EtherType from the exposed version nibble), or the zebra-shaped **PHP: a
+  SWAP with an empty out stack**, dispatched on the packet's S bit — shift
+  the Ethernet addresses over the LSE and `adjust_head(+4)`. Chained pops
+  (PHP + stacked labels, later the VPN label) resolve in one pass; the
+  frame then `XDP_PASS`es into the stack as plain IP (TC routes it) or as
+  MPLS whose next label TC swaps in place. Pipe-model TTL throughout.
+- **Grow-swap** (SWAP with `num_labels > 1` — SR stacks): `adjust_head`
+  with a negative delta grows the frame, the full out stack is written
+  (TTL − 1, BOS on the innermost iff the incoming label carried it), and
+  the frame **completes in XDP** — L2 rewrite from `NEIGH4/6` + `PORTS`
+  and `bpf_redirect(oif)` — because passing a swapped frame up would make
+  TC re-look-up the *outgoing* label.
 
 After an `adjust_head` the veth native-XDP receive path re-runs
 `eth_type_trans`, so `skb->protocol` matches the popped frame and the TC
@@ -207,9 +216,10 @@ which is exactly how a mid-LSP frame arrives on a veth chain. veth supports
 native XDP; on drivers that don't, cradle falls back to generic mode with a
 logged caveat.
 
-The TC/XDP split rule is simple: **operations that shrink an MPLS-protocol
-frame live in XDP; everything else lives in TC** (swap rewrites in place;
-Phase 2's push grows an *IP* skb, which `adjust_room` does support).
+The hook-placement rule: **operations that change an MPLS-protocol frame's
+length live in XDP; everything else lives in TC** — single-label swaps
+rewrite in place, and push grows an *IP* skb, which `adjust_room` does
+support.
 
 ### Ingress push (from the IP path)
 
@@ -388,12 +398,15 @@ array) to prove the datapath, then a zebra-rs static label binding
 
 ## Phasing
 
-1. **Phase 1 — transit + disposition.** `MPLS_FIB`, `NEIGH6`, swap / PHP-to-IP /
-   pop, `mpls_l2_xmit`, counters, gRPC `AddIlm` + `SetNeighbor6`, static
-   config, `cradle_mpls` BDD (static). The P-router and egress-LER roles.
-2. **Phase 2 — imposition + SR + zebra tee.** Labeled nexthops (`NH_F_MPLS`,
-   push loop), `Nexthop.labels`, ingress LER, SR label stacks, and the zebra-rs
-   `CradleFib` MPLS tee (SR-MPLS / labeled BGP / static label binding).
+1. **Phase 1 — transit + disposition** *(done)*. `MPLS_FIB`, `NEIGH6`,
+   swap / PHP-to-IP / pop, `mpls_l2_xmit`, counters, gRPC `AddIlm` +
+   `SetNeighbor6`, static config, `cradle_mpls` BDD (static). The P-router
+   and egress-LER roles.
+2. **Phase 2 — imposition + SR + zebra tee** *(done)*. Labeled nexthops
+   (`NH_F_MPLS`, push), ingress LER, SR stacks (grow-swap, chained pops,
+   S-bit PHP), and the zebra-rs `CradleFib` MPLS tee — labeled nexthops,
+   `ilm_add/replace/del`, and the resolved-neighbor feed `mpls_l2_xmit`
+   depends on (`cradle_mpls_zebra` BDD).
 3. **Phase 3 — L3VPN.** Per-VRF FIB tables and `POP_L3` VRF lookup; the
    per-CE-label shortcut lands earlier, in Phase 1, as a special case.
 4. **Phase 4 — depth & offload.** Tail-call the MPLS program if the verifier

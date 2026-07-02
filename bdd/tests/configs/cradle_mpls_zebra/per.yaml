@@ -1,0 +1,14 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_mpls_zebra_ctl2.sock"
+router:
+  static:
+    mpls:
+      label:
+      - value: 16
+        nexthop:
+        - address: 10.0.2.1
+    ipv4:
+      route:
+      - prefix: 10.0.0.0/24
+        nexthop:
+        - address: 10.0.1.1

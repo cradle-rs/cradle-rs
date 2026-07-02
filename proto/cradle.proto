@@ -76,15 +76,17 @@ message Route6Del {
 }
 
 message Neighbor4 {
-  string oif = 1;
+  string oif = 1;       // interface name (used when oif_index == 0)
   string ip = 2;
   string mac = 3;
+  uint32 oif_index = 4; // ifindex; preferred when non-zero
 }
 
 message Neighbor6 {
-  string oif = 1;
+  string oif = 1;       // interface name (used when oif_index == 0)
   string ip = 2;
   string mac = 3;
+  uint32 oif_index = 4; // ifindex; preferred when non-zero
 }
 
 // An incoming-label map (ILM) entry — mirrors zebra-rs's FibHandle

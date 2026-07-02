@@ -124,8 +124,8 @@ impl Control {
         info!("attached cradle datapath to {name} (clsact ingress)");
         if l3 {
             let xdp: &mut Xdp = bpf
-                .program_mut("cradle_mpls_pop")
-                .context("program cradle_mpls_pop not found")?
+                .program_mut("cradle_mpls")
+                .context("program cradle_mpls not found")?
                 .try_into()?;
             // Native mode: generic XDP is skipped for TC-redirected skbs
             // (netif_receive_generic_xdp bails on skb_is_redirected), so a
@@ -133,7 +133,7 @@ impl Control {
             // generic-mode pop. veth supports native XDP; fall back to
             // generic (with that caveat) on drivers that don't.
             match xdp.attach(name, XdpMode::Driver) {
-                Ok(_) => info!("attached cradle MPLS pop stage to {name} (XDP native)"),
+                Ok(_) => info!("attached cradle MPLS stage to {name} (XDP native)"),
                 Err(e) => {
                     warn!(
                         "native XDP attach on {name} failed ({e}); falling back to generic \
@@ -141,7 +141,7 @@ impl Control {
                     );
                     xdp.attach(name, XdpMode::Skb)
                         .with_context(|| format!("attaching XDP MPLS pop to {name}"))?;
-                    info!("attached cradle MPLS pop stage to {name} (XDP generic)");
+                    info!("attached cradle MPLS stage to {name} (XDP generic)");
                 }
             }
         }
@@ -266,12 +266,23 @@ impl Control {
 
     pub async fn set_neighbor4(&self, oif: &str, ip: Ipv4Addr, mac: [u8; 6]) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
+        self.set_neighbor4_idx(oif, ip, mac).await
+    }
+
+    /// Set a v4 neighbor by ifindex directly (control planes such as
+    /// zebra-rs work in ifindex space).
+    pub async fn set_neighbor4_idx(&self, oif: u32, ip: Ipv4Addr, mac: [u8; 6]) -> Result<()> {
         self.dp.lock().await.neigh4_set(oif, ip, mac)?;
         Ok(())
     }
 
     pub async fn set_neighbor6(&self, oif: &str, ip: Ipv6Addr, mac: [u8; 6]) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
+        self.set_neighbor6_idx(oif, ip, mac).await
+    }
+
+    /// Set a v6 neighbor by ifindex directly.
+    pub async fn set_neighbor6_idx(&self, oif: u32, ip: Ipv6Addr, mac: [u8; 6]) -> Result<()> {
         self.dp.lock().await.neigh6_set(oif, ip, mac)?;
         Ok(())
     }
@@ -413,7 +424,9 @@ impl Cradle for GrpcService {
             } else {
                 Some(n.gateway.parse::<Ipv4Addr>().map_err(st)?)
             };
-            if n.oif_index != 0 {
+            if n.oif_index != 0 || n.oif.is_empty() {
+                // oif_index 0 with no name: an oif-less nexthop (e.g. an ILM
+                // decap target that never egresses through it) — store as-is.
                 self.control
                     .set_nexthop_idx(n.id, gw, n.oif_index, &n.labels)
                     .await
@@ -508,10 +521,17 @@ impl Cradle for GrpcService {
         let n = req.into_inner();
         let ip = n.ip.parse().map_err(st)?;
         let mac = util::parse_mac(&n.mac).map_err(st)?;
-        self.control
-            .set_neighbor4(&n.oif, ip, mac)
-            .await
-            .map_err(st)?;
+        if n.oif_index != 0 {
+            self.control
+                .set_neighbor4_idx(n.oif_index, ip, mac)
+                .await
+                .map_err(st)?;
+        } else {
+            self.control
+                .set_neighbor4(&n.oif, ip, mac)
+                .await
+                .map_err(st)?;
+        }
         Ok(Response::new(pb::Empty {}))
     }
 
@@ -522,10 +542,17 @@ impl Cradle for GrpcService {
         let n = req.into_inner();
         let ip = n.ip.parse().map_err(st)?;
         let mac = util::parse_mac(&n.mac).map_err(st)?;
-        self.control
-            .set_neighbor6(&n.oif, ip, mac)
-            .await
-            .map_err(st)?;
+        if n.oif_index != 0 {
+            self.control
+                .set_neighbor6_idx(n.oif_index, ip, mac)
+                .await
+                .map_err(st)?;
+        } else {
+            self.control
+                .set_neighbor6(&n.oif, ip, mac)
+                .await
+                .map_err(st)?;
+        }
         Ok(Response::new(pb::Empty {}))
     }
 
