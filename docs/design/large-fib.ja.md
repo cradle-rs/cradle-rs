@@ -5,9 +5,13 @@
 > ルックアップ、パケットごとのロック無し、フル DFZ 容量 — しかも `FibHandle`
 > の継ぎ目は不変のまま。
 
-ステータス: **設計/未実装。** 本書はマップレイアウト、パック化エントリ
-フォーマット、データプレーンのルックアップ、ユーザ空間の展開エンジン、および
-段階的な実装計画を提案する。[`architecture.md`](architecture.md) の L3 パスの
+ステータス: **フェーズ 1 実装済み** — シャドウ + 展開エンジン
+(`crates/cradle/src/dir24.rs`、参照 LPM に対するプロパティテスト付き)、
+`TBL24`/`TBL8`/`DEFAULT4` のパック化ワードデータパス、ロード時サイジング
+付き `--fib4-mode` / `"fib4_mode"`、3 つのカウンタ、および両エンジンパスを
+アサートする `cradle_dir24` BDD スモーク。LPM がデフォルトモードのまま。
+フェーズ 1 のマップ書き込みは要素単位(`BPF_MAP_UPDATE_BATCH` と
+`ctl fib summary` はフェーズ 2)。以下のフェーズ 2〜4 は設計のままである。[`architecture.md`](architecture.md) の L3 パスの
 上に構築される。オーバーレイ設計([`mpls.md`](mpls.md)、[`srv6.md`](srv6.md)、
 [`evpn-vxlan.md`](evpn-vxlan.md))はいずれも本設計に依存しないが、三者が収束
 する共有の per-VRF FIB は、グローバルテーブルの行き先がここであることを

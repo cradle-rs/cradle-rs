@@ -44,6 +44,53 @@ pub const FIB_F_CONNECTED: u32 = 1 << 2;
 /// maps), not a single nexthop. The data plane hashes the flow to pick a member.
 pub const FIB_F_ECMP: u32 = 1 << 3;
 
+// ------------------------- DIR-24-8 packed FIB word ------------------------
+
+/// Packed DIR-24-8 slot — `FibEntry` compressed into 4 bytes so `TBL24`
+/// stays at 64 MiB. Layout (bit 31 .. bit 0):
+///
+/// ```text
+///   [31]     FIBW_VALID
+///   [30]     FIBW_TBL8    — low bits are a TBL8 group index, not a nexthop
+///   [29:26]  flags        — FIB_F_* (4 bits)
+///   [25:0]   nexthop_id (or group index when FIBW_TBL8)
+/// ```
+pub type FibWord = u32;
+
+pub const FIBW_VALID: u32 = 1 << 31;
+pub const FIBW_TBL8: u32 = 1 << 30;
+pub const FIBW_FLAGS_SHIFT: u32 = 26;
+pub const FIBW_FLAGS_MASK: u32 = 0xf;
+pub const FIBW_ID_MASK: u32 = (1 << 26) - 1;
+
+/// Pack a resolved route into a valid `FibWord`. `flags` must fit the 4-bit
+/// field (`FIB_F_*` do) and `nexthop_id` the 26-bit field — both are masked.
+#[inline]
+pub const fn fibw_entry(nexthop_id: u32, flags: u32) -> FibWord {
+    FIBW_VALID | (flags & FIBW_FLAGS_MASK) << FIBW_FLAGS_SHIFT | (nexthop_id & FIBW_ID_MASK)
+}
+
+/// Pack a `TBL8` group pointer.
+#[inline]
+pub const fn fibw_group(group_idx: u32) -> FibWord {
+    FIBW_VALID | FIBW_TBL8 | (group_idx & FIBW_ID_MASK)
+}
+
+/// Unpack a valid, non-group word into `(nexthop_id, flags)`.
+#[inline]
+pub const fn fibw_unpack(w: FibWord) -> (u32, u32) {
+    (w & FIBW_ID_MASK, w >> FIBW_FLAGS_SHIFT & FIBW_FLAGS_MASK)
+}
+
+/// Number of `TBL8` groups sized at load time in dir24 mode (each group is
+/// 256 `FibWord` slots). One group is consumed per /24 that contains a
+/// longer-than-/24 route.
+pub const DIR24_TBL8_GROUPS: u32 = 4096;
+
+/// `DP_CONFIG[0]` bits — datapath configuration word, written by user space.
+/// Bit 0: the DIR-24-8 v4 engine is active (else the LPM trie).
+pub const DPC_FIB4_DIR24: u32 = 1 << 0;
+
 /// Member of a nexthop group, keyed by `(group_id, slot)` with a dense slot
 /// index `0..count`. The value is a nexthop id (into the per-nexthop map).
 /// The member count per group lives in a separate `group_id -> count` map.
@@ -344,8 +391,14 @@ pub const STAT_MPLS_SWAP: u32 = 9;
 pub const STAT_MPLS_POP: u32 = 10;
 /// Reserved for Phase 2 imposition (ingress LER push).
 pub const STAT_MPLS_PUSH: u32 = 11;
+/// DIR-24-8: resolved in one `TBL24` lookup.
+pub const STAT_FIB4_TBL24_HIT: u32 = 12;
+/// DIR-24-8: resolved through a `TBL8` group (two lookups).
+pub const STAT_FIB4_TBL8_HIT: u32 = 13;
+/// DIR-24-8: fell through to the `DEFAULT4` route.
+pub const STAT_FIB4_DEFAULT: u32 = 14;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 12;
+pub const STAT_MAX: u32 = 15;
 
 // ============================== L7 proxy ===================================
 
@@ -390,6 +443,24 @@ mod tests {
             let lse = mpls_lse(label, tc, s, ttl);
             assert_eq!(mpls_lse_unpack(lse), (label, tc, s, ttl));
         }
+    }
+
+    #[test]
+    fn fibw_round_trip() {
+        for (nh, flags) in [(0, 0), (1, FIB_F_LOCAL), (0x3ff_ffff, 0xf), (42, FIB_F_ECMP)] {
+            let w = fibw_entry(nh, flags);
+            assert_ne!(w & FIBW_VALID, 0);
+            assert_eq!(w & FIBW_TBL8, 0);
+            assert_eq!(fibw_unpack(w), (nh, flags));
+        }
+        let g = fibw_group(4095);
+        assert_ne!(g & FIBW_VALID, 0);
+        assert_ne!(g & FIBW_TBL8, 0);
+        assert_eq!(g & FIBW_ID_MASK, 4095);
+        // All current FIB_F_* flags fit the 4-bit field.
+        assert!(FIB_F_BLACKHOLE | FIB_F_LOCAL | FIB_F_CONNECTED | FIB_F_ECMP <= FIBW_FLAGS_MASK);
+        // Zero is the invalid word.
+        assert_eq!(0u32 & FIBW_VALID, 0);
     }
 
     #[test]

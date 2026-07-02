@@ -19,6 +19,11 @@ use crate::{control::Control, util};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
+    /// IPv4 FIB engine, "lpm" (default) or "dir24". Load-time only — it sizes
+    /// the eBPF maps, so it is consumed by `serve` before the object loads
+    /// and is NOT replayable over `ctl apply`.
+    #[serde(default)]
+    pub fib4_mode: Option<String>,
     #[serde(default)]
     pub ports: Vec<Port>,
     #[serde(default)]
