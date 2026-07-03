@@ -228,6 +228,23 @@ impl Control {
         Ok(())
     }
 
+    /// Register a BUM replication slot by interface names (see
+    /// `Dataplane::repl_slot_add`).
+    pub async fn add_repl_slot(
+        &self,
+        flood_port: &str,
+        encap_port: &str,
+        remote_sid: Ipv6Addr,
+    ) -> Result<()> {
+        let flood = util::ifindex_of(flood_port)?;
+        let encap = util::ifindex_of(encap_port)?;
+        self.dp
+            .lock()
+            .await
+            .repl_slot_add(flood, encap, remote_sid)?;
+        Ok(())
+    }
+
     /// Snapshot the locally-learned FDB (see `Dataplane::fdb_local_entries`).
     pub async fn fdb_local_entries(&self) -> Vec<([u8; 6], u16)> {
         self.dp.lock().await.fdb_local_entries()

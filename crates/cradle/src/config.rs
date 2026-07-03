@@ -44,10 +44,25 @@ pub struct Config {
     /// Static overlay FDB entries (EVPN over SRv6).
     #[serde(default)]
     pub fdb: Vec<FdbCfg>,
+    /// BUM ingress-replication slots (EVPN over SRv6, multi-PE).
+    #[serde(default)]
+    pub repl_slots: Vec<ReplSlotCfg>,
     #[serde(default)]
     pub services: Vec<Service>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
+}
+
+/// A BUM ingress-replication slot: one remote PE in a bridge domain's flood
+/// set. `flood_port` is the slot veth's A end (declare it as an L2 port in
+/// the BD so the flood reaches it); `encap_port` is the B end (declare it as
+/// an L3 port so the XDP stage attaches), where each flooded copy is
+/// MAC-in-SRv6 encapsulated toward `remote_sid` (the remote PE's End.DT2M).
+#[derive(Debug, Deserialize)]
+pub struct ReplSlotCfg {
+    pub flood_port: String,
+    pub encap_port: String,
+    pub remote_sid: String,
 }
 
 /// A static overlay FDB entry (EVPN over SRv6): the MAC `mac` in bridge domain
@@ -327,6 +342,14 @@ impl Config {
                 .parse()
                 .with_context(|| format!("bad remote SID {:?}", f.remote_sid))?;
             ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop).await?;
+        }
+        for r in &self.repl_slots {
+            let remote_sid = r
+                .remote_sid
+                .parse()
+                .with_context(|| format!("bad remote SID {:?}", r.remote_sid))?;
+            ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid)
+                .await?;
         }
         for n in &self.neighbors {
             let ip: IpAddr =

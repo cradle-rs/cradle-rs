@@ -1,0 +1,31 @@
+{
+  "ports": [
+    { "name": "pe1c", "vlan": 100 },
+    { "name": "pe1u2", "l3": true },
+    { "name": "pe1u3", "l3": true },
+    { "name": "r12a", "vlan": 100 },
+    { "name": "r12b", "l3": true },
+    { "name": "r13a", "vlan": 100 },
+    { "name": "r13b", "l3": true }
+  ],
+  "srv6_source": "fd00:1::1",
+  "nexthops": [
+    { "id": 1, "oif": "pe1u2", "gateway": "2001:db8:12::2" },
+    { "id": 2, "oif": "pe1u3", "gateway": "2001:db8:13::2" }
+  ],
+  "neighbors": [
+    { "oif": "pe1u2", "ip": "2001:db8:12::2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "pe1u3", "ip": "2001:db8:13::2", "mac": "02:00:00:00:03:0a" }
+  ],
+  "localsids": [
+    { "sid": "fd00:1::200", "behavior": "end.dt2m", "vrf": 100 }
+  ],
+  "repl_slots": [
+    { "flood_port": "r12a", "encap_port": "r12b", "remote_sid": "fd00:2::200" },
+    { "flood_port": "r13a", "encap_port": "r13b", "remote_sid": "fd00:3::200" }
+  ],
+  "routes6": [
+    { "prefix": "fd00:2::/64", "nexthop": 1 },
+    { "prefix": "fd00:3::/64", "nexthop": 2 }
+  ]
+}
