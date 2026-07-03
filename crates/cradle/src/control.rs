@@ -32,7 +32,7 @@ use crate::{
 use cradle_common::{
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
+    SRV6_BH_END_M, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -40,7 +40,7 @@ fn srv6_behavior(code: u32) -> Result<u8> {
     match code as u8 {
         b @ (SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46
         | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA | SRV6_BH_UALIB | SRV6_BH_END_DT2U
-        | SRV6_BH_END_DT2M) => Ok(b),
+        | SRV6_BH_END_DT2M | SRV6_BH_END_M) => Ok(b),
         other => anyhow::bail!("unknown SRv6 behavior code {other}"),
     }
 }
@@ -75,6 +75,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "fdb_aged",
     "srv6_hinsert",
     "nh_backup",
+    "srv6_endm",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -326,6 +327,27 @@ impl Control {
         self.attached.lock().await.remove(&b_idx);
         crate::kernel::del_link(&a)?;
         info!("repl slot {a} removed: bd {bd} -> {remote_sid}");
+        Ok(())
+    }
+
+    /// Install / remove an egress-protection mirror route (End.M context).
+    pub async fn add_mirror_route(
+        &self,
+        ctx: u32,
+        prefix: Ipv6Addr,
+        prefix_len: u8,
+        behavior: u8,
+        vrf_id: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .mirror_route_add(ctx, prefix, prefix_len, behavior, vrf_id)?;
+        Ok(())
+    }
+
+    pub async fn del_mirror_route(&self, ctx: u32, prefix: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.mirror_route_del(ctx, prefix, prefix_len)?;
         Ok(())
     }
 
@@ -917,6 +939,33 @@ impl Cradle for GrpcService {
         let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
         self.control
             .del_repl_slot_auto(r.bd as u16, sid)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_mirror_route(
+        &self,
+        req: Request<pb::MirrorRoute>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let m = req.into_inner();
+        let prefix: Ipv6Addr = m.prefix.parse().map_err(st)?;
+        let behavior = srv6_behavior(m.behavior).map_err(st)?;
+        self.control
+            .add_mirror_route(m.ctx, prefix, m.prefix_len as u8, behavior, m.vrf_table_id)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_mirror_route(
+        &self,
+        req: Request<pb::MirrorRouteDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let m = req.into_inner();
+        let prefix: Ipv6Addr = m.prefix.parse().map_err(st)?;
+        self.control
+            .del_mirror_route(m.ctx, prefix, m.prefix_len as u8)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

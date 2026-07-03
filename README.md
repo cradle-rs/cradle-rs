@@ -104,7 +104,7 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | End.DT46 | ✅ | dual-family; the BGP L3VPN service SID |
 | End.B6.Insert / B6.Encaps | ⬜ | behavior code reserved in the ABI |
 | End.BM | ⬜ | |
-| End.M (mirror) | ⬜ | teed best-effort as End.DT6 |
+| End.M (mirror) | ✅ | egress protection: repair-decap + mirror-context lookup + service decap |
 | End.Replicate | ⬜ | BUM replication uses per-remote slots instead |
 | End.S / End.AN / AS / AD / AM | ⬜ | service programming out of scope |
 
@@ -138,3 +138,4 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | BGP EVPN over SRv6 (RFC 9252) | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
 | BGP SR Policy / color steering | ⬜ | needs End.B6 |
 | TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
+| Mirror SID egress protection (End.M) | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |

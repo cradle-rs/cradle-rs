@@ -262,6 +262,34 @@ pub const SRV6_BH_UALIB: u8 = 8;
 pub const SRV6_BH_END_DT2U: u8 = 9;
 /// `End.DT2M`: decapsulate + BUM L2 flood (EVPN-over-SRv6). Slice 2.
 pub const SRV6_BH_END_DT2M: u8 = 10;
+/// `End.M`: the egress-protection mirror (draft-ietf-rtgwg-srv6-egress-
+/// protection). Decapsulate, then look the exposed packet's destination —
+/// the *failed* egress PE's service SID — up in the mirror-context table
+/// (`vrf_id` = the context id) via the `MIRROR` trie, reproducing that
+/// egress's decap locally.
+pub const SRV6_BH_END_M: u8 = 11;
+
+/// Mirror-context LPM key (`MIRROR`): the protected egress's SID space,
+/// scoped by the End.M SID's context id — a route `addr/len` in context
+/// `c` is inserted with `prefix_len = 32 + len` (like `Vrf6Key`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MirrorKey {
+    pub ctx: u32,
+    pub addr: [u8; 16],
+}
+
+/// Mirror-context entry: how to reproduce the failed egress's behavior —
+/// a DT-style decap into a local table.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MirrorEntry {
+    /// `SRV6_BH_END_DT4/DT6/DT46` semantics applied to the exposed packet.
+    pub behavior: u8,
+    pub _pad: [u8; 3],
+    /// Local VRF table the inner packet is looked up in.
+    pub vrf_id: u32,
+}
 
 /// Maximum SIDs in an imposed segment list (bounds the encap/SRH loops).
 pub const MAX_SEGS: usize = 6;
@@ -544,8 +572,10 @@ pub const STAT_FDB_AGED: u32 = 24;
 pub const STAT_SRV6_HINSERT: u32 = 25;
 /// Forwards that switched to a backup nexthop (primary's link down).
 pub const STAT_NH_BACKUP: u32 = 26;
+/// `End.M` mirror decaps (egress protection served on the protector).
+pub const STAT_SRV6_ENDM: u32 = 27;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 27;
+pub const STAT_MAX: u32 = 28;
 
 // ============================== L7 proxy ===================================
 
@@ -567,6 +597,8 @@ mod user {
     }
 
     pod!(
+        MirrorKey,
+        MirrorEntry,
         FibEntry,
         NextHop,
         Neigh4Key,
