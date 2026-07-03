@@ -37,7 +37,8 @@ L2 switching (learn / forward / flood, FDB aging), dual-stack L3 with ECMP
 and a DIR-24-8 large-FIB engine (1M routes, ~51 ns lookups), L4 load
 balancing with conntrack, an L7 transparent proxy (TPROXY), MPLS
 (swap / pop / PHP / push, L3VPN — [design](docs/design/mpls.md)), SRv6
-including uSID and EVPN (below — [design](docs/design/srv6.md),
+including both RFC 9800 compressions (uSID/NEXT-C-SID and REPLACE-C-SID),
+the RFC 8986 flavors, and EVPN (below — [design](docs/design/srv6.md),
 [EVPN](docs/design/evpn-srv6.md)), and observability counters. Everything is
 drivable over gRPC, and [zebra-rs](https://github.com/zebra-rs/zebra-rs)
 drives it as a real control plane: IS-IS SR/SRv6, BGP L3VPN (MPLS and SRv6),
@@ -75,8 +76,9 @@ reverse `WatchFdb` channel reporting data-plane MAC learning back up.
 
 Function taxonomy after
 [Vinbero's roadmap](https://github.com/takehaya/Vinbero/blob/main/docs/loadmap.md),
-extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
-(BDD-proven), 🔶 = partial, ⬜ = not yet.
+extended with the RFC 9800 compression flavors (uSID/NEXT-C-SID actions and
+REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
+🔶 = partial, ⬜ = not yet.
 
 ### Headend behaviors
 
@@ -140,3 +142,4 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
 | Mirror SID egress protection (End.M) | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
 | Locator flavors (PSP/USP/USD) | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |
+| REPLACE-C-SID locators | ✅ | `behavior: replace` → End(REP)/End.X(REP) at /(LB+LN+Fun), REP codepoints + Arg-length advertisement; eBPF-only (no kernel op); `cradle_replace_zebra` |
