@@ -72,6 +72,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_l2_encap",
     "srv6_l2_decap",
     "srv6_l2_bum",
+    "fdb_aged",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -108,6 +109,30 @@ impl Control {
         if let Err(e) = crate::l7::spawn_proxy(self.routes.clone()).await {
             warn!("L7 proxy disabled: {e:#}");
         }
+    }
+
+    /// Start the FDB aging sweep: every few seconds, expire locally-learned
+    /// MACs idle longer than `age_secs` (0 = aging disabled). `WatchFdb`
+    /// subscribers report the removals upstream as age events.
+    pub fn start_fdb_aging(&self, age_secs: u64) {
+        if age_secs == 0 {
+            return;
+        }
+        let dp = self.dp.clone();
+        let age = std::time::Duration::from_secs(age_secs);
+        // Sweep at a fraction of the age (5s cap) so expiry lag stays small.
+        let interval = std::time::Duration::from_secs((age_secs / 3).clamp(1, 5));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match dp.lock().await.fdb_age_sweep(age) {
+                    Ok(0) => {}
+                    Ok(n) => info!("fdb aging: expired {n} idle entries"),
+                    Err(e) => warn!("fdb aging sweep failed: {e:#}"),
+                }
+            }
+        });
+        info!("fdb aging enabled: {age_secs}s idle timeout");
     }
 
     /// Mark an L7 service (VIP:port → path-prefix routes). The datapath steers
@@ -841,9 +866,11 @@ impl Cradle for GrpcService {
     type WatchFdbStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FdbEvent, Status>>;
 
     /// Stream datapath MAC learning to the control plane: a 1s poll of the
-    /// FDB map, diffed against the entries already reported on this stream
-    /// (a fresh subscription replays the full current set first). Learns
-    /// only — cradle has no FDB aging yet.
+    /// FDB map, diffed against the entries already reported on this stream.
+    /// New entries emit `event: 0` (learned); entries that disappear —
+    /// expired by the aging sweep, or removed any other way — emit
+    /// `event: 1` (aged) so the subscriber withdraws its Type-2. A fresh
+    /// subscription replays the full current set first.
     async fn watch_fdb(
         &self,
         _req: Request<pb::WatchFdbRequest>,
@@ -851,24 +878,38 @@ impl Cradle for GrpcService {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let control = self.control.clone();
         tokio::spawn(async move {
+            let fmt_mac = |mac: [u8; 6]| {
+                format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                )
+            };
             let mut seen: std::collections::HashSet<([u8; 6], u16)> =
                 std::collections::HashSet::new();
             loop {
-                for (mac, bd) in control.fdb_local_entries().await {
-                    if !seen.insert((mac, bd)) {
-                        continue;
-                    }
+                let current: std::collections::HashSet<([u8; 6], u16)> =
+                    control.fdb_local_entries().await.into_iter().collect();
+                for &(mac, bd) in current.difference(&seen) {
                     let ev = pb::FdbEvent {
-                        mac: format!(
-                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                        ),
+                        mac: fmt_mac(mac),
                         bd: bd as u32,
+                        event: 0, // learned
                     };
                     if tx.send(Ok(ev)).await.is_err() {
                         return; // subscriber went away
                     }
                 }
+                for &(mac, bd) in seen.difference(&current) {
+                    let ev = pb::FdbEvent {
+                        mac: fmt_mac(mac),
+                        bd: bd as u32,
+                        event: 1, // aged / removed
+                    };
+                    if tx.send(Ok(ev)).await.is_err() {
+                        return;
+                    }
+                }
+                seen = current;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         });

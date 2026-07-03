@@ -23,7 +23,7 @@ use cradle_common::{
     MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo,
     ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
     FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    STAT_MAX,
+    STAT_FDB_AGED, STAT_MAX,
 };
 
 use crate::{
@@ -304,6 +304,7 @@ impl Dataplane {
                 oif: nexthop_id,
                 flags: FDB_F_REMOTE,
                 remote_sid: remote_sid.octets(),
+                last_seen: 0,
             },
             0,
         )?;
@@ -397,6 +398,47 @@ impl Dataplane {
             .insert(flood_ifindex, remote_sid.octets(), 0)?;
         self.repl_sid
             .insert(encap_ifindex, remote_sid.octets(), 0)?;
+        Ok(())
+    }
+
+    /// Expire idle locally-learned FDB entries: remove every local
+    /// (`flags == 0`) entry whose `last_seen` is older than `max_idle` and
+    /// bump `STAT_FDB_AGED` per removal. Returns the number aged out.
+    /// Entries with `last_seen == 0` (installed before stamping, or by
+    /// control planes) are left alone. `WatchFdb` subscribers observe the
+    /// disappearance in their next scan and report an age event upstream.
+    pub fn fdb_age_sweep(&mut self, max_idle: std::time::Duration) -> Result<usize> {
+        let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)?;
+        let now_ns = now.tv_sec() as u64 * 1_000_000_000 + now.tv_nsec() as u64;
+        let max_idle_ns = max_idle.as_nanos() as u64;
+        let mut stale = Vec::new();
+        for item in self.fdb.iter() {
+            let Ok((k, v)) = item else { continue };
+            if v.flags != 0 || v.last_seen == 0 {
+                continue;
+            }
+            if now_ns.saturating_sub(v.last_seen) > max_idle_ns {
+                stale.push(k);
+            }
+        }
+        let aged = stale.len();
+        for k in stale {
+            let _ = self.fdb.remove(&k);
+            self.stat_bump(STAT_FDB_AGED)?;
+        }
+        Ok(aged)
+    }
+
+    /// Bump a datapath stat counter from user space (cpu-0 slot of the
+    /// per-CPU array) — used by control-plane-side events like FDB aging.
+    fn stat_bump(&mut self, idx: u32) -> Result<()> {
+        let values = self.stats.get(&idx, 0)?;
+        let mut v: Vec<u64> = values.iter().copied().collect();
+        if let Some(first) = v.first_mut() {
+            *first += 1;
+        }
+        self.stats
+            .set(idx, aya::maps::PerCpuValues::try_from(v)?, 0)?;
         Ok(())
     }
 

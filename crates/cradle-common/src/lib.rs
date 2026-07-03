@@ -322,6 +322,10 @@ pub struct FdbEntry {
     /// EVPN-over-SRv6 overlay target: the remote PE's `End.DT2U` service SID
     /// this MAC sits behind (`FDB_F_REMOTE` only; zero otherwise).
     pub remote_sid: [u8; 16],
+    /// `bpf_ktime_get_ns()` of the last frame that learned/refreshed this
+    /// entry (local learns only; 0 on control-plane-installed entries).
+    /// The user-space aging sweep expires idle local entries against it.
+    pub last_seen: u64,
 }
 
 /// This MAC is one of ours — punt the frame up to L3 / the host stack.
@@ -521,8 +525,10 @@ pub const STAT_SRV6_L2_DECAP: u32 = 22;
 /// EVPN over SRv6: BUM (broadcast/multicast/unknown) MAC-in-SRv6 encap toward
 /// the bridge domain's `End.DT2M` SID (ingress PE).
 pub const STAT_SRV6_L2_BUM: u32 = 23;
+/// FDB entries expired by the user-space aging sweep (idle local MACs).
+pub const STAT_FDB_AGED: u32 = 24;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 24;
+pub const STAT_MAX: u32 = 25;
 
 // ============================== L7 proxy ===================================
 

@@ -47,10 +47,18 @@ pub struct Config {
     /// BUM ingress-replication slots (EVPN over SRv6, multi-PE).
     #[serde(default)]
     pub repl_slots: Vec<ReplSlotCfg>,
+    /// Idle timeout (seconds) for locally-learned FDB entries; 0 disables
+    /// aging. Default 300 (the kernel bridge default).
+    #[serde(default = "default_fdb_age_secs")]
+    pub fdb_age_secs: u64,
     #[serde(default)]
     pub services: Vec<Service>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
+}
+
+fn default_fdb_age_secs() -> u64 {
+    300
 }
 
 /// A BUM ingress-replication slot: one remote PE in a bridge domain's flood

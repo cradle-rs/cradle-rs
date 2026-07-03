@@ -337,6 +337,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result
                 oif: iif,
                 flags: 0,
                 remote_sid: [0; 16],
+                last_seen: unsafe { bpf_ktime_get_ns() },
             },
             0,
         );
@@ -1353,6 +1354,7 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             oif: 0, // resolve the underlay adjacency by FIB6 lookup
             flags: FDB_F_REMOTE,
             remote_sid: unsafe { *sid },
+            last_seen: 0,
         };
         return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
     }
@@ -1407,6 +1409,7 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
                 oif: iif,
                 flags: 0,
                 remote_sid: [0; 16],
+                last_seen: unsafe { bpf_ktime_get_ns() },
             },
             0,
         );
