@@ -44,6 +44,33 @@ drives it as a real control plane: IS-IS SR/SRv6, BGP L3VPN (MPLS and SRv6),
 and BGP EVPN program the eBPF FIBs through the `FibHandle` tee, with a
 reverse `WatchFdb` channel reporting data-plane MAC learning back up.
 
+## MPLS support status
+
+✅ = implemented (BDD-proven), ⬜ = not yet.
+([design](docs/design/mpls.md))
+
+### Label operations
+
+| Operation | Status | Notes |
+|---|---|---|
+| Swap | ✅ | single-label at TC; multi-label SR swaps complete in XDP |
+| Pop | ✅ | XDP stage (`bpf_skb_adjust_room` can't shrink MPLS at TC); chained pops in one pass |
+| PHP (pop-and-forward) | ✅ | zebra-shaped implicit-null handling |
+| Push (imposition) | ✅ | up to 3-label stacks (TC, IP payloads) |
+| Pop-to-VRF (VPN label) | ✅ | decap + per-VRF lookup; VRF carried XDP→TC as metadata |
+| ECMP over labeled paths | ✅ | flow-hashed nexthop groups |
+| Entropy / TTL-propagate knobs | ⬜ | TTL decrements; no ELI/EL |
+
+### Control plane
+
+| Producer | Status | Notes |
+|---|---|---|
+| Static ILM (gRPC/JSON) | ✅ | `AddIlm`/`DelIlm` + labels on nexthops |
+| IS-IS SR (SR-MPLS) | ✅ | prefix SIDs / SRGB → ILM + out-labels teed |
+| BGP L3VPN (VPNv4/v6 over MPLS) | ✅ | per-VRF VPN label, `cradle_l3vpn_zebra` |
+| LDP | ⬜ | no producer in zebra-rs |
+| SR-MPLS TI-LFA | ⬜ | |
+
 ## SRv6 support status
 
 Function taxonomy after
