@@ -32,8 +32,82 @@ sudo ./target/debug/cradle --iface <dev>   # attach the datapath (CAP_BPF/NET_AD
 
 ## Status
 
-Phase 0 (foundation): workspace, map contract, aya build pipeline, and a TC
-`clsact` datapath skeleton — validated build → load → attach on Linux 6.8.
-L3/L2/L4 stages and zebra-rs integration are in progress. MPLS transit
-(label swap / pop / PHP-to-IP via a static ILM) is implemented
-([design](docs/design/mpls.md)).
+The full L2–L7 data plane is implemented and BDD-tested on Linux 6.8:
+L2 switching (learn / forward / flood, FDB aging), dual-stack L3 with ECMP
+and a DIR-24-8 large-FIB engine (1M routes, ~51 ns lookups), L4 load
+balancing with conntrack, an L7 transparent proxy (TPROXY), MPLS
+(swap / pop / PHP / push, L3VPN — [design](docs/design/mpls.md)), SRv6
+including uSID and EVPN (below — [design](docs/design/srv6.md),
+[EVPN](docs/design/evpn-srv6.md)), and observability counters. Everything is
+drivable over gRPC, and [zebra-rs](https://github.com/zebra-rs/zebra-rs)
+drives it as a real control plane: IS-IS SR/SRv6, BGP L3VPN (MPLS and SRv6),
+and BGP EVPN program the eBPF FIBs through the `FibHandle` tee, with a
+reverse `WatchFdb` channel reporting data-plane MAC learning back up.
+
+## SRv6 support status
+
+Function taxonomy after
+[Vinbero's roadmap](https://github.com/takehaya/Vinbero/blob/main/docs/loadmap.md),
+extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
+(BDD-proven), 🔶 = partial, ⬜ = not yet.
+
+### Headend behaviors
+
+| Function | Status | Notes |
+|---|---|---|
+| H.Encaps | ✅ | multi-SID SRH imposition (TC stage) |
+| H.Encaps.Red | ✅ | the default; single-SID = no SRH |
+| H.Encaps.L2 / L2.Red | ✅ | MAC-in-SRv6 (next-header 143) for EVPN, XDP stage |
+| H.Insert | ⬜ | teed as H.Encaps today |
+| H.M.GTP4.D / GTP6.D | ⬜ | mobile user plane out of scope |
+
+### Endpoint behaviors
+
+| Function | Status | Notes |
+|---|---|---|
+| End | ✅ | SRH `Segments Left` walk (XDP) |
+| End.X | ✅ | adjacency cross-connect (XDP redirect) |
+| End.T | ⬜ | |
+| End.DX2 / DX2V | ⬜ | |
+| End.DT2U | ✅ | EVPN unicast: decap + bridge by dst MAC |
+| End.DT2M | ✅ | EVPN BUM: decap + flood (split horizon) |
+| End.DX4 / DX6 | ⬜ | |
+| End.DT4 | ✅ | decap + per-VRF v4 lookup |
+| End.DT6 | ✅ | decap + per-VRF v6 lookup |
+| End.DT46 | ✅ | dual-family; the BGP L3VPN service SID |
+| End.B6.Insert / B6.Encaps | ⬜ | behavior code reserved in the ABI |
+| End.BM | ⬜ | |
+| End.M (mirror) | ⬜ | teed best-effort as End.DT6 |
+| End.Replicate | ⬜ | BUM replication uses per-remote slots instead |
+| End.S / End.AN / AS / AD / AM | ⬜ | service programming out of scope |
+
+### uSID (NEXT-C-SID, RFC 9800) actions
+
+| Action | Status | Notes |
+|---|---|---|
+| uN | ✅ | shift-and-forward at the locator (block+node) prefix |
+| uA | ✅ | adjacency micro-SID (/128, classic End.X form) |
+| uA (LIB) | ✅ | block:function prefix — shift + adjacency mid-carrier |
+| uDT4 / uDT6 / uDT46 | ✅ | End.DT* matched at the carrier's last micro-SID |
+| uDX* / uB6 | ⬜ | |
+| REPLACE-C-SID (End.LBS/XLBS) | ⬜ | |
+
+### Flavors
+
+| Flavor | Status | Notes |
+|---|---|---|
+| NEXT-C-SID | ✅ | 16-bit micro-SIDs; blocks 16/32/48 |
+| PSP | ⬜ | |
+| USP | ⬜ | |
+| USD | ⬜ | (End.DT* decap covers the egress case) |
+
+### Control plane (zebra-rs tee)
+
+| Producer | Status | Notes |
+|---|---|---|
+| Static gRPC/JSON config | ✅ | every function above |
+| IS-IS SRv6 (locators, uN/uA) | ✅ | locator routes + local SIDs teed |
+| BGP L3VPN over SRv6 (VPNv4/v6) | ✅ | per-VRF End.DT46, `encapsulation srv6` |
+| BGP EVPN over SRv6 (RFC 9252) | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
+| BGP SR Policy / color steering | ⬜ | needs End.B6 |
+| TI-LFA uSID repair carriers | 🔶 | zebra packs carriers; datapath uN/uA ready, untested end-to-end |
