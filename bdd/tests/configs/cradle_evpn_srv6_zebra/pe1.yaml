@@ -1,0 +1,57 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_evpn_srv6_zebra_ctl1.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1u
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 2001:db8::1
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1u
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

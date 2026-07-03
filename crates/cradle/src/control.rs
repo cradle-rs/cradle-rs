@@ -31,15 +31,16 @@ use crate::{
 };
 use cradle_common::{
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, STAT_MAX,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
+    SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
 fn srv6_behavior(code: u32) -> Result<u8> {
     match code as u8 {
         b @ (SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46
-        | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA | SRV6_BH_UALIB) => Ok(b),
+        | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA | SRV6_BH_UALIB | SRV6_BH_END_DT2U
+        | SRV6_BH_END_DT2M) => Ok(b),
         other => anyhow::bail!("unknown SRv6 behavior code {other}"),
     }
 }
@@ -203,9 +204,10 @@ impl Control {
         Ok(())
     }
 
-    /// Program a static overlay FDB entry: `mac` in bridge domain `bd` is behind
-    /// the remote `End.DT2U` `remote_sid`, reached via underlay `nexthop_id`
-    /// (EVPN over SRv6).
+    /// Program an overlay FDB entry: `mac` in bridge domain `bd` is behind
+    /// the remote `End.DT2U`/`DT2M` `remote_sid`, reached via underlay
+    /// `nexthop_id` — 0 = the datapath resolves it with a FIB6 lookup on the
+    /// SID (EVPN over SRv6).
     pub async fn add_fdb_remote(
         &self,
         mac: [u8; 6],
@@ -217,6 +219,12 @@ impl Control {
             .lock()
             .await
             .fdb_remote_add(mac, bd, remote_sid, nexthop_id)?;
+        Ok(())
+    }
+
+    /// Remove an overlay FDB entry.
+    pub async fn del_fdb_remote(&self, mac: [u8; 6], bd: u16) -> Result<()> {
+        self.dp.lock().await.fdb_remote_del(mac, bd)?;
         Ok(())
     }
 
@@ -694,6 +702,33 @@ impl Cradle for GrpcService {
         let s = req.into_inner();
         let addr: Ipv6Addr = s.addr.parse().map_err(st)?;
         self.control.set_srv6_encap_source(addr).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_fdb_remote(
+        &self,
+        req: Request<pb::FdbRemote>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let f = req.into_inner();
+        let mac = util::parse_mac(&f.mac).map_err(st)?;
+        let remote_sid: Ipv6Addr = f.remote_sid.parse().map_err(st)?;
+        self.control
+            .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_fdb_remote(
+        &self,
+        req: Request<pb::FdbRemoteDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let f = req.into_inner();
+        let mac = util::parse_mac(&f.mac).map_err(st)?;
+        self.control
+            .del_fdb_remote(mac, f.bd as u16)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 
