@@ -6,16 +6,19 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–5 implemented**: `End.DT2U` unicast,
+Status: **Slices 1–6 implemented**: `End.DT2U` unicast,
 `End.DT2M` BUM, **the BGP EVPN control-plane tee** — zebra-rs
 (`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
 per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
 IMETs, and the `FibHandle` tee installs remote MACs, the BUM sentinel, and
 the local L2 service SIDs into cradle — and **the cradle→zebra MAC-learn
 channel** (`WatchFdb`), which streams datapath-learned CE MACs up so zebra
-originates Type-2 routes for them — and **multi-PE BUM ingress replication**
+originates Type-2 routes for them — **multi-PE BUM ingress replication**
 (per-copy `End.DT2M` encap via replication-slot veth pairs in the flood
-list, with EVPN split horizon). **BGP EVPN over SRv6 programs the L2 data
+list, with EVPN split horizon) — and **the Type-3 → slot tee**: every
+received IMET becomes a cradle-managed replication slot (`AddReplSlot`;
+cradle creates the veth pair, flood membership, and XDP attach itself), so
+any number of PEs works BGP-driven. **BGP EVPN over SRv6 programs the L2 data
 plane end to end, fully dynamically** (the L2 analog of the L3VPN tee, plus
 the reverse channel L3 never needed). This was the last Phase-4 SRv6 item.
 It builds on the SRv6 encap/decap geometry (Phases 1–4) and the L2
@@ -118,6 +121,13 @@ bridge domain, kernel forwarding/seg6 off on the PEs.
   session, c1↔c2 reach, and `srv6_l2_bum`/`srv6_l2_encap` @pe1 +
   `srv6_l2_decap` @pe2 (`srv6_l2_encap` nonzero proves a learned MAC made
   the full loop: XDP learn → WatchFdb → Type-2 → remote tee → DT2U encap).
+- `cradle_evpn_srv6_multi` — 3-PE BUM replication, static slots: one BD
+  across three PEs (hub underlay), no unicast FDB — flood-and-learn over
+  per-copy `End.DT2M` replication; bounded BUM counters prove split horizon.
+- `cradle_evpn_srv6_zebra_multi` — the whole stack, BGP-driven, 3 PEs:
+  iBGP EVPN full mesh over an IS-IS SRv6 hub; Type-3s become cradle-managed
+  replication slots, learned MACs become Type-2s/DT2U entries; fully
+  dynamic (no static ARP/FDB/slots anywhere).
 
 Mandatory teardown on each.
 
@@ -185,16 +195,23 @@ Mandatory teardown on each.
    (BUM/unknown-unicast falls through to the TC flood). Static
    `repl_slots` config; `cradle_evpn_srv6_multi` BDD (3 PEs, hub underlay,
    no unicast FDB — every pair reaches via flood-and-learn, and bounded
-   BUM counters prove the horizon holds). **Not yet:** the zebra tee
-   programming slots from Type-3 routes (slot pool + veth lifecycle in
-   cradle, `AddReplSlot` gRPC) — the tee still uses the single-remote
-   sentinel.
+   BUM counters prove the horizon holds).
+6. **Slice 6 — the Type-3 → slot tee** *(done)*. The zebra tee programs
+   replication slots instead of the single-remote sentinel: each received
+   IMET with a DT2M SID sends `Message::CradleReplAdd { vni, sid }` →
+   `FibHandle::cradle_repl_add` → `AddReplSlot` (withdraw mirrors with
+   `DelReplSlot`). cradle owns the whole slot lifecycle: it creates the
+   `crs<N>a`/`crs<N>b` veth pair itself, joins the A end to the BD's flood
+   list (`l2_member_add`, dynamic append/compact), attaches the XDP stage
+   to the B end, and keys `REPL_SID` by both ends; idempotent per
+   `(bd, sid)`. The all-ones sentinel remains for static 2-PE configs
+   only. `cradle_evpn_srv6_zebra_multi` BDD: 3 PEs, iBGP EVPN full mesh
+   over an IS-IS SRv6 hub, fully dynamic — Type-3s become slots, learned
+   MACs become Type-2s, every CE pair reaches every other.
 
 ## Out of scope (still design)
 
-The Type-3 → replication-slot tee for multi-PE (slot pool management, veth
-lifecycle, an `AddReplSlot` RPC — today the tee programs the single-remote
-sentinel and multi-PE slots are static config), FDB aging (both in the
+FDB aging (both in the
 datapath and as `WatchFdb` age events → Type-2 withdraws), MAC mobility
 (the learn channel reports learns; a move needs a sequence-number bump),
 symmetric IRB (L3 gateway on the SRv6 L2 domain), 802.1Q-tagged bridge

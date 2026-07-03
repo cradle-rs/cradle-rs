@@ -108,6 +108,52 @@ pub fn add_local_route_v4(vip: Ipv4Addr) -> Result<()> {
     Ok(())
 }
 
+/// Create an up'd veth pair (EVPN BUM replication slots). Idempotent-ish:
+/// an existing pair of the same name is reused (creation error tolerated if
+/// both links already exist). Needs CAP_NET_ADMIN, which cradle holds.
+pub fn add_veth_pair(a: &str, b: &str) -> Result<()> {
+    let out = Command::new("ip")
+        .args(["link", "add", a, "type", "veth", "peer", "name", b])
+        .output()
+        .with_context(|| format!("running `ip link add {a} type veth peer name {b}`"))?;
+    if !out.status.success() {
+        // Tolerate an already-existing pair (re-add after restart).
+        let err = String::from_utf8_lossy(&out.stderr);
+        if !err.contains("File exists") {
+            anyhow::bail!("`ip link add {a} type veth peer name {b}` failed: {}", err.trim());
+        }
+    }
+    for name in [a, b] {
+        let out = Command::new("ip")
+            .args(["link", "set", name, "up"])
+            .output()
+            .with_context(|| format!("running `ip link set {name} up`"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "`ip link set {name} up` failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    info!("created replication veth pair {a}/{b}");
+    Ok(())
+}
+
+/// Delete one end of a veth pair (removing the whole pair).
+pub fn del_link(name: &str) -> Result<()> {
+    let out = Command::new("ip")
+        .args(["link", "del", name])
+        .output()
+        .with_context(|| format!("running `ip link del {name}`"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip link del {name}` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Mask an IPv6 address to its `prefix_len`-bit network address.
 fn mask_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
     let bits = u128::from(addr);

@@ -82,6 +82,12 @@ pub struct Control {
     attached: Arc<Mutex<HashSet<u32>>>,
     /// L7 path-routing table, shared with the transparent proxy task.
     routes: Arc<Mutex<crate::l7::RouteTable>>,
+    /// Dynamic BUM replication slots (EVPN Type-3 tee): `(bd, remote DT2M
+    /// SID)` → the slot's veth (A-end name, A ifindex, B ifindex). cradle
+    /// creates/destroys the pair itself.
+    repl_slots: Arc<Mutex<std::collections::HashMap<(u16, Ipv6Addr), (String, u32, u32)>>>,
+    /// Monotonic name counter for slot veth pairs (`crs<N>a`/`crs<N>b`).
+    repl_next: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Control {
@@ -91,6 +97,8 @@ impl Control {
             dp: Arc::new(Mutex::new(dp)),
             attached: Arc::new(Mutex::new(HashSet::new())),
             routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
+            repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -242,6 +250,56 @@ impl Control {
             .lock()
             .await
             .repl_slot_add(flood, encap, remote_sid)?;
+        Ok(())
+    }
+
+    /// Create a BUM replication slot for `(bd, remote_sid)` with cradle-owned
+    /// plumbing (the EVPN Type-3 tee): a fresh veth pair `crs<N>a`/`crs<N>b`,
+    /// the A end joined to `bd`'s flood list, the B end XDP-attached, and
+    /// `REPL_SID` keyed by both ends. Idempotent per `(bd, remote_sid)`.
+    pub async fn add_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
+        let mut slots = self.repl_slots.lock().await;
+        if slots.contains_key(&(bd, remote_sid)) {
+            return Ok(());
+        }
+        let n = self
+            .repl_next
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let a = format!("crs{n}a");
+        let b = format!("crs{n}b");
+        crate::kernel::add_veth_pair(&a, &b)?;
+        let a_idx = util::ifindex_of(&a)?;
+        let b_idx = util::ifindex_of(&b)?;
+        // The B end runs the per-copy encap in the XDP stage.
+        self.attach(&b, b_idx, true).await?;
+        {
+            let mut dp = self.dp.lock().await;
+            dp.repl_slot_add(a_idx, b_idx, remote_sid)?;
+            dp.l2_member_add(bd, a_idx)?;
+        }
+        info!("repl slot {a}/{b}: bd {bd} -> {remote_sid}");
+        slots.insert((bd, remote_sid), (a, a_idx, b_idx));
+        Ok(())
+    }
+
+    /// Tear down a `(bd, remote_sid)` replication slot: flood membership,
+    /// SID bindings, and the veth pair. No-op if absent.
+    pub async fn del_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
+        let Some((a, a_idx, b_idx)) = self.repl_slots.lock().await.remove(&(bd, remote_sid))
+        else {
+            return Ok(());
+        };
+        {
+            let mut dp = self.dp.lock().await;
+            dp.l2_member_remove(bd, a_idx)?;
+            let _ = dp.repl_sid_del(a_idx);
+            let _ = dp.repl_sid_del(b_idx);
+        }
+        // Deleting one end removes the pair; forget the attach so a reused
+        // ifindex re-attaches cleanly.
+        self.attached.lock().await.remove(&b_idx);
+        crate::kernel::del_link(&a)?;
+        info!("repl slot {a} removed: bd {bd} -> {remote_sid}");
         Ok(())
     }
 
@@ -749,6 +807,32 @@ impl Cradle for GrpcService {
         let mac = util::parse_mac(&f.mac).map_err(st)?;
         self.control
             .del_fdb_remote(mac, f.bd as u16)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_repl_slot(
+        &self,
+        req: Request<pb::ReplSlot>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
+        self.control
+            .add_repl_slot_auto(r.bd as u16, sid)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_repl_slot(
+        &self,
+        req: Request<pb::ReplSlot>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
+        self.control
+            .del_repl_slot_auto(r.bd as u16, sid)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

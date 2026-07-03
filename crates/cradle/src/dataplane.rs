@@ -316,6 +316,71 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Append one member to an L2 (VLAN/bridge) domain's flood list without
+    /// rewriting it (dynamic replication-slot management). No-op if already
+    /// a member.
+    pub fn l2_member_add(&mut self, vlan: u16, ifindex: u32) -> Result<()> {
+        let count = self.l2_count.get(&vlan, 0).unwrap_or(0);
+        for slot in 0..count {
+            let member = self.l2_members.get(
+                &L2MemberKey {
+                    vlan,
+                    slot: slot as u16,
+                },
+                0,
+            );
+            if matches!(member, Ok(m) if m == ifindex) {
+                return Ok(());
+            }
+        }
+        self.l2_members.insert(
+            L2MemberKey {
+                vlan,
+                slot: count as u16,
+            },
+            ifindex,
+            0,
+        )?;
+        self.l2_count.insert(vlan, count + 1, 0)?;
+        Ok(())
+    }
+
+    /// Remove one member from an L2 domain's flood list, compacting the
+    /// dense slot array. No-op if not a member.
+    pub fn l2_member_remove(&mut self, vlan: u16, ifindex: u32) -> Result<()> {
+        let count = self.l2_count.get(&vlan, 0).unwrap_or(0);
+        let mut members: Vec<u32> = Vec::with_capacity(count as usize);
+        for slot in 0..count {
+            if let Ok(m) = self.l2_members.get(
+                &L2MemberKey {
+                    vlan,
+                    slot: slot as u16,
+                },
+                0,
+            ) {
+                members.push(m);
+            }
+        }
+        let before = members.len();
+        members.retain(|&m| m != ifindex);
+        if members.len() == before {
+            return Ok(());
+        }
+        self.l2_domain_set(vlan, &members)?;
+        // Drop the now-stale tail slot.
+        let _ = self.l2_members.remove(&L2MemberKey {
+            vlan,
+            slot: members.len() as u16,
+        });
+        Ok(())
+    }
+
+    /// Remove a replication-slot SID binding.
+    pub fn repl_sid_del(&mut self, ifindex: u32) -> Result<()> {
+        self.repl_sid.remove(&ifindex)?;
+        Ok(())
+    }
+
     /// Register a BUM replication slot (EVPN ingress replication): frames
     /// flooded to `flood_ifindex` (the slot veth's A end, a bridge-domain
     /// member) arrive on `encap_ifindex` (the B end), where the datapath
