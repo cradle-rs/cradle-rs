@@ -15,9 +15,10 @@ DFZ-shaped generator, and the `cradle_bigfib` BDD (a **1,000,000-route FIB**
 loaded, forwarded through on all three lookup paths, and withdrawn-under-load;
 measured: **1M routes in 2.0 s release / 9.5 s debug, ~490k routes/s**, via
 per-element map writes — the `BPF_MAP_UPDATE_BATCH` contingency was measured
-unnecessary at this scale). LPM remains the default mode. Remaining from
-Phase 2: the `BPF_PROG_TEST_RUN` lookup-latency harness (follow-up PR);
-Phases 3–4 below remain design. It builds on the L3 path in
+unnecessary at this scale). The `cradle fib-bench` lookup-latency harness
+completes Phase 2 — see "Measured" below (DIR-24-8 flat at ~51 ns from 1k to
+1M routes; LPM degrades to 129 ns). LPM remains the default mode. Phases
+3–4 below remain design. It builds on the L3 path in
 [`architecture.md`](architecture.md) and is a prerequisite none of the overlay
 designs ([`mpls.md`](mpls.md), [`srv6.md`](srv6.md),
 [`evpn-vxlan.md`](evpn-vxlan.md)) depend on — but the shared per-VRF FIB they
@@ -171,6 +172,44 @@ default-route change. Instead the invalid-word fallthrough checks a
 short prefixes a cheap escape hatch if an operator's table is
 pathological — but ordinary /8s (a handful exist in a DFZ) just expand:
 65,536 batched writes is milliseconds.
+
+## Measured (the `cradle fib-bench` harness)
+
+`BPF_PROG_TEST_RUN` over the full TC program (parse + port + L4-miss + FIB
+lookup + nexthop resolve; constant ~50 ns epilogue), DFZ-shaped tables,
+100k kernel iterations per probe, Linux 6.8, this development machine:
+
+| routes | LPM direct | DIR-24-8 direct | DIR-24-8 tbl8 (2 loads) | DIR-24-8 default |
+|---|---|---|---|---|
+| 1k | 94 ns | **51 ns** | 52 ns | 51 ns |
+| 100k | 116 ns | **50 ns** | 52 ns | 51 ns |
+| 1M | 129 ns | **51 ns** | 53 ns | 51 ns |
+
+The design's two claims, measured: **DIR-24-8 is flat** — table size does
+not move it (the direct/tbl8/default spread is ~2 ns, one extra cache-hot
+array load) — while **the LPM trie degrades with scale** (deeper walks,
+cache pressure), 2.5× the whole-program cost at 1M routes; netting out the
+epilogue, the lookup itself is roughly 5 ns vs 80+ ns.
+
+**Route install time** (in-process `route4_add_bulk`, per-element map
+writes; generation excluded — LPM is one trie insert per route, DIR-24-8 is
+the expansion-engine plan plus per-slot writes):
+
+| routes | LPM install | DIR-24-8 install | LPM rate | DIR-24-8 rate |
+|---|---|---|---|---|
+| 1k | 0.33 ms | 2.9 ms | 3.0M routes/s | 0.35M routes/s |
+| 100k | 41 ms | 161 ms | 2.4M routes/s | 0.62M routes/s |
+| 1M | 0.79 s | 1.27 s | 1.27M routes/s | 0.79M routes/s |
+
+DIR-24-8 pays its read-path flatness at write time — ~1.6× LPM at 1M
+(the DFZ distribution expands to ~1.5 slot writes per route plus the
+cover-probe compute) — yet still installs a full 1M-route feed in **1.3 s**
+without `BPF_MAP_UPDATE_BATCH`, comfortably inside the design target. (The
+gRPC end-to-end path measured 2.0 s for the same load in the `cradle_bigfib`
+BDD, RPC and prefix parsing included.) Harness:
+`sudo cradle fib-bench [--routes N] [--mode lpm|dir24]` — root-only,
+attach-free (test-run skbs default `ingress_ifindex 0`, satisfied by a
+`PORTS[0]` entry), not CI-gating by design.
 
 ## The userspace side: shadow trie + expansion engine
 

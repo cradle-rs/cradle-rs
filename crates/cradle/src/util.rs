@@ -1,11 +1,57 @@
-//! Small helpers: resolve interface names, parse MACs and IPv4 prefixes.
+//! Small helpers: resolve interface names, parse MACs and IPv4 prefixes,
+//! and the synthetic-DFZ route generator shared by `ctl gen-routes` and
+//! `fib-bench`.
 
 use std::{
+    collections::HashSet,
     fs,
     net::{Ipv4Addr, Ipv6Addr},
 };
 
 use anyhow::{anyhow, bail, Context as _, Result};
+
+/// Deterministic SplitMix64.
+pub fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+/// Generate `count` distinct synthetic IPv4 prefixes with a DFZ-like
+/// prefix-length distribution (deterministic per seed). Addresses are spread
+/// over 20.0.0.0–89.255.255.255 — away from the RFC1918 space the tests use
+/// and from 99.0.0.0/8 (the DEFAULT4 probe space); only lengths /16../24 are
+/// emitted (a real DFZ propagates almost nothing longer than /24).
+pub fn gen_dfz_prefixes(count: u64, seed: u64) -> Vec<(u32, u8)> {
+    // Cumulative per-mille weights, roughly the public-DFZ histogram.
+    const LENS: [(u8, u32); 9] = [
+        (24, 620),
+        (23, 740),
+        (22, 860),
+        (21, 920),
+        (20, 960),
+        (19, 985),
+        (18, 995),
+        (17, 998),
+        (16, 1000),
+    ];
+    let mut rng = seed;
+    let mut seen: HashSet<(u32, u8)> = HashSet::new();
+    let mut out = Vec::with_capacity(count as usize);
+    while (out.len() as u64) < count {
+        let r = splitmix64(&mut rng);
+        let dice = (r % 1000) as u32;
+        let len = LENS.iter().find(|&&(_, cum)| dice < cum).unwrap().0;
+        let mask = u32::MAX << (32 - len as u32);
+        let addr = (((20 + (r >> 10) % 70) as u32) << 24 | (r >> 17) as u32 & 0x00ff_ffff) & mask;
+        if seen.insert((addr, len)) {
+            out.push((addr, len));
+        }
+    }
+    out
+}
 
 /// Resolve an interface name to its kernel ifindex via sysfs.
 pub fn ifindex_of(name: &str) -> Result<u32> {
