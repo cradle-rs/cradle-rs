@@ -1,0 +1,46 @@
+# b — the SR Policy headend: receives DETOUR over iBGP SAFI 73 from
+# ctrl (the route-target matches b's BGP Identifier, making it usable
+# per RFC 9830 §4.2), selects it, and installs Binding SID fd00:b::b6
+# through the FIB tee — an End.B6.Encaps local SID whose policy segment
+# list rides as a cradle SRv6 nexthop. The static routes are the plain
+# forwarding underlay (policy egress e, ingress/return via s), teed.
+system:
+  cradle-grpc: "unix:/tmp/cradle_b6_zebra_ctl2.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: bs
+  ipv6:
+    address: 2001:db8:1::2/64
+- if-name: bc
+  ipv6:
+    address: 2001:db8:9::1/64
+- if-name: be
+  ipv6:
+    address: 2001:db8:2::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: fd00:e::/64
+        nexthop:
+        - address: 2001:db8:2::2
+      - prefix: fd00:1::/64
+        nexthop:
+        - address: 2001:db8:1::1
+      - prefix: fc00:1::/64
+        nexthop:
+        - address: 2001:db8:1::1
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    neighbor:
+    - remote-address: 2001:db8:9::2
+      remote-as: 65000
+      update-source: 2001:db8:9::1
+      enabled: true
+      afi-safi:
+      - name: sr-policy-v6
+        enabled: true

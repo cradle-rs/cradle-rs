@@ -1,0 +1,34 @@
+# ctrl — the SR Policy controller: originates DETOUR (color 100) with
+# SRv6 Binding SID fd00:b::b6 and the one-SID segment list [fd00:e::e1]
+# over iBGP SAFI 73. The route-target is b's BGP Identifier — the
+# RFC 9830 §4.2 usability condition at the headend.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::9/128
+- if-name: cb
+  ipv6:
+    address: 2001:db8:9::2/64
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.9
+    neighbor:
+    - remote-address: 2001:db8:9::1
+      remote-as: 65000
+      update-source: 2001:db8:9::2
+      enabled: true
+      afi-safi:
+      - name: sr-policy-v6
+        enabled: true
+    sr-policy:
+      policy:
+      - name: DETOUR
+        color: 100
+        endpoint: fd00:e::e1
+        binding-sid-sid: fd00:b::b6
+        route-target: 10.0.0.1
+        segment:
+        - index: 1
+          srv6-sid: fd00:e::e1

@@ -81,6 +81,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_usp",
     "srv6_usd",
     "srv6_replace",
+    "srv6_b6",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.

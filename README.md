@@ -104,7 +104,8 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | End.DT4 | ✅ | decap + per-VRF v4 lookup |
 | End.DT6 | ✅ | decap + per-VRF v6 lookup |
 | End.DT46 | ✅ | dual-family; the BGP L3VPN service SID |
-| End.B6.Insert / B6.Encaps | ⬜ | behavior code reserved in the ABI |
+| End.B6.Encaps / .Red | ✅ | Binding SID: End walk + policy push in XDP (Reduced form on the wire) |
+| End.B6.Insert | ⬜ | deprecated insert form |
 | End.BM | ⬜ | |
 | End.M (mirror) | ✅ | egress protection: repair-decap + mirror-context lookup + service decap |
 | End.Replicate | ⬜ | BUM replication uses per-remote slots instead |
@@ -138,7 +139,8 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | IS-IS SRv6 (locators, uN/uA) | ✅ | locator routes + local SIDs teed |
 | BGP L3VPN over SRv6 (VPNv4/v6) | ✅ | per-VRF End.DT46, `encapsulation srv6` |
 | BGP EVPN over SRv6 (RFC 9252) | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
-| BGP SR Policy / color steering | ⬜ | needs End.B6 |
+| BGP SR Policy Binding SID (SAFI 73) | ✅ | controller-originated candidate path → headend BSID + policy list via tee; `cradle_b6_zebra` |
+| BGP color steering to a BSID | ⬜ | steering imposes raw segment lists today |
 | TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
 | Mirror SID egress protection (End.M) | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
 | Locator flavors (PSP/USP/USD) | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |

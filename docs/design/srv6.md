@@ -313,6 +313,22 @@ Dispatch on `sid.behavior`:
   Source-side compression is not implemented: static configs express packed
   containers as IPv6 literals in `segs`. Bounds violations PASS (no ICMP).
   `stat_inc(STAT_SRV6_REPLACE)`.
+- **End.B6.Encaps** *(Binding SID, RFC 8986 §4.13)* — the SID is bound to an
+  SR Policy: run the End steps on the received SRH (hop-limit check +
+  decrement, `SL--`, inner DA from `Segment List[new SL]` — S12–S14, so the
+  steering list advances past the BSID before the detour), then push a new
+  outer IPv6 (+SRH) carrying the policy's segment list. The policy rides as
+  an ordinary `SRV6_ENCAP` entry referenced by `LocalSid.nexthop_id` — the
+  same shape the TC H.Encaps path consumes; zebra's tee synthesizes that
+  nexthop from `Sid.segs` (BGP SAFI 73's candidate-path list). The push is
+  the **Reduced** form (§4.14): the first policy SID rides only in the outer
+  DA, and a single-SID policy omits the SRH entirely — matching
+  `apply_hencap`. Grow happens in XDP (`bpf_xdp_adjust_head` negative
+  delta), then `XDP_PASS` — the TC FIB forwards by the new outer DA (S19's
+  egress FIB lookup). Deviations: the outer source is the global
+  `SRV6_ENCAP_SRC`, not a per-SID source A; SL == 0 / no-SRH arrivals PASS
+  to the stack (§4.1.1 upper-layer — the kernel silently drops them); no
+  flavors (none are registered for B6). `stat_inc(STAT_SRV6_B6)`.
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`
@@ -349,6 +365,7 @@ STAT_SRV6_END     // End / End.X transit (Phase 2)
 STAT_SRV6_DECAP   // End.DT*/DX* decapsulation (egress PE)
 STAT_SRV6_USID    // uN NEXT-C-SID container shift (Phase 4)
 STAT_SRV6_REPLACE // REPLACE-C-SID rewrite / container advance (RFC 9800 §4.2)
+STAT_SRV6_B6      // End.B6.Encaps binds (End walk + policy push, RFC 8986 §4.13)
 ```
 
 Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by
