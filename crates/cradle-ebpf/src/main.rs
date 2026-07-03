@@ -107,6 +107,14 @@ static MPLS_FIB: HashMap<u32, MplsEntry> = HashMap::with_max_entries(4096, 0);
 // --- L2 ---
 #[map]
 static FDB: HashMap<FdbKey, FdbEntry> = HashMap::with_max_entries(8192, 0);
+/// EVPN BUM ingress-replication slots: a per-remote-PE veth pair whose A end
+/// sits in the bridge domain's flood list (TC `clone_redirect` gives the
+/// per-copy fan-out) and whose B end MAC-in-SRv6 encapsulates the arriving
+/// copy toward this slot's `End.DT2M` SID. Keyed by ifindex with BOTH ends
+/// inserted — the A end so `flood()` can exclude slots on overlay-received
+/// frames (EVPN split horizon), the B end for the encap lookup in `try_xdp`.
+#[map]
+static REPL_SID: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
 #[map]
 static L2_MEMBERS: HashMap<L2MemberKey, u32> = HashMap::with_max_entries(4096, 0);
 #[map]
@@ -284,7 +292,7 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     // bridge domain: switch the inner Ethernet frame in that domain, whatever
     // the (underlay) port's own type is.
     if let Some(bd) = tc_meta_l2(ctx) {
-        return l2_switch(ctx, iif, bd, false);
+        return l2_switch(ctx, iif, bd, true);
     }
     let port: PortConfig = match PORTS.get_ptr(&iif) {
         Some(p) => unsafe { *p },
@@ -292,7 +300,7 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     };
 
     if port.flags & PORT_F_L2 != 0 {
-        l2_switch(ctx, iif, port.vlan, true)
+        l2_switch(ctx, iif, port.vlan, false)
     } else if port.flags & PORT_F_L3 != 0 {
         // L7: a TCP flow to an L7-marked VIP is steered to the user-space
         // transparent proxy via bpf_sk_assign (TC_ACT_OK = deliver locally).
@@ -311,15 +319,17 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
 
 // ============================== L2 switching ===============================
 
-/// Bridge a frame in domain `vlan`. `learn` records the source MAC against the
-/// ingress port; the `End.DT2U` decap path passes `false` (the inner frame's
-/// source is a remote MAC reachable over the overlay, not on the underlay port
-/// it arrived through — learning it there would blackhole the return path).
+/// Bridge a frame in domain `vlan`. `from_overlay` marks a frame that arrived
+/// encapsulated (the `End.DT2U`/`End.DT2M` decap path): its source MAC is a
+/// remote station reachable over the overlay, not on the underlay port it
+/// arrived through — learning it there would blackhole the return path — and
+/// flooding it back toward the overlay's replication slots would loop it
+/// (EVPN split horizon), so both are suppressed.
 #[inline(always)]
-fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, learn: bool) -> Result<i32, ()> {
+fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result<i32, ()> {
     let dst: [u8; 6] = ctx.load(ETH_DST_OFF).map_err(|_| ())?;
 
-    if learn {
+    if !from_overlay {
         let src: [u8; 6] = ctx.load(ETH_SRC_OFF).map_err(|_| ())?;
         let _ = FDB.insert(
             &FdbKey { mac: src, vlan },
@@ -333,7 +343,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, learn: bool) -> Result<i32, (
     }
 
     if dst[0] & 0x01 != 0 {
-        return Ok(flood(ctx, iif, vlan)); // broadcast / multicast
+        return Ok(flood(ctx, iif, vlan, from_overlay)); // broadcast / multicast
     }
 
     match FDB.get_ptr(&FdbKey { mac: dst, vlan }) {
@@ -342,7 +352,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, learn: bool) -> Result<i32, (
             // reaches TC (XDP not attached, or a race) flood rather than
             // redirect to the fake oif that holds the nexthop id.
             if unsafe { (*e).flags } & FDB_F_REMOTE != 0 {
-                return Ok(flood(ctx, iif, vlan));
+                return Ok(flood(ctx, iif, vlan, from_overlay));
             }
             let oif = unsafe { (*e).oif };
             if oif == iif {
@@ -352,12 +362,16 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, learn: bool) -> Result<i32, (
                 Ok(unsafe { bpf_redirect(oif, 0) } as i32)
             }
         }
-        None => Ok(flood(ctx, iif, vlan)),
+        None => Ok(flood(ctx, iif, vlan, from_overlay)),
     }
 }
 
+/// Clone the frame to every member of `vlan` except the ingress port.
+/// `local_only` additionally skips BUM replication slots (members present in
+/// `REPL_SID`) — EVPN split horizon: a frame that already crossed the overlay
+/// must never be flooded back into it.
 #[inline(always)]
-fn flood(ctx: &TcContext, iif: u32, vlan: u16) -> i32 {
+fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool) -> i32 {
     stat_inc(STAT_L2_FLOOD);
     let count = match L2_COUNT.get_ptr(&vlan) {
         Some(c) => unsafe { *c },
@@ -370,7 +384,7 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16) -> i32 {
         }
         if let Some(p) = L2_MEMBERS.get_ptr(&L2MemberKey { vlan, slot }) {
             let oif = unsafe { *p };
-            if oif != iif {
+            if oif != iif && !(local_only && REPL_SID.get_ptr(&oif).is_some()) {
                 let _ = ctx.clone_redirect(oif, 0);
             }
         }
@@ -1330,6 +1344,18 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // non-IP frames (ARP) an L2 domain carries, so the grow must run in XDP.
     // Everything else on an L2 port passes to the TC `l2_switch`.
     let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    // A BUM replication slot: the TC flood clone_redirect'ed a bare copy of
+    // a BUM frame into this veth; encapsulate it toward the slot's remote
+    // End.DT2M SID (per-copy encap — the piece clone_redirect itself can't
+    // do) and send it out the underlay via the FIB6 route to the SID.
+    if let Some(sid) = REPL_SID.get_ptr(&iif) {
+        let ent = FdbEntry {
+            oif: 0, // resolve the underlay adjacency by FIB6 lookup
+            flags: FDB_F_REMOTE,
+            remote_sid: unsafe { *sid },
+        };
+        return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
+    }
     if let Some(p) = PORTS.get_ptr(&iif) {
         if unsafe { (*p).flags } & PORT_F_L2 != 0 {
             return l2_evpn_xdp(ctx, unsafe { (*p).vlan });

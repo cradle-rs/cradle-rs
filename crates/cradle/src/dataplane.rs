@@ -58,6 +58,9 @@ pub struct Dataplane {
     /// Static overlay FDB entries (EVPN over SRv6). Local MACs are still learned
     /// in the eBPF datapath; this only programs remote (`FDB_F_REMOTE`) entries.
     fdb: HashMap<MapData, FdbKey, FdbEntry>,
+    /// BUM ingress-replication slots (EVPN over SRv6): ifindex → remote
+    /// `End.DT2M` SID, both ends of each slot's veth pair.
+    repl_sid: HashMap<MapData, u32, [u8; 16]>,
     services: HashMap<MapData, ServiceKey, ServiceInfo>,
     backends: HashMap<MapData, BackendKey, Backend>,
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
@@ -112,6 +115,9 @@ impl Dataplane {
             )?,
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
+            repl_sid: HashMap::try_from(
+                bpf.take_map("REPL_SID").context("map REPL_SID missing")?,
+            )?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
             backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
             services6: HashMap::try_from(
@@ -307,6 +313,25 @@ impl Dataplane {
     /// Remove an overlay FDB entry.
     pub fn fdb_remote_del(&mut self, mac: [u8; 6], bd: u16) -> Result<()> {
         self.fdb.remove(&FdbKey { mac, vlan: bd })?;
+        Ok(())
+    }
+
+    /// Register a BUM replication slot (EVPN ingress replication): frames
+    /// flooded to `flood_ifindex` (the slot veth's A end, a bridge-domain
+    /// member) arrive on `encap_ifindex` (the B end), where the datapath
+    /// MAC-in-SRv6 encapsulates them toward `remote_sid` (a remote PE's
+    /// `End.DT2M`). Both ends are keyed so `flood()` can exclude the slot
+    /// on overlay-received frames (split horizon).
+    pub fn repl_slot_add(
+        &mut self,
+        flood_ifindex: u32,
+        encap_ifindex: u32,
+        remote_sid: Ipv6Addr,
+    ) -> Result<()> {
+        self.repl_sid
+            .insert(flood_ifindex, remote_sid.octets(), 0)?;
+        self.repl_sid
+            .insert(encap_ifindex, remote_sid.octets(), 0)?;
         Ok(())
     }
 

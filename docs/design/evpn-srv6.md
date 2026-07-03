@@ -6,18 +6,20 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–4 implemented** for a 2-PE domain: `End.DT2U` unicast,
+Status: **Slices 1–5 implemented**: `End.DT2U` unicast,
 `End.DT2M` BUM, **the BGP EVPN control-plane tee** — zebra-rs
 (`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
 per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
 IMETs, and the `FibHandle` tee installs remote MACs, the BUM sentinel, and
 the local L2 service SIDs into cradle — and **the cradle→zebra MAC-learn
 channel** (`WatchFdb`), which streams datapath-learned CE MACs up so zebra
-originates Type-2 routes for them. **BGP EVPN over SRv6 programs the L2
-data plane end to end, fully dynamically** (the L2 analog of the L3VPN
-tee, plus the reverse channel L3 never needed). This was the last Phase-4
-SRv6 item. It builds on the SRv6 encap/decap geometry (Phases 1–4) and the
-L2 switching MVP ([l2-switching.md](l2-switching.md)); the FDB, flood, and
+originates Type-2 routes for them — and **multi-PE BUM ingress replication**
+(per-copy `End.DT2M` encap via replication-slot veth pairs in the flood
+list, with EVPN split horizon). **BGP EVPN over SRv6 programs the L2 data
+plane end to end, fully dynamically** (the L2 analog of the L3VPN tee, plus
+the reverse channel L3 never needed). This was the last Phase-4 SRv6 item.
+It builds on the SRv6 encap/decap geometry (Phases 1–4) and the L2
+switching MVP ([l2-switching.md](l2-switching.md)); the FDB, flood, and
 per-BD member maps already exist.
 
 ## Packet format
@@ -126,11 +128,8 @@ Mandatory teardown on each.
 2. **Slice 2 — `End.DT2M` BUM** *(done, 2-PE)*. BUM frames tunnel to the BD's
    `End.DT2M` SID via the all-ones-MAC FDB sentinel; egress `End.DT2M` decap
    reuses the `End.DT2U` decap (the broadcast inner floods via `l2_switch`).
-   `cradle_evpn_srv6_bum` BDD (ARP over DT2M, no static ARP). **Not yet:** the
-   per-copy encap during replication that a >2-PE domain (or multiple local
-   CEs) needs — `clone_redirect` can't encap and TC can't encap non-IP, so the
-   likely shape is an XDP flood that encaps one copy per remote SID and
-   `clone_redirect`s locals, or a recirculation.
+   `cradle_evpn_srv6_bum` BDD (ARP over DT2M, no static ARP). The 2-PE
+   single-remote form; per-copy replication is Slice 5.
 3. **Slice 3 — the BGP EVPN control-plane tee** *(done)*. zebra-rs grew
    `End.DT2U` over SRv6 (RFC 9252 §6.1/§6.2): a `router bgp afi-safi evpn
    encapsulation srv6` knob, per-VNI `End.DT2U` allocation next to the
@@ -170,11 +169,33 @@ Mandatory teardown on each.
    The `cradle_evpn_srv6_zebra` BDD runs fully dynamic: no static kernel
    FDB either — CE MACs are datapath-learned, streamed up, advertised,
    and installed back down on the remote PE.
+5. **Slice 5 — multi-PE BUM ingress replication** *(done, static config)*.
+   Per-copy encap with existing primitives: each remote PE gets a
+   **replication slot** — a veth pair whose A end joins the bridge
+   domain's flood list. The TC flood `clone_redirect`s the bare BUM frame
+   into each slot (cloning needs no resize, so non-IP frames are fine);
+   the copy arrives as *ingress* on the B end, where the XDP stage — one
+   packet in hand — MAC-in-SRv6 encapsulates it toward that slot's
+   `End.DT2M` SID (`REPL_SID[ifindex]`, FIB6 fallback for the underlay
+   adjacency) and redirects it out. Local flood happens in the same loop.
+   **Split horizon**: overlay-received frames (`from_overlay`, the decap
+   path) flood local-only — `flood()` skips members present in `REPL_SID`
+   — so BUM never re-enters the overlay. A multi-PE BD simply programs
+   slots instead of the all-ones sentinel; `l2_evpn_xdp` needed no change
+   (BUM/unknown-unicast falls through to the TC flood). Static
+   `repl_slots` config; `cradle_evpn_srv6_multi` BDD (3 PEs, hub underlay,
+   no unicast FDB — every pair reaches via flood-and-learn, and bounded
+   BUM counters prove the horizon holds). **Not yet:** the zebra tee
+   programming slots from Type-3 routes (slot pool + veth lifecycle in
+   cradle, `AddReplSlot` gRPC) — the tee still uses the single-remote
+   sentinel.
 
 ## Out of scope (still design)
 
-Multi-PE / multi-local-CE ingress replication (per-copy encap), FDB aging
-(both in the datapath and as `WatchFdb` age events → Type-2 withdraws),
-MAC mobility (the learn channel reports learns; a move needs a sequence-
-number bump), symmetric IRB (L3 gateway on the SRv6 L2 domain),
-802.1Q-tagged bridge domains, and `End.M` egress-protection.
+The Type-3 → replication-slot tee for multi-PE (slot pool management, veth
+lifecycle, an `AddReplSlot` RPC — today the tee programs the single-remote
+sentinel and multi-PE slots are static config), FDB aging (both in the
+datapath and as `WatchFdb` age events → Type-2 withdraws), MAC mobility
+(the learn channel reports learns; a move needs a sequence-number bump),
+symmetric IRB (L3 gateway on the SRv6 L2 domain), 802.1Q-tagged bridge
+domains, and `End.M` egress-protection.
