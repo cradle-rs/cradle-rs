@@ -20,8 +20,9 @@ use aya::{
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid,
-    MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo,
-    ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
+    MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
+    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
+    DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
     FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
     STAT_FDB_AGED, STAT_MAX,
 };
@@ -64,6 +65,9 @@ pub struct Dataplane {
     /// BUM ingress-replication slots (EVPN over SRv6): ifindex → remote
     /// `End.DT2M` SID, both ends of each slot's veth pair.
     repl_sid: HashMap<MapData, u32, [u8; 16]>,
+    /// Egress-protection mirror contexts (`End.M`): protected SID space →
+    /// local DT-style reproduction.
+    mirror: LpmTrie<MapData, MirrorKey, MirrorEntry>,
     services: HashMap<MapData, ServiceKey, ServiceInfo>,
     backends: HashMap<MapData, BackendKey, Backend>,
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
@@ -122,6 +126,7 @@ impl Dataplane {
             )?,
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
+            mirror: LpmTrie::try_from(bpf.take_map("MIRROR").context("map MIRROR missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
             backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
             services6: HashMap::try_from(
@@ -386,6 +391,49 @@ impl Dataplane {
             vlan,
             slot: members.len() as u16,
         });
+        Ok(())
+    }
+
+    /// Install an egress-protection mirror route: End.M-exposed traffic to
+    /// `prefix` (the protected egress's SID space, context `ctx`) is served
+    /// with `behavior` (`SRV6_BH_END_DT*`) into local table `vrf_id`.
+    pub fn mirror_route_add(
+        &mut self,
+        ctx: u32,
+        prefix: Ipv6Addr,
+        prefix_len: u8,
+        behavior: u8,
+        vrf_id: u32,
+    ) -> Result<()> {
+        let key = Key::new(
+            32 + prefix_len as u32,
+            MirrorKey {
+                ctx,
+                addr: prefix.octets(),
+            },
+        );
+        self.mirror.insert(
+            &key,
+            MirrorEntry {
+                behavior,
+                _pad: [0; 3],
+                vrf_id,
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Remove a mirror route.
+    pub fn mirror_route_del(&mut self, ctx: u32, prefix: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        let key = Key::new(
+            32 + prefix_len as u32,
+            MirrorKey {
+                ctx,
+                addr: prefix.octets(),
+            },
+        );
+        self.mirror.remove(&key)?;
         Ok(())
     }
 

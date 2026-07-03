@@ -39,13 +39,15 @@ use cradle_common::{
     ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE,
     FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
     MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2M,
+    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_M,
+    SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
-    STAT_SRV6_END, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
+    STAT_SRV6_L2_ENCAP,
     STAT_SRV6_USID, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
@@ -120,6 +122,12 @@ static FDB: HashMap<FdbKey, FdbEntry> = HashMap::with_max_entries(8192, 0);
 /// frames (EVPN split horizon), the B end for the encap lookup in `try_xdp`.
 #[map]
 static REPL_SID: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
+/// Egress-protection mirror contexts (`End.M`): the protected egress PE's
+/// SID space, scoped by context id — how the protector reproduces the
+/// failed PE's decap behavior. Keyed like `FIB6_VRF` (`prefix_len =
+/// 32 + route_len`).
+#[map]
+static MIRROR: LpmTrie<MirrorKey, MirrorEntry> = LpmTrie::with_max_entries(1024, 0);
 #[map]
 static L2_MEMBERS: HashMap<L2MemberKey, u32> = HashMap::with_max_entries(4096, 0);
 #[map]
@@ -1253,8 +1261,10 @@ const SRH_SEGLIST_OFF: usize = SRH_OFF + 8; // first segment entry
 /// L2 header.
 #[inline(always)]
 fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -> Result<i32, ()> {
-    let enc: Srv6Encap = match SRV6_ENCAP.get_ptr(&nh_id) {
-        Some(e) => unsafe { *e },
+    // Read through the map pointer — a stack copy is ~104 bytes and two
+    // encap layers would blow the 512-byte stack.
+    let enc: &Srv6Encap = match SRV6_ENCAP.get_ptr(&nh_id) {
+        Some(e) => unsafe { &*e },
         None => return Ok(TC_ACT_PIPE as i32),
     };
     let n = enc.num_segs as usize;
@@ -1267,11 +1277,68 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
         if inner_ethertype != ETH_P_IPV6 {
             return Ok(TC_ACT_PIPE as i32);
         }
-        return srv6_insert(ctx, &enc, nh);
+        return srv6_insert(ctx, enc, nh);
     }
+    if apply_hencap(ctx, enc, inner_ethertype)?.is_some() {
+        return Ok(TC_ACT_PIPE as i32);
+    }
+    stat_inc(STAT_SRV6_ENCAP);
+
+    // Kernel-parity post-encap lookup (`seg6_lookup_nexthop`): when the new
+    // outer DA itself resolves to an H.Encaps route — the egress-protection
+    // retained repair steering a dead egress's locator to the protector's
+    // Mirror SID (End.M) — stack the second layer and leave via that route's
+    // own nexthop. A plain (or absent) resolution keeps the member's own
+    // (gw, oif), so ordinary single-layer encaps are untouched.
+    if let Some(fib) = fib6_lookup(0, enc.segs[0]) {
+        if fib.flags & (FIB_F_LOCAL | FIB_F_BLACKHOLE | FIB_F_ECMP) == 0 {
+            if let Some((nh2_id, nh2)) = resolve_nh(fib.nexthop_id) {
+                if nh2.flags & NH_F_SRV6 != 0 {
+                    if let Some(e2) = SRV6_ENCAP.get_ptr(&nh2_id) {
+                        let enc2: &Srv6Encap = unsafe { &*e2 };
+                        let n2 = enc2.num_segs as usize;
+                        if enc2.mode != SRV6_ENCAP_MODE_INSERT
+                            && n2 >= 1
+                            && n2 <= MAX_SEGS
+                            && apply_hencap(ctx, enc2, ETH_P_IPV6)?.is_none()
+                        {
+                            stat_inc(STAT_SRV6_ENCAP);
+                            return l2_xmit(ctx, &nh2, ETH_P_IPV6);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    l2_xmit(ctx, nh, ETH_P_IPV6)
+}
+
+/// Write one H.Encaps layer: grow room at the MAC boundary and store the
+/// outer IPv6 header (DA = `segs[0]`) plus, for multi-SID lists, the SRH
+/// carrying `segs[1..]` reversed. Returns `Ok(Some(action))` when the caller
+/// should bail with that TC action (unresolvable encap source), `Ok(None)`
+/// once the layer is written. Factored out of `srv6_encap` so the
+/// egress-protection path can stack a second layer.
+#[inline(always)]
+fn apply_hencap(
+    ctx: &TcContext,
+    enc: &Srv6Encap,
+    inner_ethertype: u16,
+) -> Result<Option<i32>, ()> {
+    let n = enc.num_segs as usize;
+    if n == 0 || n > MAX_SEGS {
+        return Ok(Some(TC_ACT_PIPE as i32));
+    }
+    // Post-guard optimization barrier: without it LLVM knows `n <= MAX_SEGS`
+    // (from the branch above) and rotates the segment loop into a pointer
+    // induction bounded only by an `n`-derived counter — whose range the
+    // verifier loses across the spill/reload, rejecting the map-value walk.
+    // An opaque `n` forces the loop's constant `MAX_SEGS` latch to survive,
+    // which is exactly the bound the verifier needs. Runtime value unchanged.
+    let n = core::hint::black_box(n);
     let src: [u8; 16] = match SRV6_ENCAP_SRC.get(0) {
         Some(s) => *s,
-        None => return Ok(TC_ACT_PIPE as i32),
+        None => return Ok(Some(TC_ACT_PIPE as i32)),
     };
     let inner_proto: u8 = if inner_ethertype == ETH_P_IPV6 {
         IPPROTO_IPV6
@@ -1312,18 +1379,20 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
         ctx.store(SRH_OFF + 4, &(n as u8 - 2), 0).map_err(|_| ())?; // last_entry
         ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
         ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
-                                                           // Reversed list, omitting segs[0]: segment_list[i] = segs[n-1-i].
-        for i in 0..MAX_SEGS {
-            if i >= n - 1 {
+        // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
+        // Indexed by the loop counter on the stack side (bounded by the
+        // constant range, kept alive by the volatile `n` above); the
+        // reversal rides in the skb offset, which the store helper
+        // validates at runtime.
+        for j in 1..MAX_SEGS {
+            if j >= n {
                 break;
             }
-            ctx.store(SRH_SEGLIST_OFF + 16 * i, &enc.segs[n - 1 - i], 0)
+            ctx.store(SRH_SEGLIST_OFF + 16 * (n - 1 - j), &enc.segs[j], 0)
                 .map_err(|_| ())?;
         }
     }
-
-    stat_inc(STAT_SRV6_ENCAP);
-    l2_xmit(ctx, nh, ETH_P_IPV6)
+    Ok(None)
 }
 
 /// SRv6 H.Insert (TI-LFA repair): insert an SRH into the *existing* IPv6
@@ -1335,7 +1404,9 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
 /// IPv6 base header. Decrements the hop limit (this is a forward).
 #[inline(always)]
 fn srv6_insert(ctx: &TcContext, enc: &Srv6Encap, nh: &NextHop) -> Result<i32, ()> {
-    let n = enc.num_segs as usize;
+    // Barrier for the same reason as in `apply_hencap`: keep the segment
+    // loop's constant latch alive for the verifier.
+    let n = core::hint::black_box(enc.num_segs as usize);
     let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
     if hop <= 1 {
         return Ok(TC_ACT_PIPE as i32);
@@ -1364,12 +1435,15 @@ fn srv6_insert(ctx: &TcContext, enc: &Srv6Encap, nh: &NextHop) -> Result<i32, ()
     ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
     // segment_list[0] = the original destination (final); repair segments
     // reversed above it so segment_list[n] = segs[0] = the active segment.
+    // Indexed forward on the map side (the loop constant bounds the map-value
+    // pointer for the verifier); the reversal rides in the skb offset, which
+    // the store helper validates at runtime.
     ctx.store(SRH_SEGLIST_OFF, &orig_da, 0).map_err(|_| ())?;
-    for i in 0..MAX_SEGS {
-        if i >= n {
+    for j in 0..MAX_SEGS {
+        if j >= n {
             break;
         }
-        ctx.store(SRH_SEGLIST_OFF + 16 * (i + 1), &enc.segs[n - 1 - i], 0)
+        ctx.store(SRH_SEGLIST_OFF + 16 * (n - j), &enc.segs[j], 0)
             .map_err(|_| ())?;
     }
     ctx.store(IP6_DST_OFF, &enc.segs[0], 0).map_err(|_| ())?;
@@ -1726,6 +1800,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         // The inner frame's dst MAC (unicast vs broadcast) makes l2_switch
         // forward or flood it.
         SRV6_BH_END_DT2U | SRV6_BH_END_DT2M => return srv6_dt2u(ctx, &sid),
+        SRV6_BH_END_M => return srv6_endm(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
         _ => return Ok(xdp_action::XDP_PASS), // B6 — later phases
     }
@@ -1831,6 +1906,87 @@ fn srv6_forward_adjacency(ctx: &XdpContext, nexthop_id: u32) -> Result<u32, ()> 
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
+/// SRv6 `End.M` — the egress-protection mirror (draft-ietf-rtgwg-srv6-
+/// egress-protection). The PLR repaired traffic that was headed to a FAILED
+/// egress PE by H.Encaps'ing it toward this SID; the exposed packet is the
+/// original service packet, still addressed to the dead PE's service SID.
+/// Reproduce that PE's behavior locally: strip the repair encap, look the
+/// exposed destination up in the mirror context (`sid.vrf_id`), and on a
+/// DT-style hit run the service decap into the local VRF — two decaps in
+/// one pass.
+#[inline(always)]
+fn srv6_endm(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    // Strip #1: the repair encap — outer IPv6 plus an exhausted SRH if the
+    // PLR's encap carried one. The exposed packet must be IPv6 (the failed
+    // PE's service-SID-addressed packet).
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    let (exposed_proto, strip) = if outer_nh == IPPROTO_ROUTING {
+        let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN)? };
+        let ext_len = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN + 1)? };
+        let sl = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN + 3)? };
+        if sl != 0 || ext_len > 12 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        (srh_nh, IP6_HDR_LEN + 8 * (ext_len as usize + 1))
+    } else {
+        (outer_nh, IP6_HDR_LEN)
+    };
+    if exposed_proto != IPPROTO_IPV6 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // The exposed packet's destination = the protected PE's service SID.
+    let exposed_da = unsafe { *xdp_ptr::<[u8; 16]>(ctx, strip + IP6_DST_OFF)? };
+    let ment: MirrorEntry = match MIRROR.get(&Key::new(
+        160,
+        MirrorKey {
+            ctx: sid.vrf_id,
+            addr: exposed_da,
+        },
+    )) {
+        Some(m) => *m,
+        None => return Ok(xdp_action::XDP_PASS), // not a mirrored SID
+    };
+    decap_head(ctx, strip, ETH_P_IPV6)?;
+    // Strip #2: the service encap itself (the dead PE's End.DT* semantics).
+    let nh2 = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    let (inner_proto, strip2) = if nh2 == IPPROTO_ROUTING {
+        let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN)? };
+        let ext_len = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN + 1)? };
+        let sl = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN + 3)? };
+        if sl != 0 || ext_len > 12 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        (srh_nh, IP6_HDR_LEN + 8 * (ext_len as usize + 1))
+    } else {
+        (nh2, IP6_HDR_LEN)
+    };
+    let inner_et = match (inner_proto, ment.behavior) {
+        (IPPROTO_IPIP, SRV6_BH_END_DT4) | (IPPROTO_IPIP, SRV6_BH_END_DT46) => ETH_P_IP,
+        (IPPROTO_IPV6, SRV6_BH_END_DT6) | (IPPROTO_IPV6, SRV6_BH_END_DT46) => ETH_P_IPV6,
+        _ => {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+    };
+    decap_head(ctx, strip2, inner_et)?;
+    stat_inc(STAT_SRV6_ENDM);
+    if ment.vrf_id != 0 {
+        if unsafe {
+            bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32))
+        } != 0
+        {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        let meta = xdp_meta_ptr(ctx)?;
+        unsafe {
+            (*meta).magic = XDP_META_MAGIC;
+            (*meta).vrf_id = ment.vrf_id;
+        }
+    }
+    Ok(xdp_action::XDP_PASS)
 }
 
 /// Shift the uSID (NEXT-C-SID) container in the IPv6 DA left by one micro-SID:

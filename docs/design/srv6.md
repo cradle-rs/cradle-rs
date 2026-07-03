@@ -181,7 +181,8 @@ pub const SRV6_BH_END_DT46: u8 = 4; // decap, dual-family VRF lookup (BGP L3VPN)
 pub const SRV6_BH_END_B6:   u8 = 5; // binding SID: encap onto a stored SID list
 pub const SRV6_BH_UN:       u8 = 6; // uSID (NEXT-C-SID) flavor of End
 pub const SRV6_BH_UA:       u8 = 7; // uSID flavor of End.X
-// End.M (egress-protection mirror) reuses the End.DT6 action.
+pub const SRV6_BH_END_M:    u8 = 11; // egress-protection mirror: repair decap
+                                     // + mirror-context lookup + service decap
 ```
 
 ```rust
@@ -525,4 +526,17 @@ Each scenario ends with the mandatory `Scenario: Teardown topology`.
    shift exposing the node's own uA-LIB). `cradle_tilfa_srv6` proves the
    IGP-packed carrier end to end (`backup-as-primary` pins traffic onto the
    repair deterministically); `cradle_nh_backup` proves the link-down
-   switchover. **Still design:** the `End.M` egress-protection mirror.
+   switchover. **End.M egress protection** is done end
+   to end: `SRV6_BH_END_M` (11) runs the double decap in XDP — strip the
+   repair encap, look the exposed destination (the dead PE's service SID) up
+   in the `MIRROR` LPM trie (keyed by mirror-context id + prefix, fed by the
+   `AddMirrorRoute`/`DelMirrorRoute` tee from zebra's
+   `route_mirror_context_install`), then run the End.DT* service decap into
+   the local VRF. On the PLR side `srv6_encap` re-looks the freshly-imposed
+   outer DA up in the main FIB (the kernel's `seg6_lookup_nexthop`
+   recursion): when the answer is itself an H.Encaps route — the Mirror SID
+   retention static holding a dead egress's locator — the second layer
+   stacks and the packet leaves via that route's nexthop. `cradle_endm`
+   proves the whole arc (BGP VPNv6 + `pic-retention` + IS-IS Mirror SID
+   node-protection retention; kill the egress node, ping survives via the
+   protector's End.M).

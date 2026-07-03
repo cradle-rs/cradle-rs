@@ -1,0 +1,95 @@
+# pe1 — ingress PE / PLR for Mirror SID egress NODE protection of a BGP
+# L3VPN-over-SRv6 service, teeing into cradle. Crib of the zebra-rs
+# `mirror_sid_node_vpn` pe1: IS-IS L2 SRv6 (LOC1), iBGP VPNv6 to pea and
+# peb, `pic-retention` on the pea session, fast hellos toward the stub
+# egress pea. When pea's node dies, the retained locator route (a seg6
+# H.Encaps toward peb's Mirror SID) resolves the stale VPN route, and
+# cradle's post-encap FIB re-lookup stacks the second layer in eBPF.
+system:
+  cradle-grpc: "unix:/tmp/cradle_endm_ctl1.sock"
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1-pea
+  ipv6:
+    address: 2001:db8:0:13::1/64
+- if-name: pe1-peb
+  ipv6:
+    address: 2001:db8:0:14::1/64
+- if-name: ce1
+  vrf: vrf-cust
+  ipv6:
+    address: 2001:db8:c1::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: pe1-pea
+      network-type: point-to-point
+      metric: 1
+      hello:
+        interval: 1
+        multiplier: 3
+      ipv6:
+        enable: true
+    - if-name: pe1-peb
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    neighbor:
+    - remote-address: 2001:db8::3
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      pic-retention: {}
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    - remote-address: 2001:db8::4
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:1
+      encapsulation: srv6
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:c1::/64

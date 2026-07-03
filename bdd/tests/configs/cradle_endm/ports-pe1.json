@@ -1,0 +1,7 @@
+{
+  "ports": [
+    { "name": "pe1-pea", "l3": true },
+    { "name": "pe1-peb", "l3": true },
+    { "name": "ce1", "l3": true, "vrf": 1 }
+  ]
+}
