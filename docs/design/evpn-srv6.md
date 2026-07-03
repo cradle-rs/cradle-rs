@@ -6,7 +6,7 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–6 implemented**: `End.DT2U` unicast,
+Status: **Slices 1–7 implemented**: `End.DT2U` unicast,
 `End.DT2M` BUM, **the BGP EVPN control-plane tee** — zebra-rs
 (`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
 per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
@@ -18,7 +18,10 @@ originates Type-2 routes for them — **multi-PE BUM ingress replication**
 list, with EVPN split horizon) — and **the Type-3 → slot tee**: every
 received IMET becomes a cradle-managed replication slot (`AddReplSlot`;
 cradle creates the veth pair, flood membership, and XDP attach itself), so
-any number of PEs works BGP-driven. **BGP EVPN over SRv6 programs the L2 data
+any number of PEs works BGP-driven — plus **FDB aging**: idle local MACs
+expire (`FdbEntry.last_seen` + a user-space sweep, `fdb_age_secs`, default
+300) and their Type-2s are withdrawn via `WatchFdb` age events.
+**BGP EVPN over SRv6 programs the L2 data
 plane end to end, fully dynamically** (the L2 analog of the L3VPN tee, plus
 the reverse channel L3 never needed). This was the last Phase-4 SRv6 item.
 It builds on the SRv6 encap/decap geometry (Phases 1–4) and the L2
@@ -208,11 +211,22 @@ Mandatory teardown on each.
    only. `cradle_evpn_srv6_zebra_multi` BDD: 3 PEs, iBGP EVPN full mesh
    over an IS-IS SRv6 hub, fully dynamic — Type-3s become slots, learned
    MACs become Type-2s, every CE pair reaches every other.
+7. **Slice 7 — FDB aging** *(done)*. `FdbEntry.last_seen` (`bpf_ktime`,
+   refreshed by every learn — both the TC and XDP learn sites insert per
+   frame, so the refresh is free); a user-space sweep expires local
+   entries idle past `fdb_age_secs` (default 300, 0 = off) and bumps
+   `fdb_aged`. `WatchFdb` gained an `event` field: subscribers diff both
+   directions, so a disappeared entry emits `aged` — zebra re-emits it as
+   an `FdbDel`, withdrawing the Type-2 (`evpn_withdraw_macip`), and the
+   remote PE's overlay entry is removed by the existing `MacDel` tee.
+   Fresh traffic re-learns and the L2VPN reconverges by itself.
+   `cradle_evpn_srv6_age` BDD (5s age, IPv6-quieted CE links: learn →
+   idle → `fdb_aged` on both PEs → re-ping reconverges).
 
 ## Out of scope (still design)
 
-FDB aging (both in the
-datapath and as `WatchFdb` age events → Type-2 withdraws), MAC mobility
-(the learn channel reports learns; a move needs a sequence-number bump),
-symmetric IRB (L3 gateway on the SRv6 L2 domain), 802.1Q-tagged bridge
-domains, and `End.M` egress-protection.
+Refinements to aging (per-BD age knobs, event-driven expiry instead of the
+1s scan), MAC mobility (the learn channel reports learns; a move needs a
+sequence-number bump per RFC 7432 §7.7), symmetric IRB (L3 gateway on the
+SRv6 L2 domain), 802.1Q-tagged bridge domains, and `End.M`
+egress-protection.

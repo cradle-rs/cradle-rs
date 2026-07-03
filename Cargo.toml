@@ -41,7 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-nix = { version = "0.27", features = ["net"] }
+nix = { version = "0.27", features = ["net", "time"] }
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"

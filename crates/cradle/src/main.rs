@@ -211,6 +211,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // configured; best-effort if the transparent bind is unavailable).
     control.start_l7_proxy().await;
 
+    // Expire idle locally-learned MACs (default 300s; `fdb_age_secs: 0`
+    // disables). WatchFdb subscribers see the removals as age events.
+    control.start_fdb_aging(cfg.as_ref().map(|c| c.fdb_age_secs).unwrap_or(300));
+
     match args.grpc {
         Some(s) => control.serve(GrpcEndpoint::parse(&s)?).await?, // runs until Ctrl-C
         None => {
