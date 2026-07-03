@@ -1,0 +1,11 @@
+{
+  "ports": [
+    { "name": "ts", "l3": true },
+    { "name": "tr", "l3": true, "vrf": 1 },
+    { "name": "td", "l3": true, "vrf": 1 }
+  ],
+  "neighbors": [
+    { "oif": "td", "ip": "fc00:2::1", "mac": "02:00:00:00:c2:01" },
+    { "oif": "tr", "ip": "2001:db8:3::1", "mac": "02:00:00:00:0a:02" }
+  ]
+}

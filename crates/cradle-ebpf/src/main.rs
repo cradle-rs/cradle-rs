@@ -41,16 +41,16 @@ use cradle_common::{
     MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
     MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
+    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
     STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_B6, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID,
-    STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
+    STAT_SRV6_B6, STAT_SRV6_ENDT, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
+    STAT_SRV6_USID, STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -79,6 +79,14 @@ static SRV6_LOCALSID: LpmTrie<[u8; 16], LocalSid> = LpmTrie::with_max_entries(40
 static SRV6_ENCAP: HashMap<u32, Srv6Encap> = HashMap::with_max_entries(4096, 0);
 #[map]
 static SRV6_ENCAP_SRC: Array<[u8; 16]> = Array::with_max_entries(1, 0);
+/// Per-instance random cookie folded into the XDP→TC metadata magic. skb
+/// metadata SURVIVES a veth hop into the neighbour's TC stage (and is not
+/// even visible to its XDP program on the veth rx path), so a constant
+/// magic would let one node's End.T/DT table id steer the NEXT node's
+/// lookup. Each cradle instance seeds its own cookie at startup; inherited
+/// metadata from any other instance fails the check and is ignored.
+#[map]
+static META_COOKIE: Array<u32> = Array::with_max_entries(1, 0);
 
 // --- L3 DIR-24-8 v4 engine (large-fib.md). Declared at 1 entry; the loader
 // upsizes them (TBL24 → 2^24, TBL8 → groups*256) only in dir24 mode, so
@@ -208,6 +216,14 @@ fn ingress_ifindex(ctx: &TcContext) -> u32 {
 }
 
 /// Bump a per-CPU datapath counter (best-effort; never affects forwarding).
+#[inline(always)]
+fn meta_cookie() -> u32 {
+    match META_COOKIE.get(0) {
+        Some(c) => *c,
+        None => 0,
+    }
+}
+
 #[inline(always)]
 fn stat_inc(idx: u32) {
     if let Some(c) = STATS.get_ptr_mut(idx) {
@@ -782,7 +798,7 @@ fn tc_meta_vrf(ctx: &TcContext) -> u32 {
     }
     let m = meta as *const CradleXdpMeta;
     unsafe {
-        if (*m).magic != XDP_META_MAGIC {
+        if (*m).magic != XDP_META_MAGIC ^ meta_cookie() {
             return 0;
         }
         (*m).vrf_id
@@ -802,7 +818,7 @@ fn tc_meta_l2(ctx: &TcContext) -> Option<u16> {
     }
     let m = meta as *const CradleXdpMeta;
     unsafe {
-        if (*m).magic != XDP_META_MAGIC_L2 {
+        if (*m).magic != XDP_META_MAGIC_L2 ^ meta_cookie() {
             return None;
         }
         Some((*m).vrf_id as u16)
@@ -1774,7 +1790,7 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
         }
         let meta = xdp_meta_ptr(ctx)?;
         unsafe {
-            (*meta).magic = XDP_META_MAGIC;
+            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
             (*meta).vrf_id = vrf_id;
         }
     }
@@ -1796,7 +1812,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     match sid.behavior {
         // uA is classic End.X at /128 (adjacency, SRH walk); uALib is the
         // compressed carrier form (shift + adjacency).
-        SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_UA => return srv6_end(ctx, &sid),
+        SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_UA | SRV6_BH_END_T => return srv6_end(ctx, &sid),
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
         SRV6_BH_END_REP | SRV6_BH_END_X_REP => return srv6_replace(ctx, &sid),
@@ -1847,7 +1863,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         }
         let meta = xdp_meta_ptr(ctx)?;
         unsafe {
-            (*meta).magic = XDP_META_MAGIC;
+            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
             (*meta).vrf_id = sid.vrf_id;
         }
     }
@@ -1887,6 +1903,7 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
             };
             decap_head(ctx, IP6_HDR_LEN, inner_et)?;
             stat_inc(STAT_SRV6_USD);
+            return endt_meta(ctx, sid);
         }
         return Ok(xdp_action::XDP_PASS);
     }
@@ -1910,7 +1927,7 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
             if let Some(et) = inner_et {
                 decap_head(ctx, IP6_HDR_LEN + 8 * (ext_len as usize + 1), et)?;
                 stat_inc(STAT_SRV6_USD);
-                return Ok(xdp_action::XDP_PASS);
+                return endt_meta(ctx, sid);
             }
         }
         if sid.flavors & SRV6_FLAVOR_USP != 0 && ult_ok {
@@ -1940,12 +1957,38 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
 
     if !matches!(sid.behavior, SRV6_BH_END_X | SRV6_BH_UA) {
         // End (and the uN end-of-carrier fallback): forward by the new DA —
-        // the TC FIB stage does the redirect + hop limit decrement.
-        return Ok(xdp_action::XDP_PASS);
+        // the TC FIB stage does the redirect + hop limit decrement. End.T
+        // (and a table-bound uN — zebra's uT) scopes that lookup to the
+        // SID's table (RFC 8986 §4.3 S15.1).
+        return endt_meta(ctx, sid);
     }
 
     // End.X / uA: forward straight out the SID's cross-connect adjacency.
     srv6_forward_adjacency(ctx, sid.nexthop_id)
+}
+
+/// RFC 8986 §4.3 S15.1 — scope the upcoming TC forward to the SID's table.
+/// Applies to `End.T` and to a `uN` whose `vrf_id` is set (zebra's uT);
+/// everything else (including table 0) passes untouched. Uses the same
+/// XDP→TC metadata channel as the DT decap path.
+#[inline(always)]
+fn endt_meta(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    if sid.vrf_id == 0 || !matches!(sid.behavior, SRV6_BH_END_T | SRV6_BH_UN) {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+        != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
+        (*meta).vrf_id = sid.vrf_id;
+    }
+    stat_inc(STAT_SRV6_ENDT);
+    Ok(xdp_action::XDP_PASS)
 }
 
 /// Pop the SRH from an IPv6 packet whose Routing header immediately follows
@@ -2413,7 +2456,7 @@ fn srv6_endm(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         }
         let meta = xdp_meta_ptr(ctx)?;
         unsafe {
-            (*meta).magic = XDP_META_MAGIC;
+            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
             (*meta).vrf_id = ment.vrf_id;
         }
     }
@@ -2538,7 +2581,7 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     }
     let meta = xdp_meta_ptr(ctx)?;
     unsafe {
-        (*meta).magic = XDP_META_MAGIC_L2;
+        (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = sid.vrf_id;
     }
     Ok(xdp_action::XDP_PASS)

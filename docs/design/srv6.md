@@ -329,6 +329,25 @@ Dispatch on `sid.behavior`:
   `SRV6_ENCAP_SRC`, not a per-SID source A; SL == 0 / no-SRH arrivals PASS
   to the stack (§4.1.1 upper-layer — the kernel silently drops them); no
   flavors (none are registered for B6). `stat_inc(STAT_SRV6_B6)`.
+- **End.T / uT** *(RFC 8986 §4.3)* — the End walk with S15.1's "set the
+  packet's associated FIB table to T": after the DA rewrite the handler
+  attaches the SID's `vrf_id` on the XDP→TC metadata channel (the same one
+  the DT decap path uses), so the TC forward looks up in that table. A `uN`
+  with a non-zero `vrf_id` is zebra's uT — End.T semantics at
+  end-of-carrier. Composes with PSP (pop, then table-scoped forward) and
+  USD (decap, then the *inner* forwards in table T); USP is local delivery,
+  no table. zebra side: the locator `vrf` leaf resolves to the VRF's table
+  in the RIB (re-resolved when the VRF appears/disappears), advertises
+  End.T / uT codepoints, installs the kernel's native End.T action
+  (+`SEG6_LOCAL_TABLE`; uT is cradle-only — no NEXT-CSID composition
+  exists), and tees behavior 14 / UN + `vrf_table_id`.
+  `stat_inc(STAT_SRV6_ENDT)`.
+
+  The metadata channel itself is guarded by `META_COOKIE`: skb metadata
+  SURVIVES a veth hop into the neighbouring node's TC stage (invisible to
+  its XDP program), so a constant magic would let one node's table id steer
+  the next node's lookup — each instance seeds a random cookie at startup
+  and XORs it into the magic, making inherited metadata fail the check.
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`
@@ -366,6 +385,7 @@ STAT_SRV6_DECAP   // End.DT*/DX* decapsulation (egress PE)
 STAT_SRV6_USID    // uN NEXT-C-SID container shift (Phase 4)
 STAT_SRV6_REPLACE // REPLACE-C-SID rewrite / container advance (RFC 9800 §4.2)
 STAT_SRV6_B6      // End.B6.Encaps binds (End walk + policy push, RFC 8986 §4.13)
+STAT_SRV6_ENDT    // End.T table-scoped forwards (RFC 8986 §4.3)
 ```
 
 Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by

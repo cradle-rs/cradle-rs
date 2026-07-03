@@ -1,0 +1,24 @@
+{
+  "ports": [
+    { "name": "sc", "l3": true },
+    { "name": "sp", "l3": true }
+  ],
+  "srv6_source": "fd00:1::1",
+  "nexthops": [
+    { "id": 1, "oif": "sp", "gateway": "2001:db8:1::2", "segs": ["fd00:5::7", "fd00:d::46"] },
+    { "id": 2, "oif": "sp", "gateway": "2001:db8:1::2", "segs": ["fd00:5::8"] },
+    { "id": 3, "oif": "sc", "gateway": "fc00:1::1" }
+  ],
+  "neighbors": [
+    { "oif": "sp", "ip": "2001:db8:1::2", "mac": "02:00:00:00:0a:01" },
+    { "oif": "sc", "ip": "fc00:1::1", "mac": "02:00:00:00:c1:01" }
+  ],
+  "localsids": [
+    { "sid": "fd00:1::46", "behavior": "end.dt46" }
+  ],
+  "routes6": [
+    { "prefix": "fc00:2::/64", "nexthop": 1 },
+    { "prefix": "fc00:9::1/128", "nexthop": 2 },
+    { "prefix": "fc00:1::/64", "nexthop": 3 }
+  ]
+}

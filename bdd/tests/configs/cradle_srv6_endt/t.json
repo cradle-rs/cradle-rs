@@ -1,0 +1,24 @@
+{
+  "ports": [
+    { "name": "ts", "l3": true },
+    { "name": "td", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "td", "gateway": "2001:db8:2::2" },
+    { "id": 2, "oif": "ts", "gateway": "2001:db8:1::1" }
+  ],
+  "neighbors": [
+    { "oif": "td", "ip": "2001:db8:2::2", "mac": "02:00:00:00:0b:02" },
+    { "oif": "ts", "ip": "2001:db8:1::1", "mac": "02:00:00:00:0a:00" }
+  ],
+  "localsids": [
+    { "sid": "fd00:5::7", "behavior": "end.t", "vrf": 100, "flavors": ["psp"] },
+    { "sid": "fd00:5::8", "behavior": "end.t", "vrf": 100, "flavors": ["usd"] }
+  ],
+  "routes6": [
+    { "prefix": "fd00:d::/64", "nexthop": 1, "vrf": 100 },
+    { "prefix": "fc00:9::1/128", "nexthop": 1, "vrf": 100 },
+    { "prefix": "fd00:1::/64", "nexthop": 2 },
+    { "prefix": "fc00:1::/64", "nexthop": 2 }
+  ]
+}

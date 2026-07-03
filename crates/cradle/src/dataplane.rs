@@ -40,6 +40,7 @@ pub struct Dataplane {
     srv6_localsid: LpmTrie<MapData, [u8; 16], LocalSid>,
     srv6_encap: HashMap<MapData, u32, Srv6Encap>,
     srv6_encap_src: Array<MapData, [u8; 16]>,
+    meta_cookie: Array<MapData, u32>,
     tbl24: Array<MapData, FibWord>,
     tbl8: Array<MapData, FibWord>,
     default4: Array<MapData, FibWord>,
@@ -98,6 +99,10 @@ impl Dataplane {
             srv6_encap_src: Array::try_from(
                 bpf.take_map("SRV6_ENCAP_SRC")
                     .context("map SRV6_ENCAP_SRC missing")?,
+            )?,
+            meta_cookie: Array::try_from(
+                bpf.take_map("META_COOKIE")
+                    .context("map META_COOKIE missing")?,
             )?,
             tbl24: Array::try_from(bpf.take_map("TBL24").context("map TBL24 missing")?)?,
             tbl8: Array::try_from(bpf.take_map("TBL8").context("map TBL8 missing")?)?,
@@ -760,6 +765,29 @@ impl Dataplane {
     }
 
     /// Set the SRv6 H.Encaps outer source address.
+    /// Seed the per-instance metadata cookie: skb metadata survives a veth
+    /// hop into the neighbour's TC stage, so the XDP→TC magic must differ
+    /// per cradle instance or one node's End.T/DT table id would steer the
+    /// next node's lookup. Random, non-zero.
+    pub fn meta_cookie_seed(&mut self) -> Result<()> {
+        use std::io::Read;
+        let mut buf = [0u8; 4];
+        let filled = std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut buf))
+            .is_ok();
+        if !filled {
+            let pid = std::process::id();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            buf = (pid ^ now).to_ne_bytes();
+        }
+        let cookie = u32::from_ne_bytes(buf) | 1; // never zero
+        self.meta_cookie.set(0, cookie, 0)?;
+        Ok(())
+    }
+
     pub fn srv6_encap_source_set(&mut self, addr: Ipv6Addr) -> Result<()> {
         self.srv6_encap_src.set(0, addr.octets(), 0)?;
         Ok(())
