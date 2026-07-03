@@ -486,8 +486,10 @@ pub const STAT_SRV6_ENCAP: u32 = 16;
 pub const STAT_SRV6_DECAP: u32 = 17;
 /// Resolved in a per-VRF IPv6 FIB table.
 pub const STAT_FIB6_VRF_HIT: u32 = 18;
+/// SRv6: End / End.X segment transit (Segments Left walk).
+pub const STAT_SRV6_END: u32 = 19;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 19;
+pub const STAT_MAX: u32 = 20;
 
 // ============================== L7 proxy ===================================
 

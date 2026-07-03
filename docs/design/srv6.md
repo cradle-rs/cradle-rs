@@ -3,16 +3,28 @@
 > Segment Routing over IPv6 in the eBPF data plane, driven by the zebra-rs SRv6
 > control plane (locators, End/End.DT behaviors, H.Encaps, L3VPN/EVPN over SRv6).
 
-Status: **Phase 1 implemented** — single-SID `H.Encaps.Red` imposition and
-`End.DT46/DT4/DT6` decap, **including the per-VRF binding** (the MVP absorbed
-the old "Phase 3" VRF item: MPLS Phase 3 already built the per-VRF FIB and
-the XDP→TC VRF-metadata channel, so `End.DT46` binds VRFs from day one — this
-phase only added the `FIB6_VRF` v6 mirror). Static gRPC/JSON config;
-`cradle_srv6` BDD proves both inner families across a v6 underlay. Phases
-2–4 (SRH transit, the zebra tee, uSID/EVPN) remain design. It builds on the
-[L2–L7 datapath](architecture.md) and reuses mechanisms from the
+Status: **Phases 1–2 implemented.** Phase 1: single-SID `H.Encaps.Red`
+imposition and `End.DT46/DT4/DT6` decap, **including the per-VRF binding**
+(the MVP absorbed the old "Phase 3" VRF item: MPLS Phase 3 already built the
+per-VRF FIB and the XDP→TC VRF-metadata channel, so `End.DT46` binds VRFs
+from day one — Phase 1 only added the `FIB6_VRF` v6 mirror). Phase 2: **SRH
+transit** — multi-SID `H.Encaps.Red` that writes a real SRH, and the `End` /
+`End.X` endpoint behaviors that walk `Segments Left` (SR-TE waypoints).
+Static gRPC/JSON config; `cradle_srv6` (single-SID) and `cradle_srv6_te`
+(2-SID SR-TE via End + End.X) BDDs prove both inner families across a v6
+underlay. Phases 3–4 (the zebra tee, uSID/EVPN) remain design. It builds on
+the [L2–L7 datapath](architecture.md) and reuses mechanisms from the
 [MPLS design](mpls.md) (packet geometry, the shared `cradle_xdp` stage, the
 VRF model, the zebra tee pattern).
+
+**SRH wire format** (RFC 8986/8754), the detail the transit path hinges on:
+segments are stored **reversed** — `segment_list[0]` is the *last* SID. For
+`H.Encaps.Red` of `[S1..Sn]`: outer DA = `S1`, the SRH carries `[S2..Sn]`
+reversed (`segment_list[i] = segs[n-1-i]`, `n-1` entries), `Segments Left =
+n-1`, `Last Entry = n-2`, `Hdr Ext Len = 2*(n-1)`. `End` does
+**decrement-then-index** (`SL -= 1; DA = segment_list[SL]`), so `SL` is
+always in range at the read. A single SID needs no SRH (the DA is the SID) —
+that is the Phase 1 reduced form.
 
 **Two corrections to the original design, from implementation:**
 
@@ -412,9 +424,13 @@ the mandatory `Scenario: Teardown topology`.
    the `cradle_xdp` stage (per-VRF lookup, exhausted-SRH skip); counters;
    gRPC `AddLocalSid` + `segs`-on-`Nexthop` + encap source; static config +
    `cradle_srv6` BDD. **VRF binding included** (absorbed from Phase 3).
-2. **Phase 2 — SRH transit.** Full SRH write on encap (`>1` SID), and the `End` /
-   `End.X` endpoint behaviors with `Segments Left` walking; `End.B6.Encaps`
-   binding SIDs — SR-TE policies beyond single-SID L3VPN.
+2. **Phase 2 — SRH transit** *(done)*. Multi-SID `H.Encaps.Red` (writes the
+   SRH, reversed list, `SL = n-1`) at TC; `End` (SL walk → XDP_PASS → TC
+   FIB forward) and `End.X` (SL walk → adjacency redirect from XDP, own hop
+   decrement) in `cradle_xdp`; `cradle_srv6_te` BDD. The DT decap now
+   exercises Phase 1's exhausted-SRH-skip for real. `End.B6.Encaps` binding
+   SIDs deferred; `End.X` adjacency SIDs get their IGP-originated exercise
+   with the Phase 3 tee.
 3. **Phase 3 — zebra tee.** Wire the `CradleFib` SRv6 tee (`route_sid_install`
    → `AddLocalSid`, `segs`-on-nexthop → the encap path, encap source) so
    BGP L3VPN over SRv6 / IS-IS-OSPF locators / SR policies drive cradle. (The
