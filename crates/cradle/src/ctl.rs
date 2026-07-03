@@ -52,10 +52,15 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         gateway: nh.gateway.clone().unwrap_or_default(),
                         oif: nh.oif.clone().unwrap_or_default(),
                         oif_index: 0,
-                        v6: nh.gateway.as_deref().map(|g| g.contains(':')).unwrap_or(false),
+                        v6: nh
+                            .gateway
+                            .as_deref()
+                            .map(|g| g.contains(':'))
+                            .unwrap_or(false),
                         labels: nh.labels.clone(),
                         segs: nh.segs.clone(),
-                        encap_mode: 0,
+                        encap_mode: nh.encap_mode as u32,
+                        backup_id: nh.backup,
                     })
                     .await?;
             }
@@ -77,7 +82,10 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     .await?;
             }
             for n in &cfg.neighbors {
-                let is_v6 = n.ip.parse::<std::net::IpAddr>().map(|ip| ip.is_ipv6()).unwrap_or(false);
+                let is_v6 =
+                    n.ip.parse::<std::net::IpAddr>()
+                        .map(|ip| ip.is_ipv6())
+                        .unwrap_or(false);
                 if is_v6 {
                     client
                         .set_neighbor6(pb::Neighbor6 {

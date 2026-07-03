@@ -69,7 +69,7 @@ reverse `WatchFdb` channel reporting data-plane MAC learning back up.
 | IS-IS SR (SR-MPLS) | ✅ | prefix SIDs / SRGB → ILM + out-labels teed |
 | BGP L3VPN (VPNv4/v6 over MPLS) | ✅ | per-VRF VPN label, `cradle_l3vpn_zebra` |
 | LDP | ⬜ | no producer in zebra-rs |
-| SR-MPLS TI-LFA | ⬜ | |
+| SR-MPLS TI-LFA | ⬜ | (SRv6 TI-LFA is supported) |
 
 ## SRv6 support status
 
@@ -85,7 +85,7 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | H.Encaps | ✅ | multi-SID SRH imposition (TC stage) |
 | H.Encaps.Red | ✅ | the default; single-SID = no SRH |
 | H.Encaps.L2 / L2.Red | ✅ | MAC-in-SRv6 (next-header 143) for EVPN, XDP stage |
-| H.Insert | ⬜ | teed as H.Encaps today |
+| H.Insert | ✅ | TI-LFA repair imposition (v6; original DA as final segment) |
 | H.M.GTP4.D / GTP6.D | ⬜ | mobile user plane out of scope |
 
 ### Endpoint behaviors
@@ -137,4 +137,4 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | BGP L3VPN over SRv6 (VPNv4/v6) | ✅ | per-VRF End.DT46, `encapsulation srv6` |
 | BGP EVPN over SRv6 (RFC 9252) | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
 | BGP SR Policy / color steering | ⬜ | needs End.B6 |
-| TI-LFA uSID repair carriers | 🔶 | zebra packs carriers; datapath uN/uA ready, untested end-to-end |
+| TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |

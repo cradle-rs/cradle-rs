@@ -73,6 +73,8 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_l2_decap",
     "srv6_l2_bum",
     "fdb_aged",
+    "srv6_hinsert",
+    "nh_backup",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -310,8 +312,7 @@ impl Control {
     /// Tear down a `(bd, remote_sid)` replication slot: flood membership,
     /// SID bindings, and the veth pair. No-op if absent.
     pub async fn del_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
-        let Some((a, a_idx, b_idx)) = self.repl_slots.lock().await.remove(&(bd, remote_sid))
-        else {
+        let Some((a, a_idx, b_idx)) = self.repl_slots.lock().await.remove(&(bd, remote_sid)) else {
             return Ok(());
         };
         {
@@ -339,9 +340,11 @@ impl Control {
         gateway: Option<Ipv4Addr>,
         oif: &str,
         labels: &[u32],
+        backup_id: u32,
     ) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
-        self.set_nexthop_idx(id, gateway, oif, labels).await
+        self.set_nexthop_idx(id, gateway, oif, labels, backup_id)
+            .await
     }
 
     /// Set a nexthop by output ifindex directly (used by control planes such as
@@ -352,8 +355,12 @@ impl Control {
         gateway: Option<Ipv4Addr>,
         oif: u32,
         labels: &[u32],
+        backup_id: u32,
     ) -> Result<()> {
-        self.dp.lock().await.nexthop_set(id, gateway, oif, labels)?;
+        self.dp
+            .lock()
+            .await
+            .nexthop_set(id, gateway, oif, labels, backup_id)?;
         Ok(())
     }
 
@@ -394,11 +401,12 @@ impl Control {
         gateway: Option<Ipv6Addr>,
         oif: u32,
         labels: &[u32],
+        backup_id: u32,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .nexthop_set_v6(id, gateway, oif, labels)?;
+            .nexthop_set_v6(id, gateway, oif, labels, backup_id)?;
         Ok(())
     }
 
@@ -427,19 +435,70 @@ impl Control {
         Ok(())
     }
 
-    /// Set an SRv6-encap nexthop by ifindex (segment list = `segs`).
+    /// Set an SRv6-encap nexthop by ifindex (segment list = `segs`; `mode`
+    /// = `SRV6_ENCAP_MODE_*` — H.Encaps forms or H.Insert).
     pub async fn set_nexthop_srv6(
         &self,
         id: u32,
         gateway: Option<Ipv6Addr>,
         oif: u32,
         segs: &[Ipv6Addr],
+        mode: u8,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .nexthop_set_srv6(id, gateway, oif, segs)?;
+            .nexthop_set_srv6(id, gateway, oif, segs, mode)?;
         Ok(())
+    }
+
+    /// Start the link monitor: an `ip -o monitor link` subprocess feeds
+    /// carrier/admin transitions into the `LINK_DOWN` map, arming the
+    /// datapath's protected-nexthop failover within event latency.
+    pub fn start_link_monitor(&self) {
+        let dp = self.dp.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let child = tokio::process::Command::new("ip")
+                .args(["-o", "monitor", "link"])
+                .stdout(std::process::Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("link monitor disabled: spawning `ip monitor link`: {e}");
+                    return;
+                }
+            };
+            let Some(stdout) = child.stdout.take() else {
+                return;
+            };
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // `ip -o monitor link` lines start "IDX: name: <FLAGS> ...
+                // state STATE ...". Deleted links report "Deleted IDX: ...".
+                let rest = line.strip_prefix("Deleted ").unwrap_or(&line);
+                let Some((idx_str, _)) = rest.split_once(':') else {
+                    continue;
+                };
+                let Ok(ifindex) = idx_str.trim().parse::<u32>() else {
+                    continue;
+                };
+                let down = line.starts_with("Deleted ")
+                    || rest.contains("state DOWN")
+                    || rest.contains("state LOWERLAYERDOWN");
+                let up = rest.contains("state UP");
+                if !down && !up {
+                    continue;
+                }
+                if let Err(e) = dp.lock().await.link_state_set(ifindex, down) {
+                    warn!("link monitor: LINK_DOWN update for {ifindex}: {e:#}");
+                } else if down {
+                    info!("link {ifindex} down — protected nexthops fail over");
+                }
+            }
+        });
+        info!("link monitor started (protected-nexthop failover)");
     }
 
     pub async fn set_srv6_encap_source(&self, addr: Ipv6Addr) -> Result<()> {
@@ -633,7 +692,7 @@ impl Cradle for GrpcService {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(st)?;
             self.control
-                .set_nexthop_srv6(n.id, gw, oif, &segs)
+                .set_nexthop_srv6(n.id, gw, oif, &segs, n.encap_mode as u8)
                 .await
                 .map_err(st)?;
         } else if n.v6 {
@@ -648,7 +707,7 @@ impl Cradle for GrpcService {
                 util::ifindex_of(&n.oif).map_err(st)?
             };
             self.control
-                .set_nexthop_idx_v6(n.id, gw, oif, &n.labels)
+                .set_nexthop_idx_v6(n.id, gw, oif, &n.labels, n.backup_id)
                 .await
                 .map_err(st)?;
         } else {
@@ -661,12 +720,12 @@ impl Cradle for GrpcService {
                 // oif_index 0 with no name: an oif-less nexthop (e.g. an ILM
                 // decap target that never egresses through it) — store as-is.
                 self.control
-                    .set_nexthop_idx(n.id, gw, n.oif_index, &n.labels)
+                    .set_nexthop_idx(n.id, gw, n.oif_index, &n.labels, n.backup_id)
                     .await
                     .map_err(st)?;
             } else {
                 self.control
-                    .set_nexthop(n.id, gw, &n.oif, &n.labels)
+                    .set_nexthop(n.id, gw, &n.oif, &n.labels, n.backup_id)
                     .await
                     .map_err(st)?;
             }

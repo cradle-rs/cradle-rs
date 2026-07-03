@@ -153,7 +153,7 @@ fn run_mode(dir24: bool, n_routes: u64, seed: u64, repeat: u32) -> Result<()> {
     // ingress_ifindex 0 = the test-run default; nexthop oif 1 (lo) — the
     // redirect target never actually transmits under test_run.
     dp.port_set(0, [2, 0, 0, 0, 0, 2], PORT_F_L3, 0, 0)?;
-    dp.nexthop_set(1, Some(Ipv4Addr::new(198, 51, 100, 1)), 1, &[])?;
+    dp.nexthop_set(1, Some(Ipv4Addr::new(198, 51, 100, 1)), 1, &[], 0)?;
     dp.route4_add(0, Ipv4Addr::UNSPECIFIED, 0, 1, 0)?; // default route
 
     let prefixes = util::gen_dfz_prefixes(n_routes, seed);
@@ -195,9 +195,7 @@ fn run_mode(dir24: bool, n_routes: u64, seed: u64, repeat: u32) -> Result<()> {
         },
         Category {
             name: "default",
-            addrs: (0..K)
-                .map(|i| Ipv4Addr::new(99, 1, i as u8, 1))
-                .collect(),
+            addrs: (0..K).map(|i| Ipv4Addr::new(99, 1, i as u8, 1)).collect(),
         },
     ];
 
@@ -261,8 +259,8 @@ mod tests {
         assert_eq!(p[14], 0x45);
         assert_eq!(p[22], 64); // TTL
         assert_eq!(&p[30..34], &[10, 0, 2, 1]); // dst
-        // Header checksum validates: sum over the header including the
-        // checksum field must be 0xffff.
+                                                // Header checksum validates: sum over the header including the
+                                                // checksum field must be 0xffff.
         let mut sum = 0u32;
         for i in (14..34).step_by(2) {
             sum += u16::from_be_bytes([p[i], p[i + 1]]) as u32;

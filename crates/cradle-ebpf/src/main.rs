@@ -20,7 +20,7 @@
 
 use aya_ebpf::{
     bindings::{
-        bpf_adj_room_mode::BPF_ADJ_ROOM_MAC, bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1,
+        bpf_adj_room_mode::{BPF_ADJ_ROOM_MAC, BPF_ADJ_ROOM_NET}, bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1,
         bpf_sock_tuple, bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1,
         xdp_action, TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
     },
@@ -44,9 +44,9 @@ use cradle_common::{
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END,
-    STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_USID, XDP_META_MAGIC,
-    XDP_META_MAGIC_L2,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
+    STAT_SRV6_USID, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -90,6 +90,11 @@ static DEFAULT4: Array<FibWord> = Array::with_max_entries(1, 0);
 static DP_CONFIG: Array<u32> = Array::with_max_entries(1, 0);
 #[map]
 static NEXTHOPS: HashMap<u32, NextHop> = HashMap::with_max_entries(4096, 0);
+/// Links whose carrier/admin state is down (ifindex present = down), written
+/// by the user-space link monitor. `resolve_nh` consults it to fail over to a
+/// nexthop's `backup_id` (TI-LFA fast-reroute) within the monitor's latency.
+#[map]
+static LINK_DOWN: HashMap<u32, u8> = HashMap::with_max_entries(256, 0);
 // Nexthop groups for ECMP: group_id -> member count, and (group_id, slot) -> nexthop id.
 #[map]
 static NHGROUP: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
@@ -728,6 +733,22 @@ fn v6_csum_fixup(
 
 // ============================== L3 forwarding ==============================
 
+/// Resolve a nexthop id into `(effective id, nexthop)`, failing over to its
+/// `backup_id` when the primary's egress link is down (`LINK_DOWN`) — the
+/// backup typically carries a TI-LFA SRv6 repair. The effective id matters:
+/// `SRV6_ENCAP` is keyed by nexthop id, so the backup's segment list is found
+/// under the backup's id.
+#[inline(always)]
+fn resolve_nh(nh_id: u32) -> Option<(u32, NextHop)> {
+    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id)? };
+    if nh.backup_id != 0 && LINK_DOWN.get_ptr(&nh.oif).is_some() {
+        let b: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh.backup_id)? };
+        stat_inc(STAT_NH_BACKUP);
+        return Some((nh.backup_id, b));
+    }
+    Some((nh_id, nh))
+}
+
 #[inline(always)]
 fn l3_forward(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
@@ -911,7 +932,7 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
         fib.nexthop_id
     };
 
-    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
+    let (nh_id, nh) = resolve_nh(nh_id).ok_or(())?;
     let oif = nh.oif;
 
     // SRv6 imposition (H.Encaps) of a v4-inner packet: impose an outer IPv6
@@ -1036,7 +1057,7 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     } else {
         fib.nexthop_id
     };
-    let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
+    let (nh_id, nh) = resolve_nh(nh_id).ok_or(())?;
     let oif = nh.oif;
 
     // SRv6 imposition (H.Encaps): impose an outer IPv6 header toward the SID.
@@ -1240,6 +1261,14 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
     if n == 0 || n > MAX_SEGS {
         return Ok(TC_ACT_PIPE as i32);
     }
+    if enc.mode == SRV6_ENCAP_MODE_INSERT {
+        // H.Insert only applies to IPv6 (there is no header to insert into
+        // otherwise); non-v6 punts to the stack.
+        if inner_ethertype != ETH_P_IPV6 {
+            return Ok(TC_ACT_PIPE as i32);
+        }
+        return srv6_insert(ctx, &enc, nh);
+    }
     let src: [u8; 16] = match SRV6_ENCAP_SRC.get(0) {
         Some(s) => *s,
         None => return Ok(TC_ACT_PIPE as i32),
@@ -1294,6 +1323,58 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
     }
 
     stat_inc(STAT_SRV6_ENCAP);
+    l2_xmit(ctx, nh, ETH_P_IPV6)
+}
+
+/// SRv6 H.Insert (TI-LFA repair): insert an SRH into the *existing* IPv6
+/// packet — the original destination becomes the SRH's final segment
+/// (`segment_list[0]`), the repair segments ride above it reversed, and the
+/// DA is rewritten to the first repair segment. At the repair path's end the
+/// SRH walk restores the original destination (`SL → 0`) and the packet
+/// continues natively. `BPF_ADJ_ROOM_NET` grows the room right after the
+/// IPv6 base header. Decrements the hop limit (this is a forward).
+#[inline(always)]
+fn srv6_insert(ctx: &TcContext, enc: &Srv6Encap, nh: &NextHop) -> Result<i32, ()> {
+    let n = enc.num_segs as usize;
+    let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
+    if hop <= 1 {
+        return Ok(TC_ACT_PIPE as i32);
+    }
+    let orig_da: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
+    let orig_nh: u8 = ctx.load(IP6_NEXTHDR_OFF).map_err(|_| ())?;
+    let payload_len: u16 = u16::from_be(ctx.load(IP6_PAYLOAD_LEN_OFF).map_err(|_| ())?);
+    // SRH sized for the repair segments plus the original destination.
+    let srh_len = 8 + 16 * (n + 1);
+
+    ctx.skb
+        .adjust_room(srh_len as i32, BPF_ADJ_ROOM_NET, 0)
+        .map_err(|_| ())?;
+
+    ctx.store(IP6_NEXTHDR_OFF, &IPPROTO_ROUTING, 0).map_err(|_| ())?;
+    ctx.store(IP6_PAYLOAD_LEN_OFF, &(payload_len + srh_len as u16).to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(IP6_HOP_OFF, &(hop - 1), 0).map_err(|_| ())?;
+    // SRH header.
+    ctx.store(SRH_OFF, &orig_nh, 0).map_err(|_| ())?;
+    ctx.store(SRH_OFF + 1, &(2 * (n as u8 + 1)), 0).map_err(|_| ())?; // hdr_ext_len
+    ctx.store(SRH_OFF + 2, &4u8, 0).map_err(|_| ())?; // routing type 4
+    ctx.store(SRH_SL_OFF, &(n as u8), 0).map_err(|_| ())?; // segments_left
+    ctx.store(SRH_OFF + 4, &(n as u8), 0).map_err(|_| ())?; // last_entry
+    ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
+    ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
+    // segment_list[0] = the original destination (final); repair segments
+    // reversed above it so segment_list[n] = segs[0] = the active segment.
+    ctx.store(SRH_SEGLIST_OFF, &orig_da, 0).map_err(|_| ())?;
+    for i in 0..MAX_SEGS {
+        if i >= n {
+            break;
+        }
+        ctx.store(SRH_SEGLIST_OFF + 16 * (i + 1), &enc.segs[n - 1 - i], 0)
+            .map_err(|_| ())?;
+    }
+    ctx.store(IP6_DST_OFF, &enc.segs[0], 0).map_err(|_| ())?;
+
+    stat_inc(STAT_SRV6_HINSERT);
     l2_xmit(ctx, nh, ETH_P_IPV6)
 }
 
@@ -1718,13 +1799,13 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = next_seg };
     stat_inc(STAT_SRV6_END);
 
-    if sid.behavior == SRV6_BH_END {
-        // Forward by the new DA — the TC FIB stage does the redirect + hop
-        // limit decrement.
+    if !matches!(sid.behavior, SRV6_BH_END_X | SRV6_BH_UA) {
+        // End (and the uN end-of-carrier fallback): forward by the new DA —
+        // the TC FIB stage does the redirect + hop limit decrement.
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // End.X: forward straight out the SID's cross-connect adjacency.
+    // End.X / uA: forward straight out the SID's cross-connect adjacency.
     srv6_forward_adjacency(ctx, sid.nexthop_id)
 }
 
@@ -1793,7 +1874,29 @@ fn srv6_usid_shift(ctx: &XdpContext, sid: &LocalSid) -> Result<bool, ()> {
 /// `End`). No SRH — the whole path rides in the DA carrier.
 #[inline(always)]
 fn srv6_un(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    // End-of-carrier (RFC 9800): if the uSID that would become active after
+    // the shift is zero, the container is exhausted — behave as plain End
+    // (SRH `Segments Left` walk restores the carried final destination,
+    // e.g. a TI-LFA repair's original DA). Peek before shifting.
+    let da = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+    let block = (sid.block_bits / 8) as usize;
+    let node = (sid.node_bits / 8) as usize;
+    if block + node + 2 <= 16 && da[block + node] == 0 && da[block + node + 1] == 0 {
+        return srv6_end(ctx, sid);
+    }
     srv6_usid_shift(ctx, sid)?;
+    // Same-node re-dispatch: the shift may expose one of THIS node's own
+    // LIB micro-SIDs (a TI-LFA carrier packs `uN(r) + uA(r→x)`, both
+    // anchored at r) — the new DA never leaves the box, so re-match it
+    // against the local-SID table once. Only the adjacency form needs it;
+    // anything else forwards by the FIB as usual.
+    let nda = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+    if let Some(next) = SRV6_LOCALSID.get(&Key::new(128, nda)) {
+        if next.behavior == SRV6_BH_UALIB {
+            let next = *next;
+            return srv6_ua(ctx, &next);
+        }
+    }
     Ok(xdp_action::XDP_PASS)
 }
 
@@ -1803,6 +1906,18 @@ fn srv6_un(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
 /// rather than by the FIB. If the geometry is unsupported, pass the packet.
 #[inline(always)]
 fn srv6_ua(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    // End-of-carrier: shifting out this adjacency function would leave an
+    // exhausted container — behave as classic End.X (SRH walk restores the
+    // carried final destination, then out the adjacency). `srv6_end`
+    // dispatches UA to the adjacency branch.
+    let da = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+    let block = (sid.block_bits / 8) as usize;
+    let node = (sid.node_bits / 8) as usize;
+    if block + node + 2 <= 16 && da[block + node] == 0 && da[block + node + 1] == 0 {
+        let mut end = *sid;
+        end.behavior = SRV6_BH_UA; // adjacency branch in srv6_end
+        return srv6_end(ctx, &end);
+    }
     if !srv6_usid_shift(ctx, sid)? {
         return Ok(xdp_action::XDP_PASS);
     }

@@ -55,6 +55,9 @@ pub struct Dataplane {
     ports: HashMap<MapData, u32, PortConfig>,
     l2_members: HashMap<MapData, L2MemberKey, u32>,
     l2_count: HashMap<MapData, u16, u32>,
+    /// Links whose carrier/admin state is down — the datapath fails over to
+    /// nexthop `backup_id`s while an ifindex is present here.
+    link_down: HashMap<MapData, u32, u8>,
     /// Static overlay FDB entries (EVPN over SRv6). Local MACs are still learned
     /// in the eBPF datapath; this only programs remote (`FDB_F_REMOTE`) entries.
     fdb: HashMap<MapData, FdbKey, FdbEntry>,
@@ -114,10 +117,11 @@ impl Dataplane {
                     .context("map L2_MEMBERS missing")?,
             )?,
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
-            fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
-            repl_sid: HashMap::try_from(
-                bpf.take_map("REPL_SID").context("map REPL_SID missing")?,
+            link_down: HashMap::try_from(
+                bpf.take_map("LINK_DOWN").context("map LINK_DOWN missing")?,
             )?,
+            fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
+            repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
             backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
             services6: HashMap::try_from(
@@ -410,6 +414,17 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Mark a link down/up for fast-reroute (`LINK_DOWN`): while down, the
+    /// datapath swaps protected nexthops to their `backup_id`.
+    pub fn link_state_set(&mut self, ifindex: u32, down: bool) -> Result<()> {
+        if down {
+            self.link_down.insert(ifindex, 1, 0)?;
+        } else {
+            let _ = self.link_down.remove(&ifindex);
+        }
+        Ok(())
+    }
+
     /// Expire idle locally-learned FDB entries: remove every local
     /// (`flags == 0`) entry whose `last_seen` is older than `max_idle` and
     /// bump `STAT_FDB_AGED` per removal. Returns the number aged out.
@@ -478,6 +493,7 @@ impl Dataplane {
         gateway: Option<Ipv4Addr>,
         oif: u32,
         labels: &[u32],
+        backup_id: u32,
     ) -> Result<()> {
         let gateway_v4 = gateway.map(|a| u32::from_be_bytes(a.octets())).unwrap_or(0);
         let (labels, num_labels, flags) = pack_labels(labels)?;
@@ -489,6 +505,7 @@ impl Dataplane {
             labels,
             num_labels,
             _pad: [0; 3],
+            backup_id,
         };
         self.nexthops.insert(id, nh, 0)?;
         Ok(())
@@ -640,6 +657,7 @@ impl Dataplane {
         gateway: Option<Ipv6Addr>,
         oif: u32,
         labels: &[u32],
+        backup_id: u32,
     ) -> Result<()> {
         let (labels, num_labels, label_flags) = pack_labels(labels)?;
         let nh = NextHop {
@@ -650,6 +668,7 @@ impl Dataplane {
             labels,
             num_labels,
             _pad: [0; 3],
+            backup_id,
         };
         self.nexthops.insert(id, nh, 0)?;
         Ok(())
@@ -663,6 +682,7 @@ impl Dataplane {
         gateway: Option<Ipv6Addr>,
         oif: u32,
         segs: &[Ipv6Addr],
+        mode: u8,
     ) -> Result<()> {
         if segs.is_empty() || segs.len() > cradle_common::MAX_SEGS {
             anyhow::bail!("SRv6 segment list must be 1..={}", cradle_common::MAX_SEGS);
@@ -675,11 +695,13 @@ impl Dataplane {
             labels: [0; MAX_LABELS],
             num_labels: 0,
             _pad: [0; 3],
+            backup_id: 0,
         };
         self.nexthops.insert(id, nh, 0)?;
         let mut enc = Srv6Encap {
             num_segs: segs.len() as u8,
-            _pad: [0; 3],
+            mode,
+            _pad: [0; 2],
             segs: [[0u8; 16]; cradle_common::MAX_SEGS],
         };
         for (i, s) in segs.iter().enumerate() {

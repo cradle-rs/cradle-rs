@@ -1,0 +1,49 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_tilfa_srv6_ctl1.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: s-n
+  ipv6:
+    address: 2001:db8:0:1::1/64
+- if-name: s-r1
+  ipv6:
+    address: 2001:db8:0:2::1/64
+- if-name: lan0
+  ipv6:
+    address: 2001:db8:100::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: s
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    fast-reroute:
+      ti-lfa: {}
+      backup-as-primary: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: s-n
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: s-r1
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+    - if-name: lan0
+      metric: 1
+      ipv6:
+        enable: true

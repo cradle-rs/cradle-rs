@@ -1,0 +1,18 @@
+{
+  "ports": [
+    { "name": "rs", "l3": true },
+    { "name": "rd", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "rd", "gateway": "10.0.34.2" },
+    { "id": 2, "oif": "rs", "gateway": "10.0.14.1" }
+  ],
+  "neighbors": [
+    { "oif": "rd", "ip": "10.0.34.2", "mac": "02:00:00:00:0e:01" },
+    { "oif": "rs", "ip": "10.0.14.1", "mac": "02:00:00:00:0f:01" }
+  ],
+  "routes": [
+    { "prefix": "10.0.2.0/24", "nexthop": 1 },
+    { "prefix": "10.0.1.0/24", "nexthop": 2 }
+  ]
+}
