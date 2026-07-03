@@ -514,7 +514,15 @@ Each scenario ends with the mandatory `Scenario: Teardown topology`.
    in [evpn-srv6.md](evpn-srv6.md), including the **BGP EVPN control-plane
    tee** (`encapsulation srv6`: per-VNI DT2U/DT2M SIDs on Type-2/Type-3, the
    `MacAdd`/`AddFdbRemote` pathway, local L2 SIDs via the SID registry —
-   `cradle_evpn_srv6_zebra` BDD). **Still design:** a control-plane-driven uSID
-   test (IS-IS/OSPFv3 TI-LFA is the only producer of multi-uSID carriers today,
-   via `pack_carriers`), multi-PE ingress replication, overlay MAC learning,
-   and the `End.M` egress-protection mirror.
+   `cradle_evpn_srv6_zebra` BDD). **TI-LFA uSID carriers** are also done: the
+   `Nexthop::Protect` tee sends the primary paired with its repair leaf
+   (packed carriers + H.Insert, `srv6_encap_mode` 2); cradle programs
+   `NextHop.backup_id`, a user-space link monitor feeds `LINK_DOWN`, and
+   `resolve_nh` fails over at forward time. The datapath grew **H.Insert**
+   (TC, `BPF_ADJ_ROOM_NET` — original DA as the SRH's final segment), the
+   **uN/uA end-of-carrier End fallback** (exhausted container → SRH walk
+   restores the carried destination), and **same-node re-dispatch** (a uN
+   shift exposing the node's own uA-LIB). `cradle_tilfa_srv6` proves the
+   IGP-packed carrier end to end (`backup-as-primary` pins traffic onto the
+   repair deterministically); `cradle_nh_backup` proves the link-down
+   switchover. **Still design:** the `End.M` egress-protection mirror.

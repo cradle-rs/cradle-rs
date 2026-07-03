@@ -121,6 +121,10 @@ pub struct NextHop {
     /// Number of valid entries in `labels`; 0 = no label operation.
     pub num_labels: u8,
     pub _pad: [u8; 3],
+    /// Fast-reroute: the nexthop to use when this one's `oif` is down
+    /// (`LINK_DOWN`), typically carrying a TI-LFA SRv6 repair (segs +
+    /// `SRV6_ENCAP_MODE_INSERT`). 0 = unprotected.
+    pub backup_id: u32,
 }
 
 pub const NH_F_V6: u32 = 1 << 0;
@@ -269,10 +273,19 @@ pub const MAX_SEGS: usize = 6;
 pub struct Srv6Encap {
     /// 1 = reduced single-SID (no SRH); >1 = SRH carried (later phase).
     pub num_segs: u8,
-    pub _pad: [u8; 3],
+    /// `SRV6_ENCAP_MODE_*`: how the segments are imposed.
+    pub mode: u8,
+    pub _pad: [u8; 2],
     /// `[0]` = first SID = the outer destination.
     pub segs: [[u8; 16]; MAX_SEGS],
 }
+
+/// H.Encaps / H.Encaps.Red — outer IPv6 (+SRH when >1 seg) around the packet.
+pub const SRV6_ENCAP_MODE_ENCAPS: u8 = 0;
+/// H.Insert — insert an SRH into the *existing* IPv6 packet: the original
+/// destination rides as the SRH's final segment and takes over at SL 0
+/// (TI-LFA repair; RFC 8986 §5.2 deprecated-but-deployed form). v6-only.
+pub const SRV6_ENCAP_MODE_INSERT: u8 = 2;
 
 /// Per-VRF IPv6 LPM key — the v6 mirror of `Vrf4Key`: a route `addr/len` in
 /// VRF `v` is inserted with `prefix_len = 32 + len`.
@@ -527,8 +540,12 @@ pub const STAT_SRV6_L2_DECAP: u32 = 22;
 pub const STAT_SRV6_L2_BUM: u32 = 23;
 /// FDB entries expired by the user-space aging sweep (idle local MACs).
 pub const STAT_FDB_AGED: u32 = 24;
+/// SRv6 H.Insert impositions (TI-LFA repair onto the backup path).
+pub const STAT_SRV6_HINSERT: u32 = 25;
+/// Forwards that switched to a backup nexthop (primary's link down).
+pub const STAT_NH_BACKUP: u32 = 26;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 25;
+pub const STAT_MAX: u32 = 27;
 
 // ============================== L7 proxy ===================================
 

@@ -1,0 +1,12 @@
+{
+  "ports": [
+    {
+      "name": "d-n",
+      "l3": true
+    },
+    {
+      "name": "d-r2",
+      "l3": true
+    }
+  ]
+}

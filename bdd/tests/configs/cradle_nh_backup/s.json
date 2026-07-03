@@ -1,0 +1,18 @@
+{
+  "ports": [
+    { "name": "sc", "l3": true },
+    { "name": "sn", "l3": true },
+    { "name": "sr", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "sn", "gateway": "10.0.12.2", "backup": 2 },
+    { "id": 2, "oif": "sr", "gateway": "10.0.14.2" }
+  ],
+  "neighbors": [
+    { "oif": "sn", "ip": "10.0.12.2", "mac": "02:00:00:00:0a:01" },
+    { "oif": "sr", "ip": "10.0.14.2", "mac": "02:00:00:00:0b:01" }
+  ],
+  "routes": [
+    { "prefix": "10.0.2.0/24", "nexthop": 1 }
+  ]
+}

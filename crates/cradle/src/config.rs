@@ -162,6 +162,12 @@ pub struct Nexthop {
     /// (`gateway`/`oif` are the underlay next hop).
     #[serde(default)]
     pub segs: Vec<String>,
+    /// SRv6 imposition mode: 0 = H.Encaps(.Red), 2 = H.Insert (TI-LFA).
+    #[serde(default)]
+    pub encap_mode: u8,
+    /// Fast-reroute: nexthop id to fail over to when this one's link is down.
+    #[serde(default)]
+    pub backup: u32,
 }
 
 /// An incoming-label map entry: `action` is `"swap"`, `"pop"` or `"pop-l3"`.
@@ -294,7 +300,8 @@ impl Config {
                     .iter()
                     .map(|s| s.parse().with_context(|| format!("bad SID {s:?}")))
                     .collect::<Result<Vec<_>>>()?;
-                ctl.set_nexthop_srv6(nh.id, gw, oif, &segs).await?;
+                ctl.set_nexthop_srv6(nh.id, gw, oif, &segs, nh.encap_mode)
+                    .await?;
                 continue;
             }
             // Family inferred from the gateway (a v6 gateway ⇒ v6 nexthop).
@@ -312,13 +319,15 @@ impl Config {
                     Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                     None => None,
                 };
-                ctl.set_nexthop_idx_v6(nh.id, gw, oif, &nh.labels).await?;
+                ctl.set_nexthop_idx_v6(nh.id, gw, oif, &nh.labels, nh.backup)
+                    .await?;
             } else {
                 let gw = match &nh.gateway {
                     Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                     None => None,
                 };
-                ctl.set_nexthop_idx(nh.id, gw, oif, &nh.labels).await?;
+                ctl.set_nexthop_idx(nh.id, gw, oif, &nh.labels, nh.backup)
+                    .await?;
             }
         }
         for ls in &self.localsids {

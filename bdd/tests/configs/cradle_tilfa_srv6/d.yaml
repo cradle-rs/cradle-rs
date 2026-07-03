@@ -1,0 +1,39 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_tilfa_srv6_ctl3.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::4/128
+- if-name: d-n
+  ipv6:
+    address: 2001:db8:0:3::2/64
+- if-name: d-r2
+  ipv6:
+    address: 2001:db8:0:5::2/64
+segment-routing:
+  locator:
+  - name: LOC4
+    prefix: fcbb:bbbb:4::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0004.00
+    hostname: d
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC4
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: d-n
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: d-r2
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true

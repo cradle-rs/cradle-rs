@@ -157,7 +157,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         Some(path) => Some(Config::load(path)?),
         None => None,
     };
-    let fib4_mode = match (args.fib4_mode, cfg.as_ref().and_then(|c| c.fib4_mode.as_deref())) {
+    let fib4_mode = match (
+        args.fib4_mode,
+        cfg.as_ref().and_then(|c| c.fib4_mode.as_deref()),
+    ) {
         (Some(m), _) => m, // explicit flag wins
         (None, Some("dir24")) => Fib4Mode::Dir24,
         (None, Some("lpm")) | (None, None) => Fib4Mode::Lpm,
@@ -214,6 +217,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // Expire idle locally-learned MACs (default 300s; `fdb_age_secs: 0`
     // disables). WatchFdb subscribers see the removals as age events.
     control.start_fdb_aging(cfg.as_ref().map(|c| c.fdb_age_secs).unwrap_or(300));
+
+    // Feed link carrier/admin transitions into the datapath so protected
+    // nexthops fail over to their backups (TI-LFA fast-reroute).
+    control.start_link_monitor();
 
     match args.grpc {
         Some(s) => control.serve(GrpcEndpoint::parse(&s)?).await?, // runs until Ctrl-C

@@ -1,0 +1,16 @@
+{
+  "ports": [
+    { "name": "dc", "l3": true },
+    { "name": "dn", "l3": true },
+    { "name": "dr", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "dr", "gateway": "10.0.34.1" }
+  ],
+  "neighbors": [
+    { "oif": "dr", "ip": "10.0.34.1", "mac": "02:00:00:00:10:01" }
+  ],
+  "routes": [
+    { "prefix": "10.0.1.0/24", "nexthop": 1 }
+  ]
+}

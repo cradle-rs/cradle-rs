@@ -45,10 +45,14 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
             let plen = min.as_ref().sin_addr.s_addr.count_ones() as u8;
             dp.route4_add(vrf, ip, 32, 0, FIB_F_LOCAL)?;
             if plen < 32 {
-                let mask_bits = if plen == 0 { 0 } else { u32::MAX << (32 - plen as u32) };
+                let mask_bits = if plen == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - plen as u32)
+                };
                 let net = Ipv4Addr::from(u32::from(ip) & mask_bits);
                 let nh = CONNECTED_NH_BASE_V4 + ifindex;
-                dp.nexthop_set(nh, None, ifindex, &[])?;
+                dp.nexthop_set(nh, None, ifindex, &[], 0)?;
                 dp.route4_add(vrf, net, plen, nh, 0)?;
             }
             info!("port {name}: derived v4 {ip}/{plen} (vrf {vrf})");
@@ -70,7 +74,7 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
             if plen < 128 {
                 let net = mask_v6(ip, plen);
                 let nh = CONNECTED_NH_BASE_V6 + ifindex;
-                dp.nexthop_set_v6(nh, None, ifindex, &[])?;
+                dp.nexthop_set_v6(nh, None, ifindex, &[], 0)?;
                 dp.route6_add(vrf, net, plen, nh, 0)?;
             }
             info!("port {name}: derived v6 {ip}/{plen}");
@@ -120,7 +124,10 @@ pub fn add_veth_pair(a: &str, b: &str) -> Result<()> {
         // Tolerate an already-existing pair (re-add after restart).
         let err = String::from_utf8_lossy(&out.stderr);
         if !err.contains("File exists") {
-            anyhow::bail!("`ip link add {a} type veth peer name {b}` failed: {}", err.trim());
+            anyhow::bail!(
+                "`ip link add {a} type veth peer name {b}` failed: {}",
+                err.trim()
+            );
         }
     }
     for name in [a, b] {
