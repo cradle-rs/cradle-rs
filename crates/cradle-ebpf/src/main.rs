@@ -1384,7 +1384,22 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
 /// distinguishes unicast (`STAT_SRV6_L2_ENCAP`) from BUM (`STAT_SRV6_L2_BUM`).
 #[inline(always)]
 fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry, stat: u32) -> Result<u32, ()> {
-    let nh: NextHop = match NEXTHOPS.get_ptr(&ent.oif) {
+    // Underlay adjacency: an explicit nexthop id (static config), or — when
+    // the entry came from the control-plane tee with nexthop 0 — resolved by
+    // a FIB6 lookup on the remote SID (the locator route the IGP installed).
+    let nh_id = if ent.oif != 0 {
+        ent.oif
+    } else {
+        let fib: FibEntry = match FIB6.get(Key::new(128, ent.remote_sid)) {
+            Some(f) => *f,
+            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+        };
+        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
+            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        }
+        fib.nexthop_id
+    };
+    let nh: NextHop = match NEXTHOPS.get_ptr(&nh_id) {
         Some(n) => unsafe { *n },
         None => return Ok(xdp_action::XDP_PASS),
     };

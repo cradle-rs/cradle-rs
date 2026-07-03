@@ -6,11 +6,16 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–2 (End.DT2U unicast + End.DT2M BUM) implemented** for a
-2-PE domain. This is the last Phase-4 SRv6 item. It builds on the SRv6
-encap/decap geometry (Phases 1–4) and the L2 switching MVP
-([l2-switching.md](l2-switching.md)); the FDB, flood, and per-BD member maps
-already exist.
+Status: **Slices 1–3 implemented** for a 2-PE domain: `End.DT2U` unicast,
+`End.DT2M` BUM, and **the BGP EVPN control-plane tee** — zebra-rs
+(`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
+per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
+IMETs, and the `FibHandle` tee installs remote MACs, the BUM sentinel, and
+the local L2 service SIDs into cradle, so **BGP EVPN over SRv6 programs the
+L2 data plane end to end** (the L2 analog of the L3VPN tee). This was the
+last Phase-4 SRv6 item. It builds on the SRv6 encap/decap geometry (Phases
+1–4) and the L2 switching MVP ([l2-switching.md](l2-switching.md)); the FDB,
+flood, and per-BD member maps already exist.
 
 ## Packet format
 
@@ -98,6 +103,12 @@ bridge domain, kernel forwarding/seg6 off on the PEs.
   must ride `End.DT2M` (the all-ones-MAC FDB sentinel → fd00:2::200); the reply
   and ping then ride `End.DT2U`. A successful ping proves the BUM path carried
   the ARP (`srv6_l2_bum` @pe1, `srv6_l2_decap` @pe2).
+- `cradle_evpn_srv6_zebra` — the control-plane tee: cradle+zebra on both PEs,
+  iBGP L2VPN-EVPN (`encapsulation srv6`) over an IS-IS SRv6 underlay, **no
+  static cradle FDB and no static ARP** — every overlay entry (remote MACs,
+  the BUM sentinel, the local DT2U/DT2M SIDs, the underlay locator routes)
+  arrives via the tee. Asserts the BGP session, c1↔c2 reach, and
+  `srv6_l2_bum`/`srv6_l2_encap` @pe1 + `srv6_l2_decap` @pe2.
 
 Mandatory teardown on each.
 
@@ -113,14 +124,34 @@ Mandatory teardown on each.
    CEs) needs — `clone_redirect` can't encap and TC can't encap non-IP, so the
    likely shape is an XDP flood that encaps one copy per remote SID and
    `clone_redirect`s locals, or a recirculation.
-3. **Slice 3 — data-plane learning + the zebra tee**. Learn remote MAC →
-   remote SID from decapped frames (EVPN Type-2 in the control plane); tee
-   BGP EVPN routes (Type-2 → remote FDB, Type-3 → per-BD DT2M list) so a real
-   EVPN control plane drives it. `End.M` egress-protection mirror.
+3. **Slice 3 — the BGP EVPN control-plane tee** *(done)*. zebra-rs grew
+   `End.DT2U` over SRv6 (RFC 9252 §6.1/§6.2): a `router bgp afi-safi evpn
+   encapsulation srv6` knob, per-VNI `End.DT2U` allocation next to the
+   existing `End.DT2M` allocator, the DT2U SRv6 L2 Service TLV on originated
+   Type-2 routes, and extraction of the peer's DT2U/DT2M SIDs on receive.
+   The tee (all in `FibHandle`):
+   - **Type-2 → `AddFdbRemote`** — `MacAdd` carries `srv6_sid`; with a SID
+     the entry is cradle-only (no kernel VXLAN FDB row, no VXLAN device
+     required) with `nexthop_id: 0` — cradle resolves the underlay adjacency
+     by a **FIB6 lookup on the SID** in the datapath (the IGP locator route,
+     itself teed), so the control plane never pre-resolves nexthops for L2.
+   - **Type-3 → the all-ones BUM sentinel** — a remote `End.DT2M` SID on an
+     IMET is sent as `MacAdd { mac: ff:ff:ff:ff:ff:ff, srv6_sid }`, feeding
+     the same pathway.
+   - **Local L2 SIDs → `AddLocalSid`** — the per-VNI DT2U/DT2M SIDs register
+     in the RIB SID registry (`SidBehavior::EndDT2U/EndDT2M`, `table_id` =
+     VNI = bridge domain) and ride the existing Phase-3 local-SID tee;
+     `route_sid_install` skips netlink for them (no kernel seg6local action).
+   `cradle_evpn_srv6_zebra` BDD: iBGP EVPN over IS-IS SRv6, kernel
+   bridge+vxlan as zebra's VNI/local-MAC source (a static bridge FDB entry
+   on a dummy port originates the CE MAC — cradle owns the CE port, so the
+   kernel never sees CE traffic), no static ARP, no static cradle FDB.
 
 ## Out of scope (still design)
 
 Multi-PE / multi-local-CE ingress replication (per-copy encap), MAC learning
-over the overlay, symmetric IRB (L3 gateway on the SRv6 L2 domain),
-802.1Q-tagged bridge domains, and the EVPN control-plane tee — all listed
-above as Slice 3 / later work.
+over the overlay reported back to zebra (today the local-MAC source is the
+kernel bridge FDB — static entries in the BDD; a cradle→zebra learn channel
+is the missing piece for dynamic local MACs), symmetric IRB (L3 gateway on
+the SRv6 L2 domain), 802.1Q-tagged bridge domains, and `End.M`
+egress-protection.

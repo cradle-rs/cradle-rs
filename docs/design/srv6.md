@@ -25,12 +25,14 @@ cross-connect adjacency). Static gRPC/JSON config for `cradle_srv6`
 (uN container transit), and `cradle_srv6_ualib` (uALib adjacency transit, no
 FIB); zebra-driven `cradle_srv6_l3vpn_zebra` (iBGP VPNv4+VPNv6 over IS-IS SRv6)
 proves the tee. BDDs cover both inner families across a v6 underlay. **EVPN over
-SRv6** has landed `End.DT2U` unicast **and** `End.DT2M` BUM (2-PE): MAC-in-SRv6
-encap (an outer IPv6 with next-header 143, DA = the remote L2 service SID),
-`End.DT2U`/`End.DT2M` decap + bridge/flood, and BUM tunneling via an
-all-ones-MAC FDB sentinel — `cradle_evpn_srv6` + `cradle_evpn_srv6_bum` BDDs;
-see [evpn-srv6.md](evpn-srv6.md). The remainder — multi-PE ingress replication,
-overlay learning, and the EVPN control-plane tee — remains design. It builds on the
+SRv6** is complete for a 2-PE domain: `End.DT2U` unicast, `End.DT2M` BUM, and
+the **BGP EVPN control-plane tee** — zebra advertises per-VNI DT2U/DT2M SIDs
+(RFC 9252, `encapsulation srv6`) and the tee installs remote MACs, the BUM
+sentinel, and the local L2 SIDs, so BGP EVPN over SRv6 programs the L2 data
+plane end to end — `cradle_evpn_srv6` + `cradle_evpn_srv6_bum` +
+`cradle_evpn_srv6_zebra` BDDs; see [evpn-srv6.md](evpn-srv6.md). The remainder —
+multi-PE ingress replication and overlay MAC learning — remains design. It
+builds on the
 [L2–L7 datapath](architecture.md) and reuses mechanisms from the
 [MPLS design](mpls.md) (packet geometry, the shared `cradle_xdp` stage, the
 VRF model, the zebra tee pattern).
@@ -509,8 +511,10 @@ Each scenario ends with the mandatory `Scenario: Teardown topology`.
    decap + L2 bridge/flood via an XDP→TC bridge-domain meta, BUM tunneling via
    an all-ones-MAC FDB sentinel; `FdbEntry` gains `remote_sid`/`FDB_F_REMOTE`;
    static FDB config; `cradle_evpn_srv6` + `cradle_evpn_srv6_bum` BDDs — detailed
-   in [evpn-srv6.md](evpn-srv6.md). **Still design:** a control-plane-driven uSID
+   in [evpn-srv6.md](evpn-srv6.md), including the **BGP EVPN control-plane
+   tee** (`encapsulation srv6`: per-VNI DT2U/DT2M SIDs on Type-2/Type-3, the
+   `MacAdd`/`AddFdbRemote` pathway, local L2 SIDs via the SID registry —
+   `cradle_evpn_srv6_zebra` BDD). **Still design:** a control-plane-driven uSID
    test (IS-IS/OSPFv3 TI-LFA is the only producer of multi-uSID carriers today,
-   via `pack_carriers`), and the rest of EVPN over SRv6 — multi-PE ingress
-   replication, overlay MAC learning, the EVPN control-plane tee, and the
-   `End.M` egress-protection mirror.
+   via `pack_carriers`), multi-PE ingress replication, overlay MAC learning,
+   and the `End.M` egress-protection mirror.

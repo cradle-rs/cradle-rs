@@ -304,6 +304,12 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Remove an overlay FDB entry.
+    pub fn fdb_remote_del(&mut self, mac: [u8; 6], bd: u16) -> Result<()> {
+        self.fdb.remove(&FdbKey { mac, vlan: bd })?;
+        Ok(())
+    }
+
     /// Install/replace a nexthop. `gateway == None` means an on-link/connected
     /// nexthop (the neighbor is resolved by the packet's destination).
     /// A non-empty `labels` is the MPLS out-label stack (swap value /
