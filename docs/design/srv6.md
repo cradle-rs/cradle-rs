@@ -539,4 +539,22 @@ Each scenario ends with the mandatory `Scenario: Teardown topology`.
    stacks and the packet leaves via that route's nexthop. `cradle_endm`
    proves the whole arc (BGP VPNv6 + `pic-retention` + IS-IS Mirror SID
    node-protection retention; kill the egress node, ping survives via the
-   protector's End.M).
+   protector's End.M). **Flavors (RFC 8986 §4.16)** are done: `LocalSid`
+   carries a `flavors` bitmask (`SRV6_FLAVOR_PSP/USP/USD`, proto field 12) —
+   `srv6_end` pops the SRH when its own decrement exhausts it (PSP, also on
+   End.X/uA), pops an already-exhausted SRH before local delivery (USP), or
+   decapsulates the outer IPv6+SRH and forwards the inner packet by the main
+   table (USD, tried before USP per the RFC's composite). Conformance
+   choices: USP/USD apply to End/uN only — the End.X variants would forward
+   the result via the adjacency (incl. an IPv4 adjacency forward) and are
+   neither executed nor advertised (End.X folds only PSP); USP's local
+   delivery additionally needs the SID as a kernel-local address, which
+   zebra does not install — BDD-provable, production-limited; the SRH must
+   be the first extension header (the existing `srv6_end` gate). zebra: the
+   locator's `flavor` leaf-list folds into the advertised IANA codepoints
+   (IS-IS + OSPFv3, `Behavior::with_flavors`; the classic USD block in
+   `isis-packet` was off by one vs IANA and is now pinned by test) and into
+   the kernel install's single `SEG6_LOCAL_FLV_OPERATION` bitmask NLA.
+   `cradle_srv6_flavors` proves all three statically; `cradle_tilfa_psp`
+   proves PSP end-to-end (the TI-LFA repair pop lets r2 take the handoff
+   with `seg6_enabled` off everywhere).

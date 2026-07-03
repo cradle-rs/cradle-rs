@@ -76,6 +76,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_hinsert",
     "nh_backup",
     "srv6_endm",
+    "srv6_psp",
+    "srv6_usp",
+    "srv6_usd",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -540,9 +543,10 @@ impl Control {
         nexthop_id: u32,
         block_bits: u8,
         node_bits: u8,
+        flavors: u8,
     ) -> Result<()> {
         self.dp.lock().await.localsid_add(
-            sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits,
+            sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits, flavors,
         )?;
         Ok(())
     }
@@ -848,6 +852,12 @@ impl Cradle for GrpcService {
         let behavior = srv6_behavior(s.behavior).map_err(st)?;
         // uSID (uN/uA) NEXT-C-SID shift geometry: the locator block / node
         // (micro-SID) bit lengths from the SID structure (`lb_bits`/`ln_bits`).
+        if s.flavors > 7 {
+            return Err(Status::invalid_argument(format!(
+                "unknown SRv6 flavor bits {:#x}",
+                s.flavors
+            )));
+        }
         self.control
             .add_localsid(
                 sid,
@@ -857,6 +867,7 @@ impl Cradle for GrpcService {
                 s.nexthop_id,
                 s.lb_bits as u8,
                 s.ln_bits as u8,
+                s.flavors as u8,
             )
             .await
             .map_err(st)?;

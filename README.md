@@ -124,9 +124,9 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | Flavor | Status | Notes |
 |---|---|---|
 | NEXT-C-SID | ✅ | 16-bit micro-SIDs; blocks 16/32/48 |
-| PSP | ⬜ | |
-| USP | ⬜ | |
-| USD | ⬜ | (End.DT* decap covers the egress case) |
+| PSP | ✅ | pop at the penultimate segment; End/End.X/uN/uA |
+| USP | ✅ | pop before local delivery; End/uN (SID must be a local address) |
+| USD | ✅ | decap + main-table forward; End/uN |
 
 ### Control plane (zebra-rs tee)
 
@@ -139,3 +139,4 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | BGP SR Policy / color steering | ⬜ | needs End.B6 |
 | TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
 | Mirror SID egress protection (End.M) | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
+| Locator flavors (PSP/USP/USD) | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |

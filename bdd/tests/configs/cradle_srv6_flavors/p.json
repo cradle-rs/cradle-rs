@@ -1,0 +1,24 @@
+{
+  "ports": [
+    { "name": "ps", "l3": true },
+    { "name": "pd", "l3": true }
+  ],
+  "srv6_source": "fd00:2::1",
+  "nexthops": [
+    { "id": 1, "oif": "pd", "gateway": "2001:db8:2::2" },
+    { "id": 2, "oif": "ps", "gateway": "2001:db8:1::1" }
+  ],
+  "neighbors": [
+    { "oif": "pd", "ip": "2001:db8:2::2", "mac": "02:00:00:00:0b:02" },
+    { "oif": "ps", "ip": "2001:db8:1::1", "mac": "02:00:00:00:0a:00" }
+  ],
+  "localsids": [
+    { "sid": "fd00:2::e1", "behavior": "end", "flavors": ["psp"] },
+    { "sid": "fd00:2::e2", "behavior": "end" }
+  ],
+  "routes6": [
+    { "prefix": "fd00:3::/64", "nexthop": 1 },
+    { "prefix": "fd00:1::/64", "nexthop": 2 },
+    { "prefix": "fc00:1::/64", "nexthop": 2 }
+  ]
+}

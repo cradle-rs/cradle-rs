@@ -1,0 +1,39 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_tilfa_psp_ctl5.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::12/128
+- if-name: r2-r1
+  ipv6:
+    address: 2001:db8:0:4::2/64
+- if-name: r2-d
+  ipv6:
+    address: 2001:db8:0:5::1/64
+segment-routing:
+  locator:
+  - name: LOC6
+    prefix: fcbb:bbbb:6::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0006.00
+    hostname: r2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC6
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: r2-r1
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+    - if-name: r2-d
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true

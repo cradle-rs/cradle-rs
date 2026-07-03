@@ -777,13 +777,15 @@ impl Dataplane {
         nexthop_id: u32,
         block_bits: u8,
         node_bits: u8,
+        flavors: u8,
     ) -> Result<()> {
         let key = Key::new(prefix_len as u32, sid.octets());
         self.srv6_localsid.insert(
             &key,
             LocalSid {
                 behavior,
-                _pad: [0; 3],
+                flavors,
+                _pad: [0; 2],
                 vrf_id,
                 nexthop_id,
                 block_bits,

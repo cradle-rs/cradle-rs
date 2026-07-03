@@ -232,7 +232,11 @@ pub const MPLS_OP_POP: u8 = 2;
 pub struct LocalSid {
     /// `SRV6_BH_*` behavior.
     pub behavior: u8,
-    pub _pad: [u8; 3],
+    /// `SRV6_FLAVOR_*` bitmask (RFC 8986 §4.16). PSP applies to
+    /// End/End.X/uN/uA; USP/USD are honored for End/uN only (the End.X
+    /// variants would need an adjacency-forward decap — not implemented).
+    pub flavors: u8,
+    pub _pad: [u8; 2],
     /// VRF/table id for `End.DT4/DT6/DT46` (0 = global).
     pub vrf_id: u32,
     /// Nexthop id for `End.X` / `uA` (adjacency cross-connect); 0 otherwise.
@@ -268,6 +272,16 @@ pub const SRV6_BH_END_DT2M: u8 = 10;
 /// (`vrf_id` = the context id) via the `MIRROR` trie, reproducing that
 /// egress's decap locally.
 pub const SRV6_BH_END_M: u8 = 11;
+
+/// SRv6 endpoint flavors (RFC 8986 §4.16), OR-able in `LocalSid::flavors`.
+/// PSP: pop the SRH at the penultimate segment (this node's decrement hits
+/// `SL == 0`), handing the last hop a clean packet.
+pub const SRV6_FLAVOR_PSP: u8 = 1;
+/// USP: pop the exhausted SRH (`SL == 0` on arrival) before local delivery.
+pub const SRV6_FLAVOR_USP: u8 = 2;
+/// USD: decapsulate the outer IPv6 (+SRH) at the ultimate segment and
+/// forward the inner packet (main-table lookup).
+pub const SRV6_FLAVOR_USD: u8 = 4;
 
 /// Mirror-context LPM key (`MIRROR`): the protected egress's SID space,
 /// scoped by the End.M SID's context id — a route `addr/len` in context
@@ -574,8 +588,14 @@ pub const STAT_SRV6_HINSERT: u32 = 25;
 pub const STAT_NH_BACKUP: u32 = 26;
 /// `End.M` mirror decaps (egress protection served on the protector).
 pub const STAT_SRV6_ENDM: u32 = 27;
+/// PSP flavor pops (SRH removed at the penultimate segment).
+pub const STAT_SRV6_PSP: u32 = 28;
+/// USP flavor pops (exhausted SRH removed before local delivery).
+pub const STAT_SRV6_USP: u32 = 29;
+/// USD flavor decaps (outer IPv6+SRH removed, inner forwarded).
+pub const STAT_SRV6_USD: u32 = 30;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 28;
+pub const STAT_MAX: u32 = 31;
 
 // ============================== L7 proxy ===================================
 

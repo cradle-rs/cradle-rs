@@ -114,6 +114,9 @@ pub struct LocalSidCfg {
     /// uSID node (micro-SID) bit length (0 = not a uSID).
     #[serde(default)]
     pub node_bits: u8,
+    /// Endpoint flavors (RFC 8986 §4.16): any of `psp`, `usp`, `usd`.
+    #[serde(default)]
+    pub flavors: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +257,21 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
     })
 }
 
+/// Parse a flavor list (`psp`/`usp`/`usd`) to its `SRV6_FLAVOR_*` bitmask.
+pub fn srv6_flavors(list: &[String]) -> Result<u8> {
+    use cradle_common::*;
+    let mut mask = 0u8;
+    for f in list {
+        mask |= match f.as_str() {
+            "psp" => SRV6_FLAVOR_PSP,
+            "usp" => SRV6_FLAVOR_USP,
+            "usd" => SRV6_FLAVOR_USD,
+            other => anyhow::bail!("unknown SRv6 flavor {other:?}"),
+        };
+    }
+    Ok(mask)
+}
+
 /// Parse an ILM action string to its `MPLS_OP_*` value.
 pub fn ilm_action(action: &str) -> Result<u8> {
     match action {
@@ -349,6 +367,7 @@ impl Config {
                 ls.nexthop,
                 ls.block_bits,
                 ls.node_bits,
+                srv6_flavors(&ls.flavors)?,
             )
             .await?;
         }
