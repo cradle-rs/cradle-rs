@@ -168,10 +168,16 @@ pub struct Vrf4Key {
 #[derive(Clone, Copy, Debug)]
 pub struct CradleXdpMeta {
     pub magic: u32,
+    /// L3 decap (`XDP_META_MAGIC`): the VRF table for the inner IP lookup.
+    /// L2 decap (`XDP_META_MAGIC_L2`): the bridge domain for the inner frame.
     pub vrf_id: u32,
 }
 
+/// L3 (`End.DT4/6/46`) decap: TC routes the inner IP packet in `vrf_id`.
 pub const XDP_META_MAGIC: u32 = 0xC7AD_1E01;
+/// L2 (`End.DT2U`) decap: TC bridges the inner Ethernet frame in `vrf_id`
+/// (reused as the bridge domain), regardless of the underlay port's type.
+pub const XDP_META_MAGIC_L2: u32 = 0xC7AD_1E02;
 
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
@@ -247,6 +253,11 @@ pub const SRV6_BH_UA: u8 = 7;
 /// then forward out the cross-connect adjacency (matched at a block+function
 /// prefix, mid-carrier after a uN shift).
 pub const SRV6_BH_UALIB: u8 = 8;
+/// `End.DT2U`: decapsulate + unicast L2 (EVPN-over-SRv6) — the SID's `vrf_id`
+/// carries the bridge domain the inner Ethernet frame is switched in.
+pub const SRV6_BH_END_DT2U: u8 = 9;
+/// `End.DT2M`: decapsulate + BUM L2 flood (EVPN-over-SRv6). Slice 2.
+pub const SRV6_BH_END_DT2M: u8 = 10;
 
 /// Maximum SIDs in an imposed segment list (bounds the encap/SRH loops).
 pub const MAX_SEGS: usize = 6;
@@ -304,12 +315,20 @@ pub struct FdbKey {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FdbEntry {
+    /// Local egress ifindex; for an `FDB_F_REMOTE` entry this is instead the
+    /// underlay nexthop id used to reach `remote_sid`.
     pub oif: u32,
     pub flags: u32,
+    /// EVPN-over-SRv6 overlay target: the remote PE's `End.DT2U` service SID
+    /// this MAC sits behind (`FDB_F_REMOTE` only; zero otherwise).
+    pub remote_sid: [u8; 16],
 }
 
 /// This MAC is one of ours — punt the frame up to L3 / the host stack.
 pub const FDB_F_LOCAL: u32 = 1 << 0;
+/// This MAC is behind an SRv6 overlay: `remote_sid` is its `End.DT2U` SID and
+/// `oif` is the underlay nexthop id (EVPN over SRv6).
+pub const FDB_F_REMOTE: u32 = 1 << 1;
 
 /// Membership of an L2 (VLAN/bridge) domain — enumerates the ports a BUM or
 /// unknown-unicast frame is flooded to. Keyed by `(vlan, slot)` where `slot` is
@@ -495,8 +514,12 @@ pub const STAT_FIB6_VRF_HIT: u32 = 18;
 pub const STAT_SRV6_END: u32 = 19;
 /// SRv6 uSID: uN NEXT-C-SID transit (micro-SID container shift).
 pub const STAT_SRV6_USID: u32 = 20;
+/// EVPN over SRv6: MAC-in-SRv6 L2 encapsulation (ingress PE).
+pub const STAT_SRV6_L2_ENCAP: u32 = 21;
+/// EVPN over SRv6: `End.DT2U` L2 decapsulation (egress PE).
+pub const STAT_SRV6_L2_DECAP: u32 = 22;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 21;
+pub const STAT_MAX: u32 = 23;
 
 // ============================== L7 proxy ===================================
 
@@ -518,11 +541,31 @@ mod user {
     }
 
     pod!(
-        FibEntry, NextHop, Neigh4Key, Neigh6Key, NeighEntry, NhGroupKey,
-        MplsEntry, Vrf4Key, Vrf6Key, LocalSid, Srv6Encap,
-        FdbKey, FdbEntry, PortConfig, L2MemberKey,
-        ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
-        ServiceKey6, Backend6, CtKey6, CtEntry6,
+        FibEntry,
+        NextHop,
+        Neigh4Key,
+        Neigh6Key,
+        NeighEntry,
+        NhGroupKey,
+        MplsEntry,
+        Vrf4Key,
+        Vrf6Key,
+        LocalSid,
+        Srv6Encap,
+        FdbKey,
+        FdbEntry,
+        PortConfig,
+        L2MemberKey,
+        ServiceKey,
+        ServiceInfo,
+        BackendKey,
+        Backend,
+        CtKey,
+        CtEntry,
+        ServiceKey6,
+        Backend6,
+        CtKey6,
+        CtEntry6,
     );
 }
 
@@ -545,7 +588,12 @@ mod tests {
 
     #[test]
     fn fibw_round_trip() {
-        for (nh, flags) in [(0, 0), (1, FIB_F_LOCAL), (0x3ff_ffff, 0xf), (42, FIB_F_ECMP)] {
+        for (nh, flags) in [
+            (0, 0),
+            (1, FIB_F_LOCAL),
+            (0x3ff_ffff, 0xf),
+            (42, FIB_F_ECMP),
+        ] {
             let w = fibw_entry(nh, flags);
             assert_ne!(w & FIBW_VALID, 0);
             assert_eq!(w & FIBW_TBL8, 0);
@@ -564,7 +612,10 @@ mod tests {
     #[test]
     fn lse_wire_layout() {
         // RFC 3032: label 16, TC 0, S 1, TTL 64 => 0x00 01 01 40 on the wire.
-        assert_eq!(mpls_lse(16, 0, 1, 64).to_be_bytes(), [0x00, 0x01, 0x01, 0x40]);
+        assert_eq!(
+            mpls_lse(16, 0, 1, 64).to_be_bytes(),
+            [0x00, 0x01, 0x01, 0x40]
+        );
         // Label field is masked to 20 bits.
         assert_eq!(mpls_lse(0x1f_ffff, 0, 0, 0) >> 12, 0xf_ffff);
     }

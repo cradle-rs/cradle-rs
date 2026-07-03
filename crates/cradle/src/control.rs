@@ -68,6 +68,8 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "fib6_vrf_hit",
     "srv6_end",
     "srv6_usid",
+    "srv6_l2_encap",
+    "srv6_l2_decap",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -115,17 +117,15 @@ impl Control {
         if let Err(e) = crate::kernel::add_local_route_v4(vip) {
             warn!("L7 {vip}:{port}: could not install local route: {e:#} (TPROXY may not deliver)");
         }
-        self.routes
-            .lock()
-            .await
-            .add(IpAddr::V4(vip), port, routes);
+        self.routes.lock().await.add(IpAddr::V4(vip), port, routes);
         Ok(())
     }
 
-    /// Attach the datapath classifier to a port's clsact ingress (idempotent).
-    /// L3 ports additionally get the XDP MPLS-pop stage (`bpf_skb_adjust_room`
-    /// can't shrink an MPLS frame at TC, so pops run before the skb exists).
-    async fn attach(&self, name: &str, ifindex: u32, l3: bool) -> Result<()> {
+    /// Attach the datapath classifier to a port's clsact ingress (idempotent),
+    /// plus the XDP stage — L3 ports use it for MPLS pops / SRv6 `End.DT*`
+    /// decap, L2 ports for EVPN-over-SRv6 MAC-in-SRv6 encap (`bpf_skb_adjust_room`
+    /// can't resize non-IP or MPLS skbs at TC, so the grow/shrink runs in XDP).
+    async fn attach(&self, name: &str, ifindex: u32, _l3: bool) -> Result<()> {
         let mut attached = self.attached.lock().await;
         if !attached.insert(ifindex) {
             return Ok(());
@@ -141,7 +141,7 @@ impl Control {
         prog.attach(name, TcAttachType::Ingress)
             .with_context(|| format!("attaching to {name}"))?;
         info!("attached cradle datapath to {name} (clsact ingress)");
-        if l3 {
+        {
             let xdp: &mut Xdp = bpf
                 .program_mut("cradle_xdp")
                 .context("program cradle_xdp not found")?
@@ -199,6 +199,23 @@ impl Control {
             .map(|m| util::ifindex_of(m))
             .collect::<Result<Vec<_>>>()?;
         self.dp.lock().await.l2_domain_set(vlan, &idxs)?;
+        Ok(())
+    }
+
+    /// Program a static overlay FDB entry: `mac` in bridge domain `bd` is behind
+    /// the remote `End.DT2U` `remote_sid`, reached via underlay `nexthop_id`
+    /// (EVPN over SRv6).
+    pub async fn add_fdb_remote(
+        &self,
+        mac: [u8; 6],
+        bd: u16,
+        remote_sid: Ipv6Addr,
+        nexthop_id: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .fdb_remote_add(mac, bd, remote_sid, nexthop_id)?;
         Ok(())
     }
 
@@ -264,7 +281,10 @@ impl Control {
         oif: u32,
         labels: &[u32],
     ) -> Result<()> {
-        self.dp.lock().await.nexthop_set_v6(id, gateway, oif, labels)?;
+        self.dp
+            .lock()
+            .await
+            .nexthop_set_v6(id, gateway, oif, labels)?;
         Ok(())
     }
 
@@ -301,7 +321,10 @@ impl Control {
         oif: u32,
         segs: &[Ipv6Addr],
     ) -> Result<()> {
-        self.dp.lock().await.nexthop_set_srv6(id, gateway, oif, segs)?;
+        self.dp
+            .lock()
+            .await
+            .nexthop_set_srv6(id, gateway, oif, segs)?;
         Ok(())
     }
 
@@ -323,10 +346,9 @@ impl Control {
         block_bits: u8,
         node_bits: u8,
     ) -> Result<()> {
-        self.dp
-            .lock()
-            .await
-            .localsid_add(sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits)?;
+        self.dp.lock().await.localsid_add(
+            sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits,
+        )?;
         Ok(())
     }
 
@@ -360,7 +382,10 @@ impl Control {
 
     /// Install an ILM (incoming-label map) entry.
     pub async fn add_ilm(&self, in_label: u32, nexthop_id: u32, op: u8, vrf_id: u32) -> Result<()> {
-        self.dp.lock().await.ilm_add(in_label, nexthop_id, op, vrf_id)?;
+        self.dp
+            .lock()
+            .await
+            .ilm_add(in_label, nexthop_id, op, vrf_id)?;
         Ok(())
     }
 
@@ -620,7 +645,11 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let s = req.into_inner();
         let sid: Ipv6Addr = s.sid.parse().map_err(st)?;
-        let prefix_len = if s.prefix_len == 0 { 128 } else { s.prefix_len as u8 };
+        let prefix_len = if s.prefix_len == 0 {
+            128
+        } else {
+            s.prefix_len as u8
+        };
         let behavior = srv6_behavior(s.behavior).map_err(st)?;
         // uSID (uN/uA) NEXT-C-SID shift geometry: the locator block / node
         // (micro-SID) bit lengths from the SID structure (`lb_bits`/`ln_bits`).
@@ -645,8 +674,15 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let s = req.into_inner();
         let sid: Ipv6Addr = s.sid.parse().map_err(st)?;
-        let prefix_len = if s.prefix_len == 0 { 128 } else { s.prefix_len as u8 };
-        self.control.del_localsid(sid, prefix_len).await.map_err(st)?;
+        let prefix_len = if s.prefix_len == 0 {
+            128
+        } else {
+            s.prefix_len as u8
+        };
+        self.control
+            .del_localsid(sid, prefix_len)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

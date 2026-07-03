@@ -24,9 +24,12 @@ cross-connect adjacency). Static gRPC/JSON config for `cradle_srv6`
 (single-SID), `cradle_srv6_te` (2-SID SR-TE via End + End.X), `cradle_srv6_usid`
 (uN container transit), and `cradle_srv6_ualib` (uALib adjacency transit, no
 FIB); zebra-driven `cradle_srv6_l3vpn_zebra` (iBGP VPNv4+VPNv6 over IS-IS SRv6)
-proves the tee. BDDs cover both inner families across a v6 underlay. The rest of
-Phase 4 — EVPN over SRv6 (L2 `End.DT2U`/`DT2M`, `End.M`) — remains design (gated
-on maturing cradle's L2 datapath). It builds on the
+proves the tee. BDDs cover both inner families across a v6 underlay. **EVPN over
+SRv6** has landed its first slice — `End.DT2U` unicast: MAC-in-SRv6 encap (an
+outer IPv6 with next-header 143, DA = the remote L2 service SID) and `End.DT2U`
+decap + bridge, `cradle_evpn_srv6` BDD; see [evpn-srv6.md](evpn-srv6.md). The
+remainder — `End.DT2M`/BUM, overlay learning, and the EVPN control-plane tee —
+remains design. It builds on the
 [L2–L7 datapath](architecture.md) and reuses mechanisms from the
 [MPLS design](mpls.md) (packet geometry, the shared `cradle_xdp` stage, the
 VRF model, the zebra tee pattern).
@@ -500,9 +503,12 @@ Each scenario ends with the mandatory `Scenario: Teardown topology`.
    adjacency delivers). `LocalSid.block_bits`/`node_bits` carry the shift geometry,
    set by the static `localsids` config and by the tee (from the SID structure's
    `lb_bits`/`ln_bits`; the tee maps `UN`→`SRV6_BH_UN`, `UA`→`SRV6_BH_UA`,
-   `UALib`→`SRV6_BH_UALIB`). **Still design:** a control-plane-driven uSID test
-   (IS-IS/OSPFv3 TI-LFA is the only producer of multi-uSID carriers today, via
-   `pack_carriers`), and **EVPN over SRv6** (L2 `End.DT2U`/`DT2M` + the `End.M`
-   egress-protection mirror), which is gated on maturing cradle's L2 datapath
-   (today a single-domain flood-and-learn MVP — no 802.1Q, bridge domains, or
-   overlay encap) before L2VPN can land.
+   `UALib`→`SRV6_BH_UALIB`). **EVPN over SRv6** has its first slice — `End.DT2U`
+   unicast (MAC-in-SRv6 encap in the XDP stage, `End.DT2U` decap + L2 bridge via
+   an XDP→TC bridge-domain meta; `FdbEntry` gains `remote_sid`/`FDB_F_REMOTE`;
+   static FDB config; `cradle_evpn_srv6` BDD) — detailed in
+   [evpn-srv6.md](evpn-srv6.md). **Still design:** a control-plane-driven uSID
+   test (IS-IS/OSPFv3 TI-LFA is the only producer of multi-uSID carriers today,
+   via `pack_carriers`), and the rest of EVPN over SRv6 — `End.DT2M`/BUM
+   ingress replication, overlay MAC learning, the EVPN control-plane tee, and
+   the `End.M` egress-protection mirror.
