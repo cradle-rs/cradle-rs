@@ -6,16 +6,19 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–3 implemented** for a 2-PE domain: `End.DT2U` unicast,
-`End.DT2M` BUM, and **the BGP EVPN control-plane tee** — zebra-rs
+Status: **Slices 1–4 implemented** for a 2-PE domain: `End.DT2U` unicast,
+`End.DT2M` BUM, **the BGP EVPN control-plane tee** — zebra-rs
 (`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
 per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
 IMETs, and the `FibHandle` tee installs remote MACs, the BUM sentinel, and
-the local L2 service SIDs into cradle, so **BGP EVPN over SRv6 programs the
-L2 data plane end to end** (the L2 analog of the L3VPN tee). This was the
-last Phase-4 SRv6 item. It builds on the SRv6 encap/decap geometry (Phases
-1–4) and the L2 switching MVP ([l2-switching.md](l2-switching.md)); the FDB,
-flood, and per-BD member maps already exist.
+the local L2 service SIDs into cradle — and **the cradle→zebra MAC-learn
+channel** (`WatchFdb`), which streams datapath-learned CE MACs up so zebra
+originates Type-2 routes for them. **BGP EVPN over SRv6 programs the L2
+data plane end to end, fully dynamically** (the L2 analog of the L3VPN
+tee, plus the reverse channel L3 never needed). This was the last Phase-4
+SRv6 item. It builds on the SRv6 encap/decap geometry (Phases 1–4) and the
+L2 switching MVP ([l2-switching.md](l2-switching.md)); the FDB, flood, and
+per-BD member maps already exist.
 
 ## Packet format
 
@@ -103,12 +106,16 @@ bridge domain, kernel forwarding/seg6 off on the PEs.
   must ride `End.DT2M` (the all-ones-MAC FDB sentinel → fd00:2::200); the reply
   and ping then ride `End.DT2U`. A successful ping proves the BUM path carried
   the ARP (`srv6_l2_bum` @pe1, `srv6_l2_decap` @pe2).
-- `cradle_evpn_srv6_zebra` — the control-plane tee: cradle+zebra on both PEs,
-  iBGP L2VPN-EVPN (`encapsulation srv6`) over an IS-IS SRv6 underlay, **no
-  static cradle FDB and no static ARP** — every overlay entry (remote MACs,
-  the BUM sentinel, the local DT2U/DT2M SIDs, the underlay locator routes)
-  arrives via the tee. Asserts the BGP session, c1↔c2 reach, and
-  `srv6_l2_bum`/`srv6_l2_encap` @pe1 + `srv6_l2_decap` @pe2.
+- `cradle_evpn_srv6_zebra` — the control-plane tee + learn channel:
+  cradle+zebra on both PEs, iBGP L2VPN-EVPN (`encapsulation srv6`) over an
+  IS-IS SRv6 underlay, **fully dynamic** — no static ARP, no static cradle
+  FDB, and no static kernel FDB. CE MACs are learned by the XDP stage,
+  streamed to zebra over `WatchFdb`, advertised as Type-2 (with the DT2U
+  SID), and installed on the remote PE via the tee; the BUM sentinel, local
+  L2 SIDs, and locator routes arrive via the tee too. Asserts the BGP
+  session, c1↔c2 reach, and `srv6_l2_bum`/`srv6_l2_encap` @pe1 +
+  `srv6_l2_decap` @pe2 (`srv6_l2_encap` nonzero proves a learned MAC made
+  the full loop: XDP learn → WatchFdb → Type-2 → remote tee → DT2U encap).
 
 Mandatory teardown on each.
 
@@ -143,15 +150,31 @@ Mandatory teardown on each.
      VNI = bridge domain) and ride the existing Phase-3 local-SID tee;
      `route_sid_install` skips netlink for them (no kernel seg6local action).
    `cradle_evpn_srv6_zebra` BDD: iBGP EVPN over IS-IS SRv6, kernel
-   bridge+vxlan as zebra's VNI/local-MAC source (a static bridge FDB entry
-   on a dummy port originates the CE MAC — cradle owns the CE port, so the
-   kernel never sees CE traffic), no static ARP, no static cradle FDB.
+   bridge+vxlan as zebra's VNI declaration, no static ARP, no static
+   cradle FDB.
+4. **Slice 4 — the cradle→zebra MAC-learn channel** *(done)*. The reverse
+   direction, making the L2VPN fully dynamic:
+   - **XDP learning** — `l2_evpn_xdp` learns the CE source MAC (the TC
+     `l2_switch` learn never sees frames the XDP stage tunnels), and
+     **unknown unicast** now also rides the BUM sentinel (the "U" in BUM),
+     so a first bidirectional exchange completes before BGP converges.
+   - **`WatchFdb`** — a server-streaming gRPC on cradle: a 1s poll of the
+     FDB map diffs locally-learned `(mac, bd)` entries (never remote/
+     sentinel ones) and streams them; a fresh subscription replays the
+     current set. Learns only — cradle has no FDB aging yet.
+   - **zebra watcher** — spawned with the tee (`system cradle-grpc`),
+     reconnects with backoff; each event synthesizes the same `FdbAdd` a
+     kernel bridge learn produces (VNI = bridge domain, `vxlan_local`
+     resolved from the VNI's vxlan device), so BGP originates the Type-2
+     with the DT2U SID exactly as for a kernel-learned MAC.
+   The `cradle_evpn_srv6_zebra` BDD runs fully dynamic: no static kernel
+   FDB either — CE MACs are datapath-learned, streamed up, advertised,
+   and installed back down on the remote PE.
 
 ## Out of scope (still design)
 
-Multi-PE / multi-local-CE ingress replication (per-copy encap), MAC learning
-over the overlay reported back to zebra (today the local-MAC source is the
-kernel bridge FDB — static entries in the BDD; a cradle→zebra learn channel
-is the missing piece for dynamic local MACs), symmetric IRB (L3 gateway on
-the SRv6 L2 domain), 802.1Q-tagged bridge domains, and `End.M`
-egress-protection.
+Multi-PE / multi-local-CE ingress replication (per-copy encap), FDB aging
+(both in the datapath and as `WatchFdb` age events → Type-2 withdraws),
+MAC mobility (the learn channel reports learns; a move needs a sequence-
+number bump), symmetric IRB (L3 gateway on the SRv6 L2 domain),
+802.1Q-tagged bridge domains, and `End.M` egress-protection.

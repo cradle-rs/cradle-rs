@@ -18,14 +18,17 @@ Feature: BGP EVPN over SRv6 programs the eBPF L2 data plane
    10.0.0.1                                                              10.0.0.2
   ```
   Each PE also carries a kernel bridge (br100 + the zebra-created vxlan100)
-  purely as zebra's control-plane view — vxlan100 supplies the VNI and a
-  static FDB entry on a dummy bridge port supplies the local CE MAC that
-  zebra originates as Type-2 (cradle owns the CE port, so the kernel never
-  sees CE traffic to learn from). No static ARP and no static cradle FDB:
-  c1's ARP rides the tee-installed End.DT2M sentinel, the replies and pings
-  ride the tee-installed End.DT2U entries, and the underlay adjacency is
-  resolved in the datapath by a FIB6 lookup on the SID (the IS-IS locator
-  route, itself teed).
+  purely as zebra's VNI declaration — cradle owns the CE port and the whole
+  datapath. Local MACs flow UP from the datapath: cradle's XDP stage learns
+  the CE source MAC and streams it to zebra over the WatchFdb gRPC channel;
+  zebra originates the Type-2 exactly as it would for a kernel bridge learn.
+  Fully dynamic — no static ARP, no static cradle FDB, and no static kernel
+  FDB: c1's first ARP rides the tee-installed End.DT2M sentinel (unknown
+  unicast floods over the overlay too, so the exchange completes before BGP
+  converges), the learned MACs become Type-2 routes within a poll interval,
+  and traffic flips to the tee-installed End.DT2U entries. The underlay
+  adjacency resolves in the datapath by a FIB6 lookup on the SID (the IS-IS
+  locator route, itself teed).
 
   Scenario: Bridge two CEs across a BGP-EVPN-over-SRv6 eBPF data plane
     Given a clean test environment
@@ -50,23 +53,15 @@ Feature: BGP EVPN over SRv6 programs the eBPF L2 data plane
     And I start zebra-rs in namespace "pe1" with config "pe1.yaml" teeing to cradle as "ctl1"
     And I start zebra-rs in namespace "pe2" with config "pe2.yaml" teeing to cradle as "ctl2"
     And I wait 3 seconds
-    # zebra's control-plane bridge: enslave the zebra-created vxlan100 (the
-    # VNI source) and hang the local CE MAC on a dummy port as a static FDB
-    # entry (the Type-2 origination source — cradle owns the real CE port).
+    # zebra's VNI declaration: enslave the zebra-created vxlan100 to a bridge
+    # so the bridge↔VNI mapping exists. No FDB entries — local CE MACs are
+    # learned by the cradle datapath and stream up over WatchFdb.
     And I execute "ip link add br100 type bridge" in namespace "pe1"
     And I execute "ip link set vxlan100 master br100" in namespace "pe1"
-    And I execute "ip link add dum100 type dummy" in namespace "pe1"
-    And I execute "ip link set dum100 master br100" in namespace "pe1"
     And I execute "ip link set br100 up" in namespace "pe1"
-    And I execute "ip link set dum100 up" in namespace "pe1"
-    And I execute "bridge fdb add 02:00:00:00:c1:01 dev dum100 master static" in namespace "pe1"
     And I execute "ip link add br100 type bridge" in namespace "pe2"
     And I execute "ip link set vxlan100 master br100" in namespace "pe2"
-    And I execute "ip link add dum100 type dummy" in namespace "pe2"
-    And I execute "ip link set dum100 master br100" in namespace "pe2"
     And I execute "ip link set br100 up" in namespace "pe2"
-    And I execute "ip link set dum100 up" in namespace "pe2"
-    And I execute "bridge fdb add 02:00:00:00:c2:02 dev dum100 master static" in namespace "pe2"
     And I wait 60 seconds for BGP to operate
     Then BGP session in "pe1" to "2001:db8::2" should be "Established"
     And ping from "c1" to "10.0.0.2" should eventually succeed

@@ -1343,32 +1343,66 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     }
 }
 
-/// EVPN-over-SRv6 ingress. A **BUM** frame (broadcast/multicast) is tunneled to
-/// the bridge domain's `End.DT2M` SID — the all-ones-MAC FDB entry is the
-/// per-BD BUM sentinel (in a 2-PE / single-local-CE domain that is the whole
-/// flood set; local flood + multi-remote replication is a later slice). A
-/// **known-remote unicast** (`FDB_F_REMOTE`) is MAC-in-SRv6 encapsulated toward
-/// its `End.DT2U` SID. Everything else passes to the TC `l2_switch` (local
-/// forward / flood / learn).
+/// The bridge domain's BUM tunnel: the all-ones-MAC FDB entry (installed by
+/// static config or the EVPN Type-3 tee), pointing at the remote `End.DT2M`
+/// SID. `None` when the BD has no overlay BUM tunnel.
 #[inline(always)]
-fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
-    let dst = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? };
-    if dst[0] & 0x01 != 0 {
-        let ent: FdbEntry = match FDB.get_ptr(&FdbKey {
+fn l2_evpn_bum_tunnel(bd: u16) -> Option<FdbEntry> {
+    let ent: FdbEntry = unsafe {
+        *FDB.get_ptr(&FdbKey {
             mac: [0xff; 6],
             vlan: bd,
-        }) {
-            Some(e) => unsafe { *e },
-            None => return Ok(xdp_action::XDP_PASS), // no BUM tunnel → TC local flood
+        })?
+    };
+    if ent.flags & FDB_F_REMOTE == 0 {
+        return None;
+    }
+    Some(ent)
+}
+
+/// EVPN-over-SRv6 ingress. Learns the source MAC first (frames on a local L2
+/// port belong to local stations; the TC `l2_switch` learn never sees frames
+/// this stage tunnels, and the user-space `WatchFdb` stream reports these
+/// entries up to the control plane for EVPN Type-2 origination). Then, by
+/// destination: **BUM** — broadcast/multicast *and unknown unicast* — is
+/// tunneled to the bridge domain's `End.DT2M` SID via the all-ones-MAC FDB
+/// sentinel (in a 2-PE / single-local-CE domain that one remote copy is the
+/// whole flood set; local flood + multi-remote replication is a later slice);
+/// a **known-remote unicast** (`FDB_F_REMOTE`) is MAC-in-SRv6 encapsulated
+/// toward its `End.DT2U` SID. Everything else passes to the TC `l2_switch`.
+#[inline(always)]
+fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
+    let src = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? };
+    if src[0] & 0x01 == 0 {
+        let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+        let _ = FDB.insert(
+            &FdbKey { mac: src, vlan: bd },
+            &FdbEntry {
+                oif: iif,
+                flags: 0,
+                remote_sid: [0; 16],
+            },
+            0,
+        );
+    }
+    let dst = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? };
+    if dst[0] & 0x01 != 0 {
+        let Some(ent) = l2_evpn_bum_tunnel(bd) else {
+            return Ok(xdp_action::XDP_PASS); // no BUM tunnel → TC local flood
         };
-        if ent.flags & FDB_F_REMOTE == 0 {
-            return Ok(xdp_action::XDP_PASS);
-        }
         return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
     }
     let ent: FdbEntry = match FDB.get_ptr(&FdbKey { mac: dst, vlan: bd }) {
         Some(e) => unsafe { *e },
-        None => return Ok(xdp_action::XDP_PASS), // unknown → TC flood
+        None => {
+            // Unknown unicast — the "U" in BUM: flood it over the overlay
+            // too, so a not-yet-advertised remote station is reachable the
+            // moment it exists (its reply seeds both PEs' tables).
+            let Some(ent) = l2_evpn_bum_tunnel(bd) else {
+                return Ok(xdp_action::XDP_PASS); // no tunnel → TC local flood
+            };
+            return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
+        }
     };
     if ent.flags & FDB_F_REMOTE == 0 {
         return Ok(xdp_action::XDP_PASS); // local → TC forward

@@ -228,6 +228,11 @@ impl Control {
         Ok(())
     }
 
+    /// Snapshot the locally-learned FDB (see `Dataplane::fdb_local_entries`).
+    pub async fn fdb_local_entries(&self) -> Vec<([u8; 6], u16)> {
+        self.dp.lock().await.fdb_local_entries()
+    }
+
     pub async fn set_nexthop(
         &self,
         id: u32,
@@ -730,6 +735,45 @@ impl Cradle for GrpcService {
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
+    }
+
+    type WatchFdbStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FdbEvent, Status>>;
+
+    /// Stream datapath MAC learning to the control plane: a 1s poll of the
+    /// FDB map, diffed against the entries already reported on this stream
+    /// (a fresh subscription replays the full current set first). Learns
+    /// only — cradle has no FDB aging yet.
+    async fn watch_fdb(
+        &self,
+        _req: Request<pb::WatchFdbRequest>,
+    ) -> Result<Response<Self::WatchFdbStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let control = self.control.clone();
+        tokio::spawn(async move {
+            let mut seen: std::collections::HashSet<([u8; 6], u16)> =
+                std::collections::HashSet::new();
+            loop {
+                for (mac, bd) in control.fdb_local_entries().await {
+                    if !seen.insert((mac, bd)) {
+                        continue;
+                    }
+                    let ev = pb::FdbEvent {
+                        mac: format!(
+                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                        ),
+                        bd: bd as u32,
+                    };
+                    if tx.send(Ok(ev)).await.is_err() {
+                        return; // subscriber went away
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     async fn set_neighbor4(
