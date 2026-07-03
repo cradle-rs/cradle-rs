@@ -516,10 +516,13 @@ pub const STAT_SRV6_END: u32 = 19;
 pub const STAT_SRV6_USID: u32 = 20;
 /// EVPN over SRv6: MAC-in-SRv6 L2 encapsulation (ingress PE).
 pub const STAT_SRV6_L2_ENCAP: u32 = 21;
-/// EVPN over SRv6: `End.DT2U` L2 decapsulation (egress PE).
+/// EVPN over SRv6: `End.DT2U`/`End.DT2M` L2 decapsulation (egress PE).
 pub const STAT_SRV6_L2_DECAP: u32 = 22;
+/// EVPN over SRv6: BUM (broadcast/multicast/unknown) MAC-in-SRv6 encap toward
+/// the bridge domain's `End.DT2M` SID (ingress PE).
+pub const STAT_SRV6_L2_BUM: u32 = 23;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 23;
+pub const STAT_MAX: u32 = 24;
 
 // ============================== L7 proxy ===================================
 
