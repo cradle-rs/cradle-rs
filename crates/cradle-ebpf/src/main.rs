@@ -36,17 +36,16 @@ use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
     CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid, MplsEntry,
     Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
-    ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK,
-    FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS,
-    MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
-    PORT_F_L3,
-    SRV6_BH_END, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT,
-    STAT_FIB4_VRF_HIT,
+    ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE,
+    FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
+    MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
+    PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46,
+    SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_USID,
-    XDP_META_MAGIC,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END,
+    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_USID, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -280,13 +279,19 @@ fn l7_redirect(ctx: &TcContext) -> Option<i32> {
 #[inline(always)]
 fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     let iif = ingress_ifindex(ctx);
+    // An SRv6 `End.DT2U` decap in the XDP stage tagged the frame with its
+    // bridge domain: switch the inner Ethernet frame in that domain, whatever
+    // the (underlay) port's own type is.
+    if let Some(bd) = tc_meta_l2(ctx) {
+        return l2_switch(ctx, iif, bd, false);
+    }
     let port: PortConfig = match PORTS.get_ptr(&iif) {
         Some(p) => unsafe { *p },
         None => return Ok(TC_ACT_PIPE as i32),
     };
 
     if port.flags & PORT_F_L2 != 0 {
-        l2_switch(ctx, iif, port.vlan)
+        l2_switch(ctx, iif, port.vlan, true)
     } else if port.flags & PORT_F_L3 != 0 {
         // L7: a TCP flow to an L7-marked VIP is steered to the user-space
         // transparent proxy via bpf_sk_assign (TC_ACT_OK = deliver locally).
@@ -305,16 +310,26 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
 
 // ============================== L2 switching ===============================
 
+/// Bridge a frame in domain `vlan`. `learn` records the source MAC against the
+/// ingress port; the `End.DT2U` decap path passes `false` (the inner frame's
+/// source is a remote MAC reachable over the overlay, not on the underlay port
+/// it arrived through — learning it there would blackhole the return path).
 #[inline(always)]
-fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16) -> Result<i32, ()> {
+fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, learn: bool) -> Result<i32, ()> {
     let dst: [u8; 6] = ctx.load(ETH_DST_OFF).map_err(|_| ())?;
-    let src: [u8; 6] = ctx.load(ETH_SRC_OFF).map_err(|_| ())?;
 
-    let _ = FDB.insert(
-        &FdbKey { mac: src, vlan },
-        &FdbEntry { oif: iif, flags: 0 },
-        0,
-    );
+    if learn {
+        let src: [u8; 6] = ctx.load(ETH_SRC_OFF).map_err(|_| ())?;
+        let _ = FDB.insert(
+            &FdbKey { mac: src, vlan },
+            &FdbEntry {
+                oif: iif,
+                flags: 0,
+                remote_sid: [0; 16],
+            },
+            0,
+        );
+    }
 
     if dst[0] & 0x01 != 0 {
         return Ok(flood(ctx, iif, vlan)); // broadcast / multicast
@@ -322,6 +337,12 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16) -> Result<i32, ()> {
 
     match FDB.get_ptr(&FdbKey { mac: dst, vlan }) {
         Some(e) => {
+            // Remote (overlay) MACs are encapsulated in the XDP stage; if one
+            // reaches TC (XDP not attached, or a race) flood rather than
+            // redirect to the fake oif that holds the nexthop id.
+            if unsafe { (*e).flags } & FDB_F_REMOTE != 0 {
+                return Ok(flood(ctx, iif, vlan));
+            }
             let oif = unsafe { (*e).oif };
             if oif == iif {
                 Ok(TC_ACT_SHOT as i32) // hairpin to the same port
@@ -487,8 +508,13 @@ fn dnat(
     };
     ctx.l3_csum_replace(IP_CSUM_OFF, old_ip as u64, new_ip as u64, 4)
         .map_err(|_| ())?;
-    ctx.l4_csum_replace(csum, old_ip as u64, new_ip as u64, BPF_F_PSEUDO_HDR | mangled | 4)
-        .map_err(|_| ())?;
+    ctx.l4_csum_replace(
+        csum,
+        old_ip as u64,
+        new_ip as u64,
+        BPF_F_PSEUDO_HDR | mangled | 4,
+    )
+    .map_err(|_| ())?;
     ctx.l4_csum_replace(csum, old_port as u64, new_port as u64, mangled | 2)
         .map_err(|_| ())?;
     ctx.store(IP_DST_OFF, &new_ip, 0).map_err(|_| ())?;
@@ -515,8 +541,13 @@ fn snat(
     };
     ctx.l3_csum_replace(IP_CSUM_OFF, old_ip as u64, new_ip as u64, 4)
         .map_err(|_| ())?;
-    ctx.l4_csum_replace(csum, old_ip as u64, new_ip as u64, BPF_F_PSEUDO_HDR | mangled | 4)
-        .map_err(|_| ())?;
+    ctx.l4_csum_replace(
+        csum,
+        old_ip as u64,
+        new_ip as u64,
+        BPF_F_PSEUDO_HDR | mangled | 4,
+    )
+    .map_err(|_| ())?;
     ctx.l4_csum_replace(csum, old_port as u64, new_port as u64, mangled | 2)
         .map_err(|_| ())?;
     ctx.store(IP_SRC_OFF, &new_ip, 0).map_err(|_| ())?;
@@ -711,6 +742,26 @@ fn tc_meta_vrf(ctx: &TcContext) -> u32 {
     }
 }
 
+/// Bridge domain attached by the XDP `End.DT2U` decap (EVPN over SRv6):
+/// `Some(bd)` when the frame is a decapsulated inner Ethernet frame to switch,
+/// guarded by the L2 magic. `None` for everything else.
+#[inline(always)]
+fn tc_meta_l2(ctx: &TcContext) -> Option<u16> {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return None;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe {
+        if (*m).magic != XDP_META_MAGIC_L2 {
+            return None;
+        }
+        Some((*m).vrf_id as u16)
+    }
+}
+
 /// Resolve a nexthop-group member by hashing the flow onto `0..count`.
 #[inline(always)]
 fn ecmp_member(group_id: u32, hash: u32) -> Option<u32> {
@@ -752,8 +803,7 @@ fn flow_hash_v4(ctx: &TcContext, src: u32, dst: u32) -> u32 {
 fn flow_hash_v6(ctx: &TcContext, src: &[u8; 16], dst: &[u8; 16]) -> u32 {
     let sw: [u32; 4] = unsafe { core::mem::transmute(*src) };
     let dw: [u32; 4] = unsafe { core::mem::transmute(*dst) };
-    let mut h = (sw[0] ^ sw[1] ^ sw[2] ^ sw[3])
-        ^ (dw[0] ^ dw[1] ^ dw[2] ^ dw[3]).rotate_left(16);
+    let mut h = (sw[0] ^ sw[1] ^ sw[2] ^ sw[3]) ^ (dw[0] ^ dw[1] ^ dw[2] ^ dw[3]).rotate_left(16);
     let nexthdr: u8 = ctx.load(IP6_NEXTHDR_OFF).unwrap_or(0);
     h ^= nexthdr as u32;
     if nexthdr == IPPROTO_TCP || nexthdr == IPPROTO_UDP {
@@ -814,7 +864,11 @@ fn fib4_lookup(vrf_id: u32, dst: [u8; 4]) -> Option<FibEntry> {
 fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
     // Port binding wins; else VRF context from a VPN-label decap (XDP meta).
-    let vrf_id = if port_vrf != 0 { port_vrf } else { tc_meta_vrf(ctx) };
+    let vrf_id = if port_vrf != 0 {
+        port_vrf
+    } else {
+        tc_meta_vrf(ctx)
+    };
     let fib = match fib4_lookup(vrf_id, dst) {
         Some(fib) => fib,
         None => return Ok(TC_ACT_PIPE as i32),
@@ -938,7 +992,11 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     }
 
     // Port binding wins; else VRF context from a VPN-label / SRv6 decap.
-    let vrf_id = if port_vrf != 0 { port_vrf } else { tc_meta_vrf(ctx) };
+    let vrf_id = if port_vrf != 0 {
+        port_vrf
+    } else {
+        tc_meta_vrf(ctx)
+    };
     let fib = match fib6_lookup(vrf_id, dst) {
         Some(fib) => fib,
         None => return Ok(TC_ACT_PIPE as i32),
@@ -1127,7 +1185,8 @@ fn l2_xmit(ctx: &TcContext, nh: &NextHop, ethertype: u16) -> Result<i32, ()> {
     };
     ctx.store(ETH_DST_OFF, &dst_mac, 0).map_err(|_| ())?;
     ctx.store(ETH_SRC_OFF, &src_mac, 0).map_err(|_| ())?;
-    ctx.store(ETH_TYPE_OFF, &ethertype.to_be(), 0).map_err(|_| ())?;
+    ctx.store(ETH_TYPE_OFF, &ethertype.to_be(), 0)
+        .map_err(|_| ())?;
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as i32)
 }
 
@@ -1139,6 +1198,7 @@ const IP6_VER_TC_FL: u32 = 0x6000_0000; // version 6, TC 0, flow-label 0
 const IPPROTO_IPIP: u8 = 4; // inner IPv4
 const IPPROTO_IPV6: u8 = 41; // inner IPv6
 const IPPROTO_ROUTING: u8 = 43; // IPv6 Routing header (SRH is type 4)
+const IPPROTO_ETHERNET: u8 = 143; // inner Ethernet frame (EVPN over SRv6)
 /// SRH offsets relative to the outer IPv6 header start (`EthHdr::LEN`).
 const SRH_OFF: usize = EthHdr::LEN + IP6_HDR_LEN; // outer SRH start
 const SRH_SL_OFF: usize = SRH_OFF + 3; // Segments Left byte
@@ -1187,8 +1247,10 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
     // Outer IPv6 header. next_header points at the SRH (43) when present,
     // else directly at the inner packet.
     let outer_nh = if n == 1 { inner_proto } else { IPPROTO_ROUTING };
-    ctx.store(EthHdr::LEN, &IP6_VER_TC_FL.to_be(), 0).map_err(|_| ())?;
-    ctx.store(IP6_PAYLOAD_LEN_OFF, &payload_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(EthHdr::LEN, &IP6_VER_TC_FL.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(IP6_PAYLOAD_LEN_OFF, &payload_len.to_be(), 0)
+        .map_err(|_| ())?;
     ctx.store(IP6_NEXTHDR_OFF, &outer_nh, 0).map_err(|_| ())?;
     ctx.store(IP6_HOP_OFF, &64u8, 0).map_err(|_| ())?;
     ctx.store(IP6_SRC_OFF, &src, 0).map_err(|_| ())?;
@@ -1198,13 +1260,14 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
         // SRH: [next_header, hdr_ext_len, routing_type=4, segments_left,
         //       last_entry, flags, tag(2)] then the reversed segment list.
         ctx.store(SRH_OFF, &inner_proto, 0).map_err(|_| ())?;
-        ctx.store(SRH_OFF + 1, &(2 * (n as u8 - 1)), 0).map_err(|_| ())?; // hdr_ext_len
+        ctx.store(SRH_OFF + 1, &(2 * (n as u8 - 1)), 0)
+            .map_err(|_| ())?; // hdr_ext_len
         ctx.store(SRH_OFF + 2, &4u8, 0).map_err(|_| ())?; // routing type 4 = SRH
         ctx.store(SRH_SL_OFF, &(n as u8 - 1), 0).map_err(|_| ())?; // segments_left
         ctx.store(SRH_OFF + 4, &(n as u8 - 2), 0).map_err(|_| ())?; // last_entry
         ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
         ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
-        // Reversed list, omitting segs[0]: segment_list[i] = segs[n-1-i].
+                                                           // Reversed list, omitting segs[0]: segment_list[i] = segs[n-1-i].
         for i in 0..MAX_SEGS {
             if i >= n - 1 {
                 break;
@@ -1261,12 +1324,80 @@ pub fn cradle_xdp(ctx: XdpContext) -> u32 {
 /// SRv6 (End.DT* decap). Dispatch on the outer EtherType.
 #[inline(always)]
 fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    // On a CE-facing L2 port, a frame destined to a remote (overlay) MAC is
+    // MAC-in-SRv6 encapsulated here — TC's `adjust_room` is -ENOTSUPP for the
+    // non-IP frames (ARP) an L2 domain carries, so the grow must run in XDP.
+    // Everything else on an L2 port passes to the TC `l2_switch`.
+    let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    if let Some(p) = PORTS.get_ptr(&iif) {
+        if unsafe { (*p).flags } & PORT_F_L2 != 0 {
+            return l2_evpn_xdp(ctx, unsafe { (*p).vlan });
+        }
+    }
     let ethertype = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? });
     match ethertype {
         ETH_P_MPLS_UC => try_mpls_xdp(ctx),
         ETH_P_IPV6 => try_srv6_xdp(ctx),
         _ => Ok(xdp_action::XDP_PASS),
     }
+}
+
+/// EVPN-over-SRv6 ingress: if the destination MAC is behind the overlay
+/// (`FDB_F_REMOTE`), MAC-in-SRv6 encapsulate the frame toward its `End.DT2U`
+/// SID; otherwise pass to the TC L2 stage (local forward / flood / learn).
+#[inline(always)]
+fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
+    let dst = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? };
+    if dst[0] & 0x01 != 0 {
+        return Ok(xdp_action::XDP_PASS); // BUM → TC flood (End.DT2M is slice 2)
+    }
+    let ent: FdbEntry = match FDB.get_ptr(&FdbKey { mac: dst, vlan: bd }) {
+        Some(e) => unsafe { *e },
+        None => return Ok(xdp_action::XDP_PASS), // unknown → TC flood
+    };
+    if ent.flags & FDB_F_REMOTE == 0 {
+        return Ok(xdp_action::XDP_PASS); // local → TC forward
+    }
+    l2_srv6_encap(ctx, &ent)
+}
+
+/// MAC-in-SRv6 encap: prepend an outer Ethernet + outer IPv6 header
+/// (`next_header = 143`, *Ethernet*, DA = the remote `End.DT2U` SID) and
+/// redirect out the underlay adjacency. Single service SID ⇒ no SRH. The inner
+/// frame is preserved untouched as the IPv6 payload. `ent.oif` is the underlay
+/// nexthop id (remote FDB entries reuse the `oif` field for it).
+#[inline(always)]
+fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry) -> Result<u32, ()> {
+    let nh: NextHop = match NEXTHOPS.get_ptr(&ent.oif) {
+        Some(n) => unsafe { *n },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(&nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    let src6: [u8; 16] = match SRV6_ENCAP_SRC.get(0) {
+        Some(s) => *s,
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    // The whole inner frame (inner eth + payload) becomes the IPv6 payload.
+    let inner_len = (ctx.data_end() - ctx.data()) as u16;
+    let grow = (EthHdr::LEN + IP6_HDR_LEN) as i32;
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, -grow) } != 0 {
+        return Err(());
+    }
+    // Outer Ethernet.
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? = (ETH_P_IPV6 as u16).to_be() };
+    // Outer IPv6.
+    unsafe { *xdp_ptr::<u32>(ctx, EthHdr::LEN)? = IP6_VER_TC_FL.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? = inner_len.to_be() };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? = IPPROTO_ETHERNET };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = 64 };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)? = src6 };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = ent.remote_sid };
+    stat_inc(STAT_SRV6_L2_ENCAP);
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
 #[inline(always)]
@@ -1383,9 +1514,8 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
     };
     pop_head(ctx, et)?;
     if vrf_id != 0 {
-        if unsafe {
-            bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32))
-        } != 0
+        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+            != 0
         {
             stat_inc(STAT_DROP);
             return Ok(xdp_action::XDP_DROP);
@@ -1417,8 +1547,9 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_UA => return srv6_end(ctx, &sid),
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
+        SRV6_BH_END_DT2U => return srv6_dt2u(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
-        _ => return Ok(xdp_action::XDP_PASS), // B6 — later phases
+        _ => return Ok(xdp_action::XDP_PASS), // DT2M/B6 — later phases
     }
 
     // Reach the inner packet: outer next-header is the inner proto directly,
@@ -1450,9 +1581,8 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     decap_head(ctx, strip, inner_et)?;
     stat_inc(STAT_SRV6_DECAP);
     if sid.vrf_id != 0 {
-        if unsafe {
-            bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32))
-        } != 0
+        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+            != 0
         {
             stat_inc(STAT_DROP);
             return Ok(xdp_action::XDP_DROP);
@@ -1580,6 +1710,37 @@ fn srv6_ua(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
     srv6_forward_adjacency(ctx, sid.nexthop_id)
+}
+
+/// SRv6 `End.DT2U` (EVPN over SRv6): the outer IPv6 DA matched a local L2
+/// service SID whose next-header is Ethernet (143). Strip the outer Ethernet
+/// and outer IPv6 header so the inner Ethernet frame becomes the L2 frame,
+/// then tag the SID's bridge domain (`sid.vrf_id`) into the XDP→TC metadata so
+/// the TC stage bridges it. MVP: reduced form only (no SRH).
+#[inline(always)]
+fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    if outer_nh != IPPROTO_ETHERNET {
+        return Ok(xdp_action::XDP_PASS); // SRH-carried L2 not handled yet
+    }
+    // Drop the outer eth + outer IPv6: the inner eth frame moves to the front.
+    let strip = (EthHdr::LEN + IP6_HDR_LEN) as i32;
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_SRV6_L2_DECAP);
+    // Carry the bridge domain to the TC l2_switch (mirrors the End.DT46 VRF meta).
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_L2;
+        (*meta).vrf_id = sid.vrf_id;
+    }
+    Ok(xdp_action::XDP_PASS)
 }
 
 /// Remove `strip` bytes of outer header(s) between the Ethernet header and

@@ -19,10 +19,11 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, FibEntry, FibWord, L2MemberKey, LocalSid, MplsEntry, Neigh4Key,
-    Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, LB_ALGO_RANDOM, MAX_LABELS,
-    NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_MAX,
+    Backend, Backend6, BackendKey, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid,
+    MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo,
+    ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
+    FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
+    STAT_MAX,
 };
 
 use crate::{
@@ -54,6 +55,9 @@ pub struct Dataplane {
     ports: HashMap<MapData, u32, PortConfig>,
     l2_members: HashMap<MapData, L2MemberKey, u32>,
     l2_count: HashMap<MapData, u16, u32>,
+    /// Static overlay FDB entries (EVPN over SRv6). Local MACs are still learned
+    /// in the eBPF datapath; this only programs remote (`FDB_F_REMOTE`) entries.
+    fdb: HashMap<MapData, FdbKey, FdbEntry>,
     services: HashMap<MapData, ServiceKey, ServiceInfo>,
     backends: HashMap<MapData, BackendKey, Backend>,
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
@@ -71,20 +75,19 @@ impl Dataplane {
         Ok(Self {
             fib4: LpmTrie::try_from(bpf.take_map("FIB4").context("map FIB4 missing")?)?,
             fib6: LpmTrie::try_from(bpf.take_map("FIB6").context("map FIB6 missing")?)?,
-            fib4_vrf: LpmTrie::try_from(
-                bpf.take_map("FIB4_VRF").context("map FIB4_VRF missing")?,
-            )?,
-            fib6_vrf: LpmTrie::try_from(
-                bpf.take_map("FIB6_VRF").context("map FIB6_VRF missing")?,
-            )?,
+            fib4_vrf: LpmTrie::try_from(bpf.take_map("FIB4_VRF").context("map FIB4_VRF missing")?)?,
+            fib6_vrf: LpmTrie::try_from(bpf.take_map("FIB6_VRF").context("map FIB6_VRF missing")?)?,
             srv6_localsid: LpmTrie::try_from(
-                bpf.take_map("SRV6_LOCALSID").context("map SRV6_LOCALSID missing")?,
+                bpf.take_map("SRV6_LOCALSID")
+                    .context("map SRV6_LOCALSID missing")?,
             )?,
             srv6_encap: HashMap::try_from(
-                bpf.take_map("SRV6_ENCAP").context("map SRV6_ENCAP missing")?,
+                bpf.take_map("SRV6_ENCAP")
+                    .context("map SRV6_ENCAP missing")?,
             )?,
             srv6_encap_src: Array::try_from(
-                bpf.take_map("SRV6_ENCAP_SRC").context("map SRV6_ENCAP_SRC missing")?,
+                bpf.take_map("SRV6_ENCAP_SRC")
+                    .context("map SRV6_ENCAP_SRC missing")?,
             )?,
             tbl24: Array::try_from(bpf.take_map("TBL24").context("map TBL24 missing")?)?,
             tbl8: Array::try_from(bpf.take_map("TBL8").context("map TBL8 missing")?)?,
@@ -96,18 +99,19 @@ impl Dataplane {
             nexthops: HashMap::try_from(bpf.take_map("NEXTHOPS").context("map NEXTHOPS missing")?)?,
             nhgroup: HashMap::try_from(bpf.take_map("NHGROUP").context("map NHGROUP missing")?)?,
             nhgroup_member: HashMap::try_from(
-                bpf.take_map("NHGROUP_MEMBER").context("map NHGROUP_MEMBER missing")?,
+                bpf.take_map("NHGROUP_MEMBER")
+                    .context("map NHGROUP_MEMBER missing")?,
             )?,
             neigh4: HashMap::try_from(bpf.take_map("NEIGH4").context("map NEIGH4 missing")?)?,
             neigh6: HashMap::try_from(bpf.take_map("NEIGH6").context("map NEIGH6 missing")?)?,
-            mpls_fib: HashMap::try_from(
-                bpf.take_map("MPLS_FIB").context("map MPLS_FIB missing")?,
-            )?,
+            mpls_fib: HashMap::try_from(bpf.take_map("MPLS_FIB").context("map MPLS_FIB missing")?)?,
             ports: HashMap::try_from(bpf.take_map("PORTS").context("map PORTS missing")?)?,
             l2_members: HashMap::try_from(
-                bpf.take_map("L2_MEMBERS").context("map L2_MEMBERS missing")?,
+                bpf.take_map("L2_MEMBERS")
+                    .context("map L2_MEMBERS missing")?,
             )?,
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
+            fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
             backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
             services6: HashMap::try_from(
@@ -118,7 +122,8 @@ impl Dataplane {
             )?,
             stats: PerCpuArray::try_from(bpf.take_map("STATS").context("map STATS missing")?)?,
             l7_services: HashMap::try_from(
-                bpf.take_map("L7_SERVICES").context("map L7_SERVICES missing")?,
+                bpf.take_map("L7_SERVICES")
+                    .context("map L7_SERVICES missing")?,
             )?,
         })
     }
@@ -276,6 +281,29 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Program a static overlay FDB entry (EVPN over SRv6): the MAC `mac` in
+    /// bridge domain `bd` sits behind `remote_sid` (the remote PE's `End.DT2U`
+    /// SID), reached via underlay nexthop `nexthop_id`. Frames to `mac` are
+    /// MAC-in-SRv6 encapsulated in the XDP stage.
+    pub fn fdb_remote_add(
+        &mut self,
+        mac: [u8; 6],
+        bd: u16,
+        remote_sid: Ipv6Addr,
+        nexthop_id: u32,
+    ) -> Result<()> {
+        self.fdb.insert(
+            FdbKey { mac, vlan: bd },
+            FdbEntry {
+                oif: nexthop_id,
+                flags: FDB_F_REMOTE,
+                remote_sid: remote_sid.octets(),
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
     /// Install/replace a nexthop. `gateway == None` means an on-link/connected
     /// nexthop (the neighbor is resolved by the packet's destination).
     /// A non-empty `labels` is the MPLS out-label stack (swap value /
@@ -361,11 +389,13 @@ impl Dataplane {
                     addr: addr.octets(),
                 },
             );
-            self.fib4_vrf.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+            self.fib4_vrf
+                .insert(&key, FibEntry { nexthop_id, flags }, 0)?;
             return Ok(());
         }
         if let Some(eng) = self.dir24.as_mut() {
-            let plan = eng.route_add(u32::from(addr), prefix_len, FibEntry { nexthop_id, flags })?;
+            let plan =
+                eng.route_add(u32::from(addr), prefix_len, FibEntry { nexthop_id, flags })?;
             self.dir24_apply(&plan)?;
             return Ok(());
         }
@@ -556,7 +586,8 @@ impl Dataplane {
                     addr: addr.octets(),
                 },
             );
-            self.fib6_vrf.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+            self.fib6_vrf
+                .insert(&key, FibEntry { nexthop_id, flags }, 0)?;
             return Ok(());
         }
         let key = Key::new(prefix_len as u32, addr.octets());

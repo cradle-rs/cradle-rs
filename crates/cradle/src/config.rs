@@ -41,10 +41,24 @@ pub struct Config {
     /// SRv6 H.Encaps outer source address.
     #[serde(default)]
     pub srv6_source: Option<String>,
+    /// Static overlay FDB entries (EVPN over SRv6).
+    #[serde(default)]
+    pub fdb: Vec<FdbCfg>,
     #[serde(default)]
     pub services: Vec<Service>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
+}
+
+/// A static overlay FDB entry (EVPN over SRv6): the MAC `mac` in bridge domain
+/// `bd` is behind the remote PE's `End.DT2U` `remote_sid`, reached via underlay
+/// nexthop `nexthop`.
+#[derive(Debug, Deserialize)]
+pub struct FdbCfg {
+    pub mac: String,
+    pub bd: u16,
+    pub remote_sid: String,
+    pub nexthop: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +219,8 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
         "un" => SRV6_BH_UN,
         "ua" => SRV6_BH_UA,
         "ualib" => SRV6_BH_UALIB,
+        "end.dt2u" => SRV6_BH_END_DT2U,
+        "end.dt2m" => SRV6_BH_END_DT2M,
         other => anyhow::bail!("unknown SRv6 behavior {other:?}"),
     })
 }
@@ -235,7 +251,9 @@ impl Config {
             ctl.set_l2_domain(vlan, &members).await?;
         }
         if let Some(src) = &self.srv6_source {
-            let addr = src.parse().with_context(|| format!("bad srv6_source {src:?}"))?;
+            let addr = src
+                .parse()
+                .with_context(|| format!("bad srv6_source {src:?}"))?;
             ctl.set_srv6_encap_source(addr).await?;
         }
         for nh in &self.nexthops {
@@ -257,7 +275,11 @@ impl Config {
                 continue;
             }
             // Family inferred from the gateway (a v6 gateway ⇒ v6 nexthop).
-            let is_v6 = nh.gateway.as_deref().map(|g| g.contains(':')).unwrap_or(false);
+            let is_v6 = nh
+                .gateway
+                .as_deref()
+                .map(|g| g.contains(':'))
+                .unwrap_or(false);
             let oif = match &nh.oif {
                 Some(o) => util::ifindex_of(o)?,
                 None => 0,
@@ -277,9 +299,16 @@ impl Config {
             }
         }
         for ls in &self.localsids {
-            let sid = ls.sid.parse().with_context(|| format!("bad SID {:?}", ls.sid))?;
+            let sid = ls
+                .sid
+                .parse()
+                .with_context(|| format!("bad SID {:?}", ls.sid))?;
             let behavior = srv6_behavior(&ls.behavior)?;
-            let prefix_len = if ls.prefix_len == 0 { 128 } else { ls.prefix_len };
+            let prefix_len = if ls.prefix_len == 0 {
+                128
+            } else {
+                ls.prefix_len
+            };
             ctl.add_localsid(
                 sid,
                 prefix_len,
@@ -291,8 +320,18 @@ impl Config {
             )
             .await?;
         }
+        for f in &self.fdb {
+            let mac = util::parse_mac(&f.mac)?;
+            let remote_sid = f
+                .remote_sid
+                .parse()
+                .with_context(|| format!("bad remote SID {:?}", f.remote_sid))?;
+            ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop).await?;
+        }
         for n in &self.neighbors {
-            let ip: IpAddr = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
+            let ip: IpAddr =
+                n.ip.parse()
+                    .with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
             let mac = util::parse_mac(&n.mac)?;
             match ip {
                 IpAddr::V4(v4) => ctl.set_neighbor4(&n.oif, v4, mac).await?,
@@ -323,35 +362,38 @@ impl Config {
         for (i, svc) in self.services.iter().enumerate() {
             let proto = proto_num(&svc.proto)?;
             let svc_id = i as u32 + 1;
-            let vip: IpAddr = svc.vip.parse().with_context(|| format!("bad VIP {:?}", svc.vip))?;
+            let vip: IpAddr = svc
+                .vip
+                .parse()
+                .with_context(|| format!("bad VIP {:?}", svc.vip))?;
             match vip {
                 IpAddr::V4(v4) => {
                     let backends = svc
                         .backends
                         .iter()
                         .map(|b| {
-                            let ip = b
-                                .ip
-                                .parse::<Ipv4Addr>()
-                                .with_context(|| format!("bad backend ip {:?}", b.ip))?;
+                            let ip =
+                                b.ip.parse::<Ipv4Addr>()
+                                    .with_context(|| format!("bad backend ip {:?}", b.ip))?;
                             Ok((ip, b.port))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    ctl.add_service(svc_id, v4, svc.port, proto, &backends).await?;
+                    ctl.add_service(svc_id, v4, svc.port, proto, &backends)
+                        .await?;
                 }
                 IpAddr::V6(v6) => {
                     let backends = svc
                         .backends
                         .iter()
                         .map(|b| {
-                            let ip = b
-                                .ip
-                                .parse::<Ipv6Addr>()
-                                .with_context(|| format!("bad backend ip {:?}", b.ip))?;
+                            let ip =
+                                b.ip.parse::<Ipv6Addr>()
+                                    .with_context(|| format!("bad backend ip {:?}", b.ip))?;
                             Ok((ip, b.port))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    ctl.add_service6(svc_id, v6, svc.port, proto, &backends).await?;
+                    ctl.add_service6(svc_id, v6, svc.port, proto, &backends)
+                        .await?;
                 }
             }
         }
