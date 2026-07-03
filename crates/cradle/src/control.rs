@@ -67,6 +67,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_decap",
     "fib6_vrf_hit",
     "srv6_end",
+    "srv6_usid",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -311,6 +312,7 @@ impl Control {
 
     /// Install a local SID. `oif`/`nh6` are resolved by the caller into a
     /// `nexthop_id` for End.X (Phase 2); Phase 1's DT behaviors use `vrf`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_localsid(
         &self,
         sid: Ipv6Addr,
@@ -318,11 +320,13 @@ impl Control {
         behavior: u8,
         vrf: u32,
         nexthop_id: u32,
+        block_bits: u8,
+        node_bits: u8,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .localsid_add(sid, prefix_len, behavior, vrf, nexthop_id)?;
+            .localsid_add(sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits)?;
         Ok(())
     }
 
@@ -618,8 +622,18 @@ impl Cradle for GrpcService {
         let sid: Ipv6Addr = s.sid.parse().map_err(st)?;
         let prefix_len = if s.prefix_len == 0 { 128 } else { s.prefix_len as u8 };
         let behavior = srv6_behavior(s.behavior).map_err(st)?;
+        // uSID (uN/uA) NEXT-C-SID shift geometry: the locator block / node
+        // (micro-SID) bit lengths from the SID structure (`lb_bits`/`ln_bits`).
         self.control
-            .add_localsid(sid, prefix_len, behavior, s.vrf_table_id, s.nexthop_id)
+            .add_localsid(
+                sid,
+                prefix_len,
+                behavior,
+                s.vrf_table_id,
+                s.nexthop_id,
+                s.lb_bits as u8,
+                s.ln_bits as u8,
+            )
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

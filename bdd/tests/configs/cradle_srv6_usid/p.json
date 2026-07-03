@@ -1,0 +1,21 @@
+{
+  "ports": [
+    { "name": "pa", "l3": true },
+    { "name": "pb", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pb", "gateway": "2001:db8:2::2" },
+    { "id": 2, "oif": "pa", "gateway": "2001:db8:1::1" }
+  ],
+  "neighbors": [
+    { "oif": "pb", "ip": "2001:db8:2::2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "pa", "ip": "2001:db8:1::1", "mac": "02:00:00:00:01:0b" }
+  ],
+  "localsids": [
+    { "sid": "fcbb:bbbb:10::", "behavior": "un", "prefix_len": 48, "block_bits": 32, "node_bits": 16 }
+  ],
+  "routes6": [
+    { "prefix": "fcbb:bbbb:20::/48", "nexthop": 1 },
+    { "prefix": "fcbb:bbbb:21::/48", "nexthop": 2 }
+  ]
+}

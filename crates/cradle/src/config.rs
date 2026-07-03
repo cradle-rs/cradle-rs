@@ -56,6 +56,9 @@ pub struct Route6 {
 }
 
 /// A local SID: `behavior` is `end|end.x|end.dt4|end.dt6|end.dt46|end.b6|un|ua`.
+/// uSID (`un`/`ua`) SIDs match at `prefix_len` (block+node, e.g. 48) and carry
+/// the `block_bits`/`node_bits` NEXT-C-SID shift geometry; classic SIDs match
+/// at the default /128.
 #[derive(Debug, Deserialize)]
 pub struct LocalSidCfg {
     pub sid: String,
@@ -64,6 +67,15 @@ pub struct LocalSidCfg {
     pub vrf: u32,
     #[serde(default)]
     pub nexthop: u32,
+    /// LPM prefix length the SID matches at (default 128; uSID SIDs use e.g. 48).
+    #[serde(default)]
+    pub prefix_len: u8,
+    /// uSID locator-block bit length (0 = not a uSID).
+    #[serde(default)]
+    pub block_bits: u8,
+    /// uSID node (micro-SID) bit length (0 = not a uSID).
+    #[serde(default)]
+    pub node_bits: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,7 +277,17 @@ impl Config {
         for ls in &self.localsids {
             let sid = ls.sid.parse().with_context(|| format!("bad SID {:?}", ls.sid))?;
             let behavior = srv6_behavior(&ls.behavior)?;
-            ctl.add_localsid(sid, 128, behavior, ls.vrf, ls.nexthop).await?;
+            let prefix_len = if ls.prefix_len == 0 { 128 } else { ls.prefix_len };
+            ctl.add_localsid(
+                sid,
+                prefix_len,
+                behavior,
+                ls.vrf,
+                ls.nexthop,
+                ls.block_bits,
+                ls.node_bits,
+            )
+            .await?;
         }
         for n in &self.neighbors {
             let ip: IpAddr = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
