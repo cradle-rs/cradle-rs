@@ -310,6 +310,23 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Locally-learned FDB entries (datapath MAC learning): every unicast MAC
+    /// in a bridge domain learned on a local port — `flags == 0`, so never
+    /// overlay (`FDB_F_REMOTE`) entries or the all-ones BUM sentinel. The
+    /// `WatchFdb` stream diffs successive snapshots to report EVPN Type-2
+    /// candidates to the control plane.
+    pub fn fdb_local_entries(&self) -> Vec<([u8; 6], u16)> {
+        let mut out = Vec::new();
+        for item in self.fdb.iter() {
+            let Ok((k, v)) = item else { continue };
+            if v.flags != 0 || k.mac[0] & 0x01 != 0 {
+                continue;
+            }
+            out.push((k.mac, k.vlan));
+        }
+        out
+    }
+
     /// Install/replace a nexthop. `gateway == None` means an on-link/connected
     /// nexthop (the neighbor is resolved by the packet's destination).
     /// A non-empty `labels` is the MPLS out-label stack (swap value /
