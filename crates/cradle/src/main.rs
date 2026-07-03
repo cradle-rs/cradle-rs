@@ -5,6 +5,7 @@
 //! configuration to a running instance. The gRPC API is the seam the zebra-rs
 //! routing control plane will eventually drive.
 
+mod bench;
 mod config;
 mod control;
 mod ctl;
@@ -39,6 +40,24 @@ enum Cmd {
     Serve(ServeArgs),
     /// Control-plane client: push configuration to a running cradle.
     Ctl(CtlArgs),
+    /// FIB lookup-latency harness (BPF_PROG_TEST_RUN; root, no attach) —
+    /// large-fib.md's LPM vs DIR-24-8 numbers. Not CI-gating.
+    FibBench(FibBenchArgs),
+}
+
+#[derive(Debug, Parser)]
+struct FibBenchArgs {
+    /// Routes to populate (DFZ-shaped distribution, deterministic per seed).
+    #[arg(long, default_value_t = 1_000_000)]
+    routes: u64,
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Kernel-side iterations per probe address (the kernel reports avg ns).
+    #[arg(long, default_value_t = 100_000)]
+    repeat: u32,
+    /// Engine to measure; omit to run both.
+    #[arg(long, value_enum)]
+    mode: Option<Fib4Mode>,
 }
 
 #[derive(Debug, Parser)]
@@ -62,7 +81,7 @@ struct ServeArgs {
 
 /// IPv4 FIB engine selector (`docs/design/large-fib.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Fib4Mode {
+pub(crate) enum Fib4Mode {
     Lpm,
     Dir24,
 }
@@ -122,6 +141,7 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve(args) => serve(args).await,
         Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
+        Cmd::FibBench(args) => bench::run(args.mode, args.routes, args.seed, args.repeat),
     }
 }
 
