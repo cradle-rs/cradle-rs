@@ -40,8 +40,9 @@ use cradle_common::{
     FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS,
     MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
     PORT_F_L3,
-    SRV6_BH_END, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UN,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    SRV6_BH_END, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA,
+    SRV6_BH_UALIB, SRV6_BH_UN, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT,
+    STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_USID,
@@ -1411,10 +1412,13 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         None => return Ok(xdp_action::XDP_PASS), // not a local SID — normal fwd
     };
     match sid.behavior {
-        SRV6_BH_END | SRV6_BH_END_X => return srv6_end(ctx, &sid),
+        // uA is classic End.X at /128 (adjacency, SRH walk); uALib is the
+        // compressed carrier form (shift + adjacency).
+        SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_UA => return srv6_end(ctx, &sid),
         SRV6_BH_UN => return srv6_un(ctx, &sid),
+        SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
-        _ => return Ok(xdp_action::XDP_PASS), // uA/B6 — later phases
+        _ => return Ok(xdp_action::XDP_PASS), // B6 — later phases
     }
 
     // Reach the inner packet: outer next-header is the inner proto directly,
@@ -1493,15 +1497,24 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // End.X: forward to the SID's cross-connect adjacency directly.
-    let nh: NextHop = match NEXTHOPS.get_ptr(&sid.nexthop_id) {
+    // End.X: forward straight out the SID's cross-connect adjacency.
+    srv6_forward_adjacency(ctx, sid.nexthop_id)
+}
+
+/// Forward the (rewritten) IPv6 packet out an SRv6 cross-connect adjacency
+/// (`End.X` / `uA`): resolve `nexthop_id`'s L2, decrement the outer hop limit
+/// (this path skips the TC forward), rewrite the Ethernet header, and redirect
+/// out the adjacency's oif. Falls back to `XDP_PASS` if the nexthop or its
+/// neighbor is unresolved, or the hop limit is exhausted.
+#[inline(always)]
+fn srv6_forward_adjacency(ctx: &XdpContext, nexthop_id: u32) -> Result<u32, ()> {
+    let nh: NextHop = match NEXTHOPS.get_ptr(&nexthop_id) {
         Some(n) => unsafe { *n },
         None => return Ok(xdp_action::XDP_PASS),
     };
     let Some((dst_mac, src_mac)) = xdp_resolve_l2(&nh) else {
         return Ok(xdp_action::XDP_PASS);
     };
-    // Decrement the outer hop limit (this path skips the TC forward).
     let hop = unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? };
     if hop <= 1 {
         return Ok(xdp_action::XDP_PASS);
@@ -1512,23 +1525,18 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
-/// SRv6 uSID `uN` (NEXT-C-SID node transit): the outer IPv6 DA's active
-/// micro-SID matched this node's uN prefix (`block_bits + node_bits`, e.g.
-/// /48). Shift the uSID container left by one micro-SID — slide the bytes
-/// after the block up by `node_bits`, exposing the next micro-SID right after
-/// the locator block and zero-filling the vacated tail — then forward by the
-/// new DA (`XDP_PASS` → the TC FIB stage, which decrements the hop limit, as
-/// with `End`). No SRH is involved: the whole path rides in the DA carrier.
-///
-/// Only byte-aligned geometry is handled (micro-SIDs are 16-bit; the block is
-/// 16/32/48 — usid locators cap the block at 32, so /48 → block 32, node 16);
-/// anything else passes through untouched.
+/// Shift the uSID (NEXT-C-SID) container in the IPv6 DA left by one micro-SID:
+/// slide the address bytes after the locator block up by `node_bits`, exposing
+/// the next micro-SID right after the block and zero-filling the vacated tail.
+/// Returns `true` if the shift was applied. Only byte-aligned geometry is
+/// handled (micro-SIDs are 16-bit; the block is 16/32/48 — usid locators cap
+/// the block at 32, so /48 → block 32, node 16); other geometry returns
+/// `false` (the caller passes the packet through). Constant ranges keep the
+/// shift verifier-safe. Increments `STAT_SRV6_USID` when it shifts.
 #[inline(always)]
-fn srv6_un(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+fn srv6_usid_shift(ctx: &XdpContext, sid: &LocalSid) -> Result<bool, ()> {
     let da = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
     let mut nda = da;
-    // Shift `da[block+node .. 16]` down to `da[block .. 16-node]`, zero the
-    // last `node` bytes. Constant ranges keep the shift verifier-safe.
     match (sid.block_bits, sid.node_bits) {
         (16, 16) => {
             nda[2..14].copy_from_slice(&da[4..16]);
@@ -1545,11 +1553,33 @@ fn srv6_un(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
             nda[14] = 0;
             nda[15] = 0;
         }
-        _ => return Ok(xdp_action::XDP_PASS), // unsupported uSID geometry
+        _ => return Ok(false), // unsupported uSID geometry
     }
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = nda };
     stat_inc(STAT_SRV6_USID);
+    Ok(true)
+}
+
+/// SRv6 uSID `uN` (NEXT-C-SID node transit): the DA's active micro-SID matched
+/// this node's uN prefix. Shift the container and forward by the new DA
+/// (`XDP_PASS` → the TC FIB stage, which decrements the hop limit, as with
+/// `End`). No SRH — the whole path rides in the DA carrier.
+#[inline(always)]
+fn srv6_un(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    srv6_usid_shift(ctx, sid)?;
     Ok(xdp_action::XDP_PASS)
+}
+
+/// SRv6 uSID `uA` / `uALib` (NEXT-C-SID adjacency): the DA's active micro-SID
+/// matched this node's adjacency uSID prefix. Shift the container (like `uN`),
+/// then forward straight out the SID's cross-connect adjacency (like `End.X`)
+/// rather than by the FIB. If the geometry is unsupported, pass the packet.
+#[inline(always)]
+fn srv6_ua(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    if !srv6_usid_shift(ctx, sid)? {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    srv6_forward_adjacency(ctx, sid.nexthop_id)
 }
 
 /// Remove `strip` bytes of outer header(s) between the Ethernet header and

@@ -55,7 +55,8 @@ pub struct Route6 {
     pub vrf: u32,
 }
 
-/// A local SID: `behavior` is `end|end.x|end.dt4|end.dt6|end.dt46|end.b6|un|ua`.
+/// A local SID: `behavior` is
+/// `end|end.x|end.dt4|end.dt6|end.dt46|end.b6|un|ua|ualib`.
 /// uSID (`un`/`ua`) SIDs match at `prefix_len` (block+node, e.g. 48) and carry
 /// the `block_bits`/`node_bits` NEXT-C-SID shift geometry; classic SIDs match
 /// at the default /128.
@@ -203,6 +204,7 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
         "end.b6" => SRV6_BH_END_B6,
         "un" => SRV6_BH_UN,
         "ua" => SRV6_BH_UA,
+        "ualib" => SRV6_BH_UALIB,
         other => anyhow::bail!("unknown SRv6 behavior {other:?}"),
     })
 }

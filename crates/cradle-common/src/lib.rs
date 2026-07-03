@@ -241,7 +241,12 @@ pub const SRV6_BH_END_DT6: u8 = 3;
 pub const SRV6_BH_END_DT46: u8 = 4;
 pub const SRV6_BH_END_B6: u8 = 5;
 pub const SRV6_BH_UN: u8 = 6;
+/// `uA`: classic End.X adjacency at /128 (no NEXT-C-SID shift).
 pub const SRV6_BH_UA: u8 = 7;
+/// `uALib`: the compressed-carrier adjacency form — shift the uSID container,
+/// then forward out the cross-connect adjacency (matched at a block+function
+/// prefix, mid-carrier after a uN shift).
+pub const SRV6_BH_UALIB: u8 = 8;
 
 /// Maximum SIDs in an imposed segment list (bounds the encap/SRH loops).
 pub const MAX_SEGS: usize = 6;

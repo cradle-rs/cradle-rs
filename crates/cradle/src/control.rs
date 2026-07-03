@@ -31,15 +31,15 @@ use crate::{
 };
 use cradle_common::{
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UN,
-    STAT_MAX,
+    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
 fn srv6_behavior(code: u32) -> Result<u8> {
     match code as u8 {
         b @ (SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46
-        | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA) => Ok(b),
+        | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA | SRV6_BH_UALIB) => Ok(b),
         other => anyhow::bail!("unknown SRv6 behavior code {other}"),
     }
 }
