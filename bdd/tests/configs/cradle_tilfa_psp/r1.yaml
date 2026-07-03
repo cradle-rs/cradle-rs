@@ -1,0 +1,43 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_tilfa_psp_ctl4.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::11/128
+- if-name: r1-s
+  ipv6:
+    address: 2001:db8:0:2::2/64
+- if-name: r1-r2
+  ipv6:
+    address: 2001:db8:0:4::1/64
+segment-routing:
+  locator:
+  - name: LOC5
+    prefix: fcbb:bbbb:5::/48
+    behavior: usid
+    # PSP: the end-of-carrier walk at r1 (SL 1 -> 0) pops the repair SRH,
+    # so r2 receives a clean native packet -- no seg6_enabled needed there.
+    flavor:
+    - psp
+router:
+  isis:
+    net: 49.0000.0000.0000.0005.00
+    hostname: r1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC5
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: r1-s
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true
+    - if-name: r1-r2
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enable: true

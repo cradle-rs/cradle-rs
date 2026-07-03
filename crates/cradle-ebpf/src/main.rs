@@ -42,13 +42,14 @@ use cradle_common::{
     MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2M,
     SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_M,
     SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
     STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_USID, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
+    STAT_SRV6_PSP, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -1855,16 +1856,66 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 /// FIB stage (`XDP_PASS`, which decrements the hop limit); `End.X` forwards
 /// straight out the SID's adjacency (and decrements the hop limit itself,
 /// since it bypasses the TC forward).
+///
+/// Flavors (RFC 8986 §4.16, `sid.flavors`): PSP pops the SRH when this
+/// node's decrement exhausts it; USP pops an already-exhausted SRH before
+/// local delivery; USD decapsulates the outer IPv6 (+SRH) at the ultimate
+/// segment and forwards the inner packet by the main table. USP/USD act on
+/// End/uN only — their End.X variants would forward the result via the
+/// adjacency (a different code path, incl. an IPv4 adjacency forward) and
+/// are not implemented; End.X/uA SIDs carry only the PSP bit.
 #[inline(always)]
 fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
-    // Require an SRH with an active segment (SL > 0). An End SID reached with
-    // no SRH or SL == 0 is a misconfiguration — pass to the stack.
+    let ult_ok = !matches!(
+        sid.behavior,
+        SRV6_BH_END_X | SRV6_BH_UA | SRV6_BH_UALIB
+    );
     let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
     if outer_nh != IPPROTO_ROUTING {
+        // No SRH. USD still decapsulates a bare IP-in-IPv6 addressed to the
+        // SID (§4.16.3 upper-layer processing); anything else is a
+        // misconfiguration — pass to the stack.
+        if sid.flavors & SRV6_FLAVOR_USD != 0 && ult_ok {
+            let inner_et = match outer_nh {
+                IPPROTO_IPIP => ETH_P_IP,
+                IPPROTO_IPV6 => ETH_P_IPV6,
+                _ => return Ok(xdp_action::XDP_PASS),
+            };
+            decap_head(ctx, IP6_HDR_LEN, inner_et)?;
+            stat_inc(STAT_SRV6_USD);
+        }
         return Ok(xdp_action::XDP_PASS);
     }
     let sl = unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? };
-    if sl == 0 || sl as usize > MAX_SEGS {
+    if sl == 0 {
+        // Ultimate segment. USD decapsulates when the payload is IP (tried
+        // first, per the RFC's USP&USD composite); USP pops the exhausted
+        // SRH so local delivery takes a clean packet (no `seg6_enabled`
+        // needed). Without a flavor: pass untouched, today's behavior.
+        let ext_len = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 1)? };
+        if ext_len > 12 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        if sid.flavors & SRV6_FLAVOR_USD != 0 && ult_ok {
+            let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF)? };
+            let inner_et = match srh_nh {
+                IPPROTO_IPIP => Some(ETH_P_IP),
+                IPPROTO_IPV6 => Some(ETH_P_IPV6),
+                _ => None, // non-IP payload — fall through to USP
+            };
+            if let Some(et) = inner_et {
+                decap_head(ctx, IP6_HDR_LEN + 8 * (ext_len as usize + 1), et)?;
+                stat_inc(STAT_SRV6_USD);
+                return Ok(xdp_action::XDP_PASS);
+            }
+        }
+        if sid.flavors & SRV6_FLAVOR_USP != 0 && ult_ok {
+            pop_srh(ctx)?;
+            stat_inc(STAT_SRV6_USP);
+        }
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if sl as usize > MAX_SEGS {
         return Ok(xdp_action::XDP_PASS);
     }
     let new_sl = sl - 1;
@@ -1874,6 +1925,15 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = next_seg };
     stat_inc(STAT_SRV6_END);
 
+    // PSP: this node's decrement exhausted the SRH — pop it so the final
+    // segment receives a clean, SRv6-free packet. Composes with End.X (the
+    // pop lands before the adjacency redirect; every access below re-derives
+    // its pointers after the adjust_head).
+    if new_sl == 0 && sid.flavors & SRV6_FLAVOR_PSP != 0 {
+        pop_srh(ctx)?;
+        stat_inc(STAT_SRV6_PSP);
+    }
+
     if !matches!(sid.behavior, SRV6_BH_END_X | SRV6_BH_UA) {
         // End (and the uN end-of-carrier fallback): forward by the new DA —
         // the TC FIB stage does the redirect + hop limit decrement.
@@ -1882,6 +1942,38 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
 
     // End.X / uA: forward straight out the SID's cross-connect adjacency.
     srv6_forward_adjacency(ctx, sid.nexthop_id)
+}
+
+/// Pop the SRH from an IPv6 packet whose Routing header immediately follows
+/// the base header (the PSP/USP flavors): patch the base header's
+/// next_header / payload_len in place — both sit inside the 54-byte block
+/// that slides next, so the patched values move with it — then slide the
+/// Ethernet + IPv6 headers forward over the SRH and trim the vacated bytes.
+/// The header block is staged through a stack copy: for SRHs shorter than
+/// 54 bytes the source and destination ranges overlap, so memmove semantics
+/// are mandatory, not stylistic.
+#[inline(always)]
+fn pop_srh(ctx: &XdpContext) -> Result<(), ()> {
+    let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF)? };
+    let ext_len = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 1)? };
+    if ext_len > 12 {
+        return Err(());
+    }
+    let srh_len = 8 * (ext_len as usize + 1); // [8, 104]
+    let payload_len = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? });
+    if (payload_len as usize) < srh_len {
+        return Err(()); // malformed — the subtraction below would wrap
+    }
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? = srh_nh };
+    unsafe {
+        *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? = (payload_len - srh_len as u16).to_be()
+    };
+    let hdr = unsafe { *xdp_ptr::<[u8; 54]>(ctx, 0)? };
+    unsafe { *xdp_ptr::<[u8; 54]>(ctx, srh_len)? = hdr };
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, srh_len as i32) } != 0 {
+        return Err(());
+    }
+    Ok(())
 }
 
 /// Forward the (rewritten) IPv6 packet out an SRv6 cross-connect adjacency
