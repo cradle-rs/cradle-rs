@@ -1,0 +1,46 @@
+# r2 — REPLACE-C-SID ultimate segment: LOC2 carries `flavor: [usd]`,
+# so its End SID advertises as `End (REP, USD)` (IANA 128) and the
+# tee programs the USD bit — the eBPF endpoint decapsulates the inner
+# packet onto the c2 LAN. The static route is the return path toward
+# c1 via r1.
+system:
+  cradle-grpc: "unix:/tmp/cradle_replace_zebra_ctl3.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: r2-r1
+  ipv6:
+    address: 2001:db8:2::2/64
+- if-name: lan0
+  ipv6:
+    address: fc00:2::ff/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fdbb:bbbb:bbbb:2::/64
+    behavior: replace
+    flavor:
+    - usd
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: fc00:1::/64
+        nexthop:
+        - address: 2001:db8:2::1
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: r2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: r2-r1
+      network-type: point-to-point
+      ipv6:
+        enable: true

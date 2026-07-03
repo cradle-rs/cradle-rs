@@ -292,6 +292,27 @@ Dispatch on `sid.behavior`:
   a block+function prefix mid-carrier): shift the container (shared with `uN`),
   then forward straight out the SID's cross-connect adjacency (`nexthop_id`, hop
   limit decremented here) rather than by the FIB. `stat_inc(STAT_SRV6_USID)`.
+- **End(REP) / End.X(REP)** *(REPLACE-C-SID, RFC 9800 §4.2)* — the other RFC
+  9800 compression. The DA is `Block | C-SID | Argument`; SRH entries are
+  *packed containers* of `node_bits + fun_bits`-wide C-SIDs (32- or 16-bit —
+  K = 4 or 8 positions, position K-1 = least significant consumed first) and
+  the argument's last 2/3 bits index the active position. Matched at
+  /(block+C-SID) so the argument stays wild. Non-zero index: decrement and
+  rewrite **only the C-SID bits** of the DA from `SegList[SL][idx]` (R20); a
+  zero position means the container ended early — the next list entry is a
+  full 128-bit SID loaded as the whole DA (R06). Index zero: `SL -= 1`,
+  index := K-1 (R12–R17). The R06 load can land on a SID of this same node
+  (the final destination's ultimate-segment flavors must still run), so the
+  handler re-dispatches once — the `srv6_un` same-node pattern. PSP composes
+  at both rewrite points with the §4.2.8 condition (position 0 consumed *or*
+  zero padding next); USP/USD run at the S02 terminal (`SL == 0 &&
+  (idx == 0 || SegList[0][idx-1] == 0)`), End only. Kernel 6.8 has no
+  REPLACE flavor op, so zebra skips the seg6local install — cradle is the
+  only data plane; zebra's TI-LFA also refuses REPLACE SIDs as plain repair
+  segments (RFC 9800 §6.4 — they are only valid inside packed containers).
+  Source-side compression is not implemented: static configs express packed
+  containers as IPv6 literals in `segs`. Bounds violations PASS (no ICMP).
+  `stat_inc(STAT_SRV6_REPLACE)`.
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`
@@ -327,6 +348,7 @@ STAT_SRV6_ENCAP   // H.Encaps imposed (ingress PE)
 STAT_SRV6_END     // End / End.X transit (Phase 2)
 STAT_SRV6_DECAP   // End.DT*/DX* decapsulation (egress PE)
 STAT_SRV6_USID    // uN NEXT-C-SID container shift (Phase 4)
+STAT_SRV6_REPLACE // REPLACE-C-SID rewrite / container advance (RFC 9800 §4.2)
 ```
 
 Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by

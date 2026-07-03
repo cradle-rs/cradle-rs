@@ -244,7 +244,10 @@ pub struct LocalSid {
     /// uSID locator-block / node bit lengths (NEXT-C-SID shift; later phase).
     pub block_bits: u8,
     pub node_bits: u8,
-    pub _pad2: [u8; 2],
+    /// Function bit length. Only REPLACE-C-SID reads it: the replaced C-SID
+    /// is `node_bits + fun_bits` wide (RFC 9800 LNFL, 16 or 32).
+    pub fun_bits: u8,
+    pub _pad2: [u8; 1],
 }
 
 // Behaviors mirror zebra-rs's live `SidBehavior` set (RFC 8986 + NEXT-C-SID).
@@ -272,6 +275,13 @@ pub const SRV6_BH_END_DT2M: u8 = 10;
 /// (`vrf_id` = the context id) via the `MIRROR` trie, reproducing that
 /// egress's decap locally.
 pub const SRV6_BH_END_M: u8 = 11;
+/// `End with REPLACE-C-SID` (RFC 9800 §4.2.1): rewrite only the C-SID bits
+/// of the DA from the packed container at `Segment List[SL]`, driven by the
+/// index argument in the DA's last bits. Matched at a block+C-SID prefix.
+pub const SRV6_BH_END_REP: u8 = 12;
+/// `End.X with REPLACE-C-SID` (RFC 9800 §4.2.2): as `End` with REPLACE-C-SID,
+/// then forward out the SID's cross-connect adjacency.
+pub const SRV6_BH_END_X_REP: u8 = 13;
 
 /// SRv6 endpoint flavors (RFC 8986 §4.16), OR-able in `LocalSid::flavors`.
 /// PSP: pop the SRH at the penultimate segment (this node's decrement hits
@@ -594,8 +604,10 @@ pub const STAT_SRV6_PSP: u32 = 28;
 pub const STAT_SRV6_USP: u32 = 29;
 /// USD flavor decaps (outer IPv6+SRH removed, inner forwarded).
 pub const STAT_SRV6_USD: u32 = 30;
+/// REPLACE-C-SID transits (C-SID rewrite or container-to-container advance).
+pub const STAT_SRV6_REPLACE: u32 = 31;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 31;
+pub const STAT_MAX: u32 = 32;
 
 // ============================== L7 proxy ===================================
 

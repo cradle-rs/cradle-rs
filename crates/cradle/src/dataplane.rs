@@ -777,6 +777,7 @@ impl Dataplane {
         nexthop_id: u32,
         block_bits: u8,
         node_bits: u8,
+        fun_bits: u8,
         flavors: u8,
     ) -> Result<()> {
         let key = Key::new(prefix_len as u32, sid.octets());
@@ -790,7 +791,8 @@ impl Dataplane {
                 nexthop_id,
                 block_bits,
                 node_bits,
-                _pad2: [0; 2],
+                fun_bits,
+                _pad2: [0; 1],
             },
             0,
         )?;
