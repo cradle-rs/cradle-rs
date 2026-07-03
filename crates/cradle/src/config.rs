@@ -93,10 +93,12 @@ pub struct Route6 {
 }
 
 /// A local SID: `behavior` is
-/// `end|end.x|end.dt4|end.dt6|end.dt46|end.b6|un|ua|ualib`.
+/// `end|end.x|end.dt4|end.dt6|end.dt46|end.b6|un|ua|ualib|end.replace|
+/// end.x.replace`.
 /// uSID (`un`/`ua`) SIDs match at `prefix_len` (block+node, e.g. 48) and carry
 /// the `block_bits`/`node_bits` NEXT-C-SID shift geometry; classic SIDs match
-/// at the default /128.
+/// at the default /128. REPLACE-C-SID SIDs match at block+C-SID (e.g. 80) and
+/// carry `block_bits` plus the C-SID width as `node_bits + fun_bits` (16/32).
 #[derive(Debug, Deserialize)]
 pub struct LocalSidCfg {
     pub sid: String,
@@ -114,6 +116,9 @@ pub struct LocalSidCfg {
     /// uSID node (micro-SID) bit length (0 = not a uSID).
     #[serde(default)]
     pub node_bits: u8,
+    /// Function bit length (REPLACE-C-SID: C-SID width = node + fun bits).
+    #[serde(default)]
+    pub fun_bits: u8,
     /// Endpoint flavors (RFC 8986 §4.16): any of `psp`, `usp`, `usd`.
     #[serde(default)]
     pub flavors: Vec<String>,
@@ -253,6 +258,8 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
         "ualib" => SRV6_BH_UALIB,
         "end.dt2u" => SRV6_BH_END_DT2U,
         "end.dt2m" => SRV6_BH_END_DT2M,
+        "end.replace" => SRV6_BH_END_REP,
+        "end.x.replace" => SRV6_BH_END_X_REP,
         other => anyhow::bail!("unknown SRv6 behavior {other:?}"),
     })
 }
@@ -367,6 +374,7 @@ impl Config {
                 ls.nexthop,
                 ls.block_bits,
                 ls.node_bits,
+                ls.fun_bits,
                 srv6_flavors(&ls.flavors)?,
             )
             .await?;

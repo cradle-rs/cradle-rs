@@ -1,0 +1,26 @@
+{
+  "ports": [
+    { "name": "dq", "l3": true },
+    { "name": "dc", "l3": true }
+  ],
+  "srv6_source": "fd00:3::1",
+  "nexthops": [
+    { "id": 1, "oif": "dc", "gateway": "fc00:2::1" },
+    { "id": 2, "oif": "dq", "gateway": "2001:db8:3::1", "segs": ["fd00:1::d46"] }
+  ],
+  "neighbors": [
+    { "oif": "dc", "ip": "fc00:2::1", "mac": "02:00:00:00:c2:01" },
+    { "oif": "dq", "ip": "2001:db8:3::1", "mac": "02:00:00:00:0c:01" }
+  ],
+  "localsids": [
+    { "sid": "fdbb:bbbb:bbbb:3:d46::", "behavior": "end.dt46", "prefix_len": 80 },
+    { "sid": "fdbb:bbbb:bbbb:3::", "behavior": "end.replace", "prefix_len": 80, "block_bits": 48, "node_bits": 16, "fun_bits": 16, "flavors": ["usp"] },
+    { "sid": "fdbb:bbbb:bbbb:3:dd::", "behavior": "end.replace", "prefix_len": 80, "block_bits": 48, "node_bits": 16, "fun_bits": 16, "flavors": ["usd"] }
+  ],
+  "routes6": [
+    { "prefix": "fc00:2::/64", "nexthop": 1 },
+    { "prefix": "fc00:9::1/128", "nexthop": 1 },
+    { "prefix": "fc00:8::1/128", "nexthop": 1 },
+    { "prefix": "fc00:1::/64", "nexthop": 2 }
+  ]
+}

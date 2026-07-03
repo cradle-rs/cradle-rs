@@ -41,7 +41,7 @@ use cradle_common::{
     MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
     MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2M,
     SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_M,
-    SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_BH_END_REP, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
     SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
@@ -49,7 +49,8 @@ use cradle_common::{
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
     STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_PSP, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
+    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
+    SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -1248,6 +1249,7 @@ const IPPROTO_ETHERNET: u8 = 143; // inner Ethernet frame (EVPN over SRv6)
 /// SRH offsets relative to the outer IPv6 header start (`EthHdr::LEN`).
 const SRH_OFF: usize = EthHdr::LEN + IP6_HDR_LEN; // outer SRH start
 const SRH_SL_OFF: usize = SRH_OFF + 3; // Segments Left byte
+const SRH_LAST_ENTRY_OFF: usize = SRH_OFF + 4; // Last Entry byte
 const SRH_SEGLIST_OFF: usize = SRH_OFF + 8; // first segment entry
 
 /// H.Encaps.Red (single-SID, reduced — no SRH): impose an outer IPv6 header
@@ -1797,6 +1799,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_UA => return srv6_end(ctx, &sid),
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
+        SRV6_BH_END_REP | SRV6_BH_END_X_REP => return srv6_replace(ctx, &sid),
         // DT2U (unicast) and DT2M (BUM) decap are identical: strip + bridge.
         // The inner frame's dst MAC (unicast vs broadcast) makes l2_switch
         // forward or flood it.
@@ -1998,6 +2001,222 @@ fn srv6_forward_adjacency(ctx: &XdpContext, nexthop_id: u32) -> Result<u32, ()> 
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
+/// Read the C-SID at position `pos` of the packed container `Segment
+/// List[sl_idx]` (RFC 9800 §4.2: position `p` occupies bits
+/// `[p*LNFL, (p+1)*LNFL)` of the 128-bit entry, bit 0 = MSB). 16-bit C-SIDs
+/// zero-extend to u32 so one zero test covers both widths. `idx_mask` is
+/// `K - 1` (3 → 32-bit C-SIDs, 7 → 16-bit), doubling as the position bound.
+#[inline(always)]
+fn replace_pos(ctx: &XdpContext, sl_idx: u8, pos: u8, idx_mask: u8) -> Result<u32, ()> {
+    let entry = SRH_SEGLIST_OFF + 16 * (sl_idx & 7) as usize;
+    if idx_mask == 3 {
+        let b = unsafe { *xdp_ptr::<[u8; 4]>(ctx, entry + 4 * (pos & 3) as usize)? };
+        Ok(u32::from_be_bytes(b))
+    } else {
+        let b = unsafe { *xdp_ptr::<[u8; 2]>(ctx, entry + 2 * (pos & 7) as usize)? };
+        Ok(u16::from_be_bytes(b) as u32)
+    }
+}
+
+/// Write a C-SID into the DA bits `[block, block + LNFL)` (byte-aligned
+/// block; RFC 9800 R20 — only the C-SID bits change, Block and Argument
+/// stay).
+#[inline(always)]
+fn write_csid(ctx: &XdpContext, block_bytes: usize, csid: u32, idx_mask: u8) -> Result<(), ()> {
+    let off = IP6_DST_OFF + (block_bytes & 15);
+    if idx_mask == 3 {
+        unsafe { *xdp_ptr::<[u8; 4]>(ctx, off)? = csid.to_be_bytes() };
+    } else {
+        unsafe { *xdp_ptr::<[u8; 2]>(ctx, off)? = (csid as u16).to_be_bytes() };
+    }
+    Ok(())
+}
+
+/// One `srv6_replace_once` outcome: a final verdict, or "the rewritten DA
+/// may be served by this same node — look it up and run again".
+enum ReplaceStep {
+    Act(u32),
+    Redispatch,
+}
+
+/// SRv6 `End` / `End.X` with REPLACE-C-SID (RFC 9800 §4.2.1 / §4.2.2). The
+/// DA is Block | C-SID | Argument, the argument's last bits indexing the
+/// active C-SID within the packed container at `Segment List[SL]`. Non-zero
+/// index: decrement it and rewrite only the C-SID bits of the DA from the
+/// container (R05/R20); a zero position there means the container ended
+/// early and the *next* list entry — a full 128-bit SID — becomes the DA
+/// wholesale (R06–R10). Index zero: advance to the next container, SL-- and
+/// index := K-1 (R12–R17). PSP composes at both rewrite points with the
+/// §4.2.8 condition (last C-SID of the last container — position 0 or zero
+/// padding next); USP/USD apply at the ultimate segment, End only, like the
+/// classic flavors. Malformed geometry or bounds PASS to the stack instead
+/// of raising ICMP errors, consistent with the rest of the datapath.
+///
+/// The R06 full-DA load can land on a SID of this very node (typically the
+/// final destination whose ultimate-segment flavors must still run), so it
+/// re-dispatches once — the same-node pattern `srv6_un` uses, mirroring the
+/// kernel's local re-input after `seg6_lookup_nexthop`.
+#[inline(always)]
+fn srv6_replace(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    let mut cur: LocalSid = *sid;
+    for _ in 0..2 {
+        match srv6_replace_once(ctx, &cur)? {
+            ReplaceStep::Act(a) => return Ok(a),
+            ReplaceStep::Redispatch => {
+                let da = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+                match SRV6_LOCALSID.get(&Key::new(128, da)) {
+                    Some(n) if matches!(n.behavior, SRV6_BH_END_REP | SRV6_BH_END_X_REP) => {
+                        cur = *n;
+                    }
+                    _ => {
+                        // Not served here — finish this SID's forward.
+                        if cur.behavior == SRV6_BH_END_X_REP {
+                            return srv6_forward_adjacency(ctx, cur.nexthop_id);
+                        }
+                        return Ok(xdp_action::XDP_PASS);
+                    }
+                }
+            }
+        }
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// A single REPLACE-C-SID endpoint pass — see `srv6_replace`.
+#[inline(always)]
+fn srv6_replace_once(ctx: &XdpContext, sid: &LocalSid) -> Result<ReplaceStep, ()> {
+    use ReplaceStep::Act;
+    let is_x = sid.behavior == SRV6_BH_END_X_REP;
+    let lb = sid.block_bits as usize;
+    let csid_bits = sid.node_bits as usize + sid.fun_bits as usize;
+    let idx_mask: u8 = match csid_bits {
+        32 => 3, // K = 4 positions per container, 2 index bits
+        16 => 7, // K = 8 positions per container, 3 index bits
+        _ => return Ok(Act(xdp_action::XDP_PASS)),
+    };
+    // Byte-aligned Block, C-SID inside the DA and clear of the index bits
+    // in its last byte.
+    if lb % 8 != 0 || lb + csid_bits > 120 {
+        return Ok(Act(xdp_action::XDP_PASS));
+    }
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    if outer_nh != IPPROTO_ROUTING {
+        // No SRH: the index argument is ignored and upper-layer processing
+        // is plain RFC 8986 (§4.2) — USD decapsulates bare IP-in-IPv6.
+        if sid.flavors & SRV6_FLAVOR_USD != 0 && !is_x {
+            let inner_et = match outer_nh {
+                IPPROTO_IPIP => ETH_P_IP,
+                IPPROTO_IPV6 => ETH_P_IPV6,
+                _ => return Ok(Act(xdp_action::XDP_PASS)),
+            };
+            decap_head(ctx, IP6_HDR_LEN, inner_et)?;
+            stat_inc(STAT_SRV6_USD);
+        }
+        return Ok(Act(xdp_action::XDP_PASS));
+    }
+    let ext_len = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 1)? };
+    if ext_len > 12 {
+        return Ok(Act(xdp_action::XDP_PASS));
+    }
+    let sl = unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? };
+    let idx = unsafe { *xdp_ptr::<u8>(ctx, IP6_DST_OFF + 15)? } & idx_mask;
+    if sl == 0 && (idx == 0 || (ext_len >= 2 && replace_pos(ctx, 0, idx - 1, idx_mask)? == 0)) {
+        // Ultimate segment (S02): the DA holds the last C-SID of the last
+        // container. USD first, then USP, then plain delivery — End only.
+        if sid.flavors & SRV6_FLAVOR_USD != 0 && !is_x {
+            let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF)? };
+            let inner_et = match srh_nh {
+                IPPROTO_IPIP => Some(ETH_P_IP),
+                IPPROTO_IPV6 => Some(ETH_P_IPV6),
+                _ => None, // non-IP payload — fall through to USP
+            };
+            if let Some(et) = inner_et {
+                decap_head(ctx, IP6_HDR_LEN + 8 * (ext_len as usize + 1), et)?;
+                stat_inc(STAT_SRV6_USD);
+                return Ok(Act(xdp_action::XDP_PASS));
+            }
+        }
+        if sid.flavors & SRV6_FLAVOR_USP != 0 && !is_x {
+            pop_srh(ctx)?;
+            stat_inc(STAT_SRV6_USP);
+        }
+        return Ok(Act(xdp_action::XDP_PASS));
+    }
+    if ext_len < 2 || sl as usize > MAX_SEGS {
+        return Ok(Act(xdp_action::XDP_PASS)); // container access needs a real SRH
+    }
+    let last_entry = unsafe { *xdp_ptr::<u8>(ctx, SRH_LAST_ENTRY_OFF)? };
+    let max_le = ext_len / 2 - 1;
+    if idx != 0 {
+        // R01–R11: consume the next position of the current container.
+        if last_entry > max_le || sl > last_entry {
+            return Ok(Act(xdp_action::XDP_PASS));
+        }
+        let nidx = idx - 1;
+        let csid = replace_pos(ctx, sl, nidx, idx_mask)?;
+        if csid == 0 {
+            // R06: zero position — the sequence continues at the next list
+            // entry, a full 128-bit SID; load it as the whole DA.
+            if sl == 0 {
+                return Ok(Act(xdp_action::XDP_PASS)); // unreachable: S02 above
+            }
+            let new_sl = sl - 1;
+            let next =
+                unsafe { *xdp_ptr::<[u8; 16]>(ctx, SRH_SEGLIST_OFF + 16 * new_sl as usize)? };
+            unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? = new_sl };
+            unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = next };
+            stat_inc(STAT_SRV6_REPLACE);
+            // The full-DA path keeps the plain RFC 8986 PSP condition.
+            if new_sl == 0 && sid.flavors & SRV6_FLAVOR_PSP != 0 {
+                pop_srh(ctx)?;
+                stat_inc(STAT_SRV6_PSP);
+            }
+            // The loaded SID may be served by this very node (its
+            // ultimate-segment flavors must run) — re-dispatch.
+            return Ok(ReplaceStep::Redispatch);
+        }
+        write_csid(ctx, lb / 8, csid, idx_mask)?;
+        let da15 = unsafe { *xdp_ptr::<u8>(ctx, IP6_DST_OFF + 15)? };
+        unsafe { *xdp_ptr::<u8>(ctx, IP6_DST_OFF + 15)? = (da15 & !idx_mask) | nidx };
+        stat_inc(STAT_SRV6_REPLACE);
+        // R20.1: the DA now holds the last C-SID of the last container.
+        if sl == 0
+            && sid.flavors & SRV6_FLAVOR_PSP != 0
+            && (nidx == 0 || replace_pos(ctx, 0, nidx - 1, idx_mask)? == 0)
+        {
+            pop_srh(ctx)?;
+            stat_inc(STAT_SRV6_PSP);
+        }
+    } else {
+        // R12–R17: container exhausted — advance to the next one and
+        // restart at its least significant position (K - 1).
+        if last_entry > max_le || sl > last_entry + 1 || sl == 0 {
+            return Ok(Act(xdp_action::XDP_PASS));
+        }
+        let new_sl = sl - 1;
+        let nidx = idx_mask; // K - 1
+        let csid = replace_pos(ctx, new_sl, nidx, idx_mask)?;
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? = new_sl };
+        write_csid(ctx, lb / 8, csid, idx_mask)?;
+        let da15 = unsafe { *xdp_ptr::<u8>(ctx, IP6_DST_OFF + 15)? };
+        unsafe { *xdp_ptr::<u8>(ctx, IP6_DST_OFF + 15)? = (da15 & !idx_mask) | nidx };
+        stat_inc(STAT_SRV6_REPLACE);
+        // R20.1 with index K-1 can only pop via the zero-padding disjunct.
+        if new_sl == 0
+            && sid.flavors & SRV6_FLAVOR_PSP != 0
+            && replace_pos(ctx, 0, nidx - 1, idx_mask)? == 0
+        {
+            pop_srh(ctx)?;
+            stat_inc(STAT_SRV6_PSP);
+        }
+    }
+    if is_x {
+        // End.X with REPLACE-C-SID: out the SID's cross-connect adjacency.
+        return srv6_forward_adjacency(ctx, sid.nexthop_id).map(Act);
+    }
+    Ok(Act(xdp_action::XDP_PASS))
 }
 
 /// SRv6 `End.M` — the egress-protection mirror (draft-ietf-rtgwg-srv6-

@@ -68,14 +68,18 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                 client
                     .add_local_sid(pb::LocalSid {
                         sid: ls.sid.clone(),
-                        prefix_len: 128,
+                        prefix_len: if ls.prefix_len == 0 {
+                            128
+                        } else {
+                            ls.prefix_len as u32
+                        },
                         behavior: config::srv6_behavior(&ls.behavior)? as u32,
                         vrf_table_id: ls.vrf,
                         oif: 0,
                         nh6: String::new(),
-                        lb_bits: 0,
-                        ln_bits: 0,
-                        fun_bits: 0,
+                        lb_bits: ls.block_bits as u32,
+                        ln_bits: ls.node_bits as u32,
+                        fun_bits: ls.fun_bits as u32,
                         arg_bits: 0,
                         nexthop_id: ls.nexthop,
                         flavors: config::srv6_flavors(&ls.flavors)? as u32,

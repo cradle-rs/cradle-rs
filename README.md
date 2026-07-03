@@ -117,16 +117,16 @@ extended with the uSID (NEXT-C-SID) actions and flavors. ✅ = implemented
 | uA (LIB) | ✅ | block:function prefix — shift + adjacency mid-carrier |
 | uDT4 / uDT6 / uDT46 | ✅ | End.DT* matched at the carrier's last micro-SID |
 | uDX* / uB6 | ⬜ | |
-| REPLACE-C-SID (End.LBS/XLBS) | ⬜ | |
 
 ### Flavors
 
 | Flavor | Status | Notes |
 |---|---|---|
 | NEXT-C-SID | ✅ | 16-bit micro-SIDs; blocks 16/32/48 |
-| PSP | ✅ | pop at the penultimate segment; End/End.X/uN/uA |
-| USP | ✅ | pop before local delivery; End/uN (SID must be a local address) |
-| USD | ✅ | decap + main-table forward; End/uN |
+| REPLACE-C-SID | ✅ | End/End.X, 32/16-bit C-SIDs — container walk + DA index argument, eBPF only (no kernel support) |
+| PSP | ✅ | pop at the penultimate segment; End/End.X/uN/uA + the REPLACE composite condition |
+| USP | ✅ | pop before local delivery; End/uN/End(REP) (SID must be a local address) |
+| USD | ✅ | decap + main-table forward; End/uN/End(REP) |
 
 ### Control plane (zebra-rs tee)
 

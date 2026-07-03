@@ -1,0 +1,44 @@
+# r1 — REPLACE-C-SID transit: LOC1's End SID (End with REPLACE-CSID,
+# IANA 101) installs into cradle at /80 via the tee; the eBPF walk
+# advances into the packed container and forwards on r2's IS-IS
+# locator route. The static route is the plain-IPv6 return path
+# toward c1, also teed.
+system:
+  cradle-grpc: "unix:/tmp/cradle_replace_zebra_ctl2.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: r1-s
+  ipv6:
+    address: 2001:db8:1::2/64
+- if-name: r1-r2
+  ipv6:
+    address: 2001:db8:2::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fdbb:bbbb:bbbb:1::/64
+    behavior: replace
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: fc00:1::/64
+        nexthop:
+        - address: 2001:db8:1::1
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: r1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: r1-r2
+      network-type: point-to-point
+      ipv6:
+        enable: true

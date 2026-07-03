@@ -1,0 +1,23 @@
+{
+  "ports": [
+    { "name": "qp", "l3": true },
+    { "name": "qd", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "qd", "gateway": "2001:db8:3::2" },
+    { "id": 2, "oif": "qp", "gateway": "2001:db8:2::1" }
+  ],
+  "neighbors": [
+    { "oif": "qd", "ip": "2001:db8:3::2", "mac": "02:00:00:00:0c:02" },
+    { "oif": "qp", "ip": "2001:db8:2::1", "mac": "02:00:00:00:0b:01" }
+  ],
+  "localsids": [
+    { "sid": "fdbb:bbbb:bbbb:2::", "behavior": "end.replace", "prefix_len": 80, "block_bits": 48, "node_bits": 16, "fun_bits": 16, "flavors": ["psp"] },
+    { "sid": "fdbb:bbbb:bbbb:2:e100::", "behavior": "end.x.replace", "prefix_len": 80, "block_bits": 48, "node_bits": 16, "fun_bits": 16, "nexthop": 1, "flavors": ["psp"] }
+  ],
+  "routes6": [
+    { "prefix": "fdbb:bbbb:bbbb:3::/64", "nexthop": 1 },
+    { "prefix": "fd00:1::/64", "nexthop": 2 },
+    { "prefix": "fc00:1::/64", "nexthop": 2 }
+  ]
+}
