@@ -72,6 +72,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         ln_bits: 0,
                         fun_bits: 0,
                         arg_bits: 0,
+                        nexthop_id: ls.nexthop,
                     })
                     .await?;
             }

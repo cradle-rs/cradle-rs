@@ -66,6 +66,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_encap",
     "srv6_decap",
     "fib6_vrf_hit",
+    "srv6_end",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -618,7 +619,7 @@ impl Cradle for GrpcService {
         let prefix_len = if s.prefix_len == 0 { 128 } else { s.prefix_len as u8 };
         let behavior = srv6_behavior(s.behavior).map_err(st)?;
         self.control
-            .add_localsid(sid, prefix_len, behavior, s.vrf_table_id, 0)
+            .add_localsid(sid, prefix_len, behavior, s.vrf_table_id, s.nexthop_id)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

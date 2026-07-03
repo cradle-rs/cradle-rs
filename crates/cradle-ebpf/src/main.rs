@@ -38,12 +38,13 @@ use cradle_common::{
     Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
     ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK,
     FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS,
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2, PORT_F_L3,
-    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, STAT_DROP, STAT_FIB4_DEFAULT,
-    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_L2_FLOOD,
-    STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
-    STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    STAT_SRV6_DECAP, STAT_SRV6_ENCAP, XDP_META_MAGIC,
+    MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
+    PORT_F_L3,
+    SRV6_BH_END, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END, XDP_META_MAGIC,
 };
 use network_types::eth::EthHdr;
 
@@ -1135,6 +1136,11 @@ const IP6_PAYLOAD_LEN_OFF: usize = EthHdr::LEN + 4;
 const IP6_VER_TC_FL: u32 = 0x6000_0000; // version 6, TC 0, flow-label 0
 const IPPROTO_IPIP: u8 = 4; // inner IPv4
 const IPPROTO_IPV6: u8 = 41; // inner IPv6
+const IPPROTO_ROUTING: u8 = 43; // IPv6 Routing header (SRH is type 4)
+/// SRH offsets relative to the outer IPv6 header start (`EthHdr::LEN`).
+const SRH_OFF: usize = EthHdr::LEN + IP6_HDR_LEN; // outer SRH start
+const SRH_SL_OFF: usize = SRH_OFF + 3; // Segments Left byte
+const SRH_SEGLIST_OFF: usize = SRH_OFF + 8; // first segment entry
 
 /// H.Encaps.Red (single-SID, reduced — no SRH): impose an outer IPv6 header
 /// whose DA is the SID and forward toward the underlay nexthop. Phase 1
@@ -1152,34 +1158,59 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
         Some(e) => unsafe { *e },
         None => return Ok(TC_ACT_PIPE as i32),
     };
-    if enc.num_segs != 1 {
-        return Ok(TC_ACT_PIPE as i32); // SRH-carrying encap is Phase 2
+    let n = enc.num_segs as usize;
+    if n == 0 || n > MAX_SEGS {
+        return Ok(TC_ACT_PIPE as i32);
     }
     let src: [u8; 16] = match SRV6_ENCAP_SRC.get(0) {
         Some(s) => *s,
         None => return Ok(TC_ACT_PIPE as i32),
     };
-    let next_hdr: u8 = if inner_ethertype == ETH_P_IPV6 {
+    let inner_proto: u8 = if inner_ethertype == ETH_P_IPV6 {
         IPPROTO_IPV6
     } else {
         IPPROTO_IPIP
     };
-    // Inner payload length = everything after the Ethernet header (the outer
-    // IPv6 payload once the header is prepended).
-    let inner_len = (ctx.len() as usize).saturating_sub(EthHdr::LEN) as u16;
+    // Reduced encap: a single SID needs no SRH (DA is the SID); >1 SIDs ride
+    // an SRH carrying segs[1..] (segs[0] is the DA). srh_len = 8 + 16*(n-1).
+    let srh_len = if n == 1 { 0 } else { 8 + 16 * (n - 1) };
+    let hdr_len = IP6_HDR_LEN + srh_len;
+    // Outer payload = the SRH (if any) plus everything after the MAC header.
+    let payload_len = ((ctx.len() as usize).saturating_sub(EthHdr::LEN) + srh_len) as u16;
 
-    // Grow room for the 40-byte outer IPv6 header right after the MAC header.
     ctx.skb
-        .adjust_room(IP6_HDR_LEN as i32, BPF_ADJ_ROOM_MAC, 0)
+        .adjust_room(hdr_len as i32, BPF_ADJ_ROOM_MAC, 0)
         .map_err(|_| ())?;
 
-    // Write the outer IPv6 header.
+    // Outer IPv6 header. next_header points at the SRH (43) when present,
+    // else directly at the inner packet.
+    let outer_nh = if n == 1 { inner_proto } else { IPPROTO_ROUTING };
     ctx.store(EthHdr::LEN, &IP6_VER_TC_FL.to_be(), 0).map_err(|_| ())?;
-    ctx.store(IP6_PAYLOAD_LEN_OFF, &inner_len.to_be(), 0).map_err(|_| ())?;
-    ctx.store(IP6_NEXTHDR_OFF, &next_hdr, 0).map_err(|_| ())?;
+    ctx.store(IP6_PAYLOAD_LEN_OFF, &payload_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(IP6_NEXTHDR_OFF, &outer_nh, 0).map_err(|_| ())?;
     ctx.store(IP6_HOP_OFF, &64u8, 0).map_err(|_| ())?;
     ctx.store(IP6_SRC_OFF, &src, 0).map_err(|_| ())?;
     ctx.store(IP6_DST_OFF, &enc.segs[0], 0).map_err(|_| ())?;
+
+    if n > 1 {
+        // SRH: [next_header, hdr_ext_len, routing_type=4, segments_left,
+        //       last_entry, flags, tag(2)] then the reversed segment list.
+        ctx.store(SRH_OFF, &inner_proto, 0).map_err(|_| ())?;
+        ctx.store(SRH_OFF + 1, &(2 * (n as u8 - 1)), 0).map_err(|_| ())?; // hdr_ext_len
+        ctx.store(SRH_OFF + 2, &4u8, 0).map_err(|_| ())?; // routing type 4 = SRH
+        ctx.store(SRH_SL_OFF, &(n as u8 - 1), 0).map_err(|_| ())?; // segments_left
+        ctx.store(SRH_OFF + 4, &(n as u8 - 2), 0).map_err(|_| ())?; // last_entry
+        ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
+        ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
+        // Reversed list, omitting segs[0]: segment_list[i] = segs[n-1-i].
+        for i in 0..MAX_SEGS {
+            if i >= n - 1 {
+                break;
+            }
+            ctx.store(SRH_SEGLIST_OFF + 16 * i, &enc.segs[n - 1 - i], 0)
+                .map_err(|_| ())?;
+        }
+    }
 
     stat_inc(STAT_SRV6_ENCAP);
     l2_xmit(ctx, nh, ETH_P_IPV6)
@@ -1366,8 +1397,6 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
     Ok(xdp_action::XDP_PASS)
 }
 
-const IPPROTO_ROUTING: u8 = 43;
-
 /// SRv6 `End.DT4/DT6/DT46` decap: the outer IPv6 DA matched a local SID, so
 /// strip the outer IPv6 header (and one *exhausted* SRH if present — segment
 /// walking is Phase 2) and hand the inner packet to the TC FIB stage,
@@ -1381,8 +1410,9 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         None => return Ok(xdp_action::XDP_PASS), // not a local SID — normal fwd
     };
     match sid.behavior {
+        SRV6_BH_END | SRV6_BH_END_X => return srv6_end(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
-        _ => return Ok(xdp_action::XDP_PASS), // End/End.X etc. — Phase 2
+        _ => return Ok(xdp_action::XDP_PASS), // uN/uA/B6 — later phases
     }
 
     // Reach the inner packet: outer next-header is the inner proto directly,
@@ -1428,6 +1458,56 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         }
     }
     Ok(xdp_action::XDP_PASS)
+}
+
+/// SRv6 `End` / `End.X` transit: the outer IPv6 DA matched a local endpoint
+/// SID, so walk the SRH — decrement Segments Left and copy the next segment
+/// into the DA — then forward. `End` hands the rewritten packet to the TC
+/// FIB stage (`XDP_PASS`, which decrements the hop limit); `End.X` forwards
+/// straight out the SID's adjacency (and decrements the hop limit itself,
+/// since it bypasses the TC forward).
+#[inline(always)]
+fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    // Require an SRH with an active segment (SL > 0). An End SID reached with
+    // no SRH or SL == 0 is a misconfiguration — pass to the stack.
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    if outer_nh != IPPROTO_ROUTING {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let sl = unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? };
+    if sl == 0 || sl as usize > MAX_SEGS {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let new_sl = sl - 1;
+    // segment_list[new_sl] becomes the new destination.
+    let next_seg = unsafe { *xdp_ptr::<[u8; 16]>(ctx, SRH_SEGLIST_OFF + 16 * new_sl as usize)? };
+    unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? = new_sl };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = next_seg };
+    stat_inc(STAT_SRV6_END);
+
+    if sid.behavior == SRV6_BH_END {
+        // Forward by the new DA — the TC FIB stage does the redirect + hop
+        // limit decrement.
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // End.X: forward to the SID's cross-connect adjacency directly.
+    let nh: NextHop = match NEXTHOPS.get_ptr(&sid.nexthop_id) {
+        Some(n) => unsafe { *n },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(&nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    // Decrement the outer hop limit (this path skips the TC forward).
+    let hop = unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? };
+    if hop <= 1 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = hop - 1 };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
 /// Remove `strip` bytes of outer header(s) between the Ethernet header and
