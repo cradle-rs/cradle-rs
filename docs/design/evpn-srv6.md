@@ -6,10 +6,11 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slice 1 (End.DT2U unicast) — in progress.** This is the last
-Phase-4 SRv6 item. It builds on the SRv6 encap/decap geometry (Phases 1–4)
-and the L2 switching MVP ([l2-switching.md](l2-switching.md)); the FDB, flood,
-and per-BD member maps already exist.
+Status: **Slices 1–2 (End.DT2U unicast + End.DT2M BUM) implemented** for a
+2-PE domain. This is the last Phase-4 SRv6 item. It builds on the SRv6
+encap/decap geometry (Phases 1–4) and the L2 switching MVP
+([l2-switching.md](l2-switching.md)); the FDB, flood, and per-BD member maps
+already exist.
 
 ## Packet format
 
@@ -48,12 +49,20 @@ the port's bridge domain (`FdbKey{mac, vlan}`):
   nexthop MAC, resolved from the SID's FIB6 route / a configured adjacency),
   outer IPv6 (SA = `SRV6_ENCAP_SRC`, DA = `remote_sid`, next-header = 143),
   then redirect. `stat_inc(STAT_SRV6_L2_ENCAP)`.
-- **local / unknown** — `XDP_PASS` to the TC `l2_switch` (local forward or
-  flood), unchanged.
+- **BUM** (broadcast/multicast dst) — tunneled to the bridge domain's
+  `End.DT2M` SID: the **all-ones-MAC FDB entry** (`ff:ff:ff:ff:ff:ff`) is the
+  per-BD BUM sentinel, so the same `l2_srv6_encap` runs with the `End.DT2M` SID
+  as DA. `stat_inc(STAT_SRV6_L2_BUM)`. In a 2-PE / single-local-CE domain that
+  one remote copy is the whole flood set; local flood and multi-remote
+  ingress replication are a later slice (see below).
+- **local / unknown-unicast** — `XDP_PASS` to the TC `l2_switch` (local
+  forward or flood), unchanged.
 
-### Egress PE — `End.DT2U` decap + bridge (`cradle_xdp`, then TC)
+### Egress PE — `End.DT2U`/`End.DT2M` decap + bridge (`cradle_xdp`, then TC)
 
-The outer IPv6 DA matches a local `End.DT2U` SID:
+The outer IPv6 DA matches a local `End.DT2U` (unicast) or `End.DT2M` (BUM)
+SID — the decap is identical, and the inner frame's dst MAC (unicast → forward,
+broadcast/multicast → flood) selects the `l2_switch` action:
 
 1. Strip the outer IPv6 header (`adjust_head(+40)` after sliding the outer eth
    off) — the inner Ethernet frame is now the L2 frame.
@@ -71,36 +80,47 @@ The outer IPv6 DA matches a local `End.DT2U` SID:
   routing in `vrf_id` (the field is reused as the bridge domain).
 - Behaviors `SRV6_BH_END_DT2U` / `SRV6_BH_END_DT2M`; the `SRV6_LOCALSID` entry
   carries the SID's bridge domain (reuse `vrf_id` as `bd`).
-- Counters `STAT_SRV6_L2_ENCAP` / `STAT_SRV6_L2_DECAP`.
-- Static config: L2 ports in a BD (existing), `localsids` with `end.dt2u`
-  (+ `bd`), FDB entries with a `remote_sid`, and `srv6_source`.
+- Counters `STAT_SRV6_L2_ENCAP` / `STAT_SRV6_L2_DECAP` / `STAT_SRV6_L2_BUM`.
+- Static config: L2 ports in a BD (existing), `localsids` with `end.dt2u` /
+  `end.dt2m` (+ `bd`), FDB entries with a `remote_sid` (including the
+  all-ones-MAC BUM sentinel), and `srv6_source`.
 
 ## Testing (BDD)
 
-`cradle_evpn_srv6`: `c1 ── pe1[cradle] ──(IPv6 underlay)── pe2[cradle] ── c2`,
-c1/c2 in the same bridge domain, kernel forwarding/seg6 off on the PEs. Static
-ARP on the CEs and static FDB on the PEs (remote MAC → remote `End.DT2U` SID)
-keep it deterministic and BUM-free. A ping c1↔c2 proves the L2 frame was
-encapped at pe1, carried over SRv6, and `End.DT2U`-decapped + bridged at pe2.
-Assert `srv6_l2_encap` @pe1 and `srv6_l2_decap` @pe2. Mandatory teardown.
+`c1 ── pe1[cradle] ──(IPv6 underlay)── pe2[cradle] ── c2`, c1/c2 in the same
+bridge domain, kernel forwarding/seg6 off on the PEs.
+
+- `cradle_evpn_srv6` — unicast: static ARP on the CEs + static FDB (remote MAC
+  → remote `End.DT2U` SID) keep it BUM-free. A ping proves the L2 frame was
+  encapped at pe1 and `End.DT2U`-decapped + bridged at pe2 (`srv6_l2_encap`
+  @pe1, `srv6_l2_decap` @pe2).
+- `cradle_evpn_srv6_bum` — BUM: **no** static ARP, so c1's ARP is broadcast and
+  must ride `End.DT2M` (the all-ones-MAC FDB sentinel → fd00:2::200); the reply
+  and ping then ride `End.DT2U`. A successful ping proves the BUM path carried
+  the ARP (`srv6_l2_bum` @pe1, `srv6_l2_decap` @pe2).
+
+Mandatory teardown on each.
 
 ## Phasing
 
-1. **Slice 1 — `End.DT2U` unicast** *(this change)*. MAC-in-SRv6 encap (XDP),
+1. **Slice 1 — `End.DT2U` unicast** *(done)*. MAC-in-SRv6 encap (XDP),
    `End.DT2U` decap + bridge, static FDB, `cradle_evpn_srv6` BDD.
-2. **Slice 2 — `End.DT2M` BUM**. Ingress replication of BUM (ARP/flood) frames
-   to the per-BD list of remote `End.DT2M` SIDs, plus local flood; egress
-   `End.DT2M` decap + local flood. The hard part is per-copy encap during
-   replication (`clone_redirect` can't encap; TC can't encap non-IP) — the
+2. **Slice 2 — `End.DT2M` BUM** *(done, 2-PE)*. BUM frames tunnel to the BD's
+   `End.DT2M` SID via the all-ones-MAC FDB sentinel; egress `End.DT2M` decap
+   reuses the `End.DT2U` decap (the broadcast inner floods via `l2_switch`).
+   `cradle_evpn_srv6_bum` BDD (ARP over DT2M, no static ARP). **Not yet:** the
+   per-copy encap during replication that a >2-PE domain (or multiple local
+   CEs) needs — `clone_redirect` can't encap and TC can't encap non-IP, so the
    likely shape is an XDP flood that encaps one copy per remote SID and
-   `clone_redirect`s locals, or a recirculation. Enables real ARP + learning.
+   `clone_redirect`s locals, or a recirculation.
 3. **Slice 3 — data-plane learning + the zebra tee**. Learn remote MAC →
    remote SID from decapped frames (EVPN Type-2 in the control plane); tee
    BGP EVPN routes (Type-2 → remote FDB, Type-3 → per-BD DT2M list) so a real
    EVPN control plane drives it. `End.M` egress-protection mirror.
 
-## Out of scope (this slice)
+## Out of scope (still design)
 
-BUM/`End.DT2M`, MAC learning over the overlay, multi-PE ingress replication,
-symmetric IRB (L3 gateway on the SRv6 L2 domain), 802.1Q-tagged bridge
-domains, and the EVPN control-plane tee — all listed above as later slices.
+Multi-PE / multi-local-CE ingress replication (per-copy encap), MAC learning
+over the overlay, symmetric IRB (L3 gateway on the SRv6 L2 domain),
+802.1Q-tagged bridge domains, and the EVPN control-plane tee — all listed
+above as Slice 3 / later work.

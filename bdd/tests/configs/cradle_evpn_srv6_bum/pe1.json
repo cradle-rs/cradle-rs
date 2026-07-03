@@ -1,0 +1,21 @@
+{
+  "ports": [
+    { "name": "pe1c", "vlan": 100 },
+    { "name": "pe1u", "l3": true }
+  ],
+  "srv6_source": "fd00:1::1",
+  "nexthops": [
+    { "id": 1, "oif": "pe1u", "gateway": "2001:db8::2" }
+  ],
+  "neighbors": [
+    { "oif": "pe1u", "ip": "2001:db8::2", "mac": "02:00:00:00:02:0a" }
+  ],
+  "localsids": [
+    { "sid": "fd00:1::100", "behavior": "end.dt2u", "vrf": 100 },
+    { "sid": "fd00:1::200", "behavior": "end.dt2m", "vrf": 100 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:c2:02", "bd": 100, "remote_sid": "fd00:2::100", "nexthop": 1 },
+    { "mac": "ff:ff:ff:ff:ff:ff", "bd": 100, "remote_sid": "fd00:2::200", "nexthop": 1 }
+  ]
+}

@@ -39,13 +39,14 @@ use cradle_common::{
     ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE,
     FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
     MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46,
-    SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_DROP,
-    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
+    SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END,
-    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_USID, XDP_META_MAGIC, XDP_META_MAGIC_L2,
+    STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_USID, XDP_META_MAGIC,
+    XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -1342,14 +1343,28 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     }
 }
 
-/// EVPN-over-SRv6 ingress: if the destination MAC is behind the overlay
-/// (`FDB_F_REMOTE`), MAC-in-SRv6 encapsulate the frame toward its `End.DT2U`
-/// SID; otherwise pass to the TC L2 stage (local forward / flood / learn).
+/// EVPN-over-SRv6 ingress. A **BUM** frame (broadcast/multicast) is tunneled to
+/// the bridge domain's `End.DT2M` SID — the all-ones-MAC FDB entry is the
+/// per-BD BUM sentinel (in a 2-PE / single-local-CE domain that is the whole
+/// flood set; local flood + multi-remote replication is a later slice). A
+/// **known-remote unicast** (`FDB_F_REMOTE`) is MAC-in-SRv6 encapsulated toward
+/// its `End.DT2U` SID. Everything else passes to the TC `l2_switch` (local
+/// forward / flood / learn).
 #[inline(always)]
 fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
     let dst = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? };
     if dst[0] & 0x01 != 0 {
-        return Ok(xdp_action::XDP_PASS); // BUM → TC flood (End.DT2M is slice 2)
+        let ent: FdbEntry = match FDB.get_ptr(&FdbKey {
+            mac: [0xff; 6],
+            vlan: bd,
+        }) {
+            Some(e) => unsafe { *e },
+            None => return Ok(xdp_action::XDP_PASS), // no BUM tunnel → TC local flood
+        };
+        if ent.flags & FDB_F_REMOTE == 0 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
     }
     let ent: FdbEntry = match FDB.get_ptr(&FdbKey { mac: dst, vlan: bd }) {
         Some(e) => unsafe { *e },
@@ -1358,16 +1373,17 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
     if ent.flags & FDB_F_REMOTE == 0 {
         return Ok(xdp_action::XDP_PASS); // local → TC forward
     }
-    l2_srv6_encap(ctx, &ent)
+    l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_ENCAP)
 }
 
 /// MAC-in-SRv6 encap: prepend an outer Ethernet + outer IPv6 header
-/// (`next_header = 143`, *Ethernet*, DA = the remote `End.DT2U` SID) and
-/// redirect out the underlay adjacency. Single service SID ⇒ no SRH. The inner
-/// frame is preserved untouched as the IPv6 payload. `ent.oif` is the underlay
-/// nexthop id (remote FDB entries reuse the `oif` field for it).
+/// (`next_header = 143`, *Ethernet*, DA = the remote `End.DT2U`/`End.DT2M` SID)
+/// and redirect out the underlay adjacency. Single service SID ⇒ no SRH. The
+/// inner frame is preserved untouched as the IPv6 payload. `ent.oif` is the
+/// underlay nexthop id (remote FDB entries reuse the `oif` field for it); `stat`
+/// distinguishes unicast (`STAT_SRV6_L2_ENCAP`) from BUM (`STAT_SRV6_L2_BUM`).
 #[inline(always)]
-fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry) -> Result<u32, ()> {
+fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry, stat: u32) -> Result<u32, ()> {
     let nh: NextHop = match NEXTHOPS.get_ptr(&ent.oif) {
         Some(n) => unsafe { *n },
         None => return Ok(xdp_action::XDP_PASS),
@@ -1396,7 +1412,7 @@ fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry) -> Result<u32, ()> {
     unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = 64 };
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)? = src6 };
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = ent.remote_sid };
-    stat_inc(STAT_SRV6_L2_ENCAP);
+    stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
@@ -1547,9 +1563,12 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_UA => return srv6_end(ctx, &sid),
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
-        SRV6_BH_END_DT2U => return srv6_dt2u(ctx, &sid),
+        // DT2U (unicast) and DT2M (BUM) decap are identical: strip + bridge.
+        // The inner frame's dst MAC (unicast vs broadcast) makes l2_switch
+        // forward or flood it.
+        SRV6_BH_END_DT2U | SRV6_BH_END_DT2M => return srv6_dt2u(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
-        _ => return Ok(xdp_action::XDP_PASS), // DT2M/B6 — later phases
+        _ => return Ok(xdp_action::XDP_PASS), // B6 — later phases
     }
 
     // Reach the inner packet: outer next-header is the inner proto directly,
@@ -1712,11 +1731,13 @@ fn srv6_ua(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     srv6_forward_adjacency(ctx, sid.nexthop_id)
 }
 
-/// SRv6 `End.DT2U` (EVPN over SRv6): the outer IPv6 DA matched a local L2
-/// service SID whose next-header is Ethernet (143). Strip the outer Ethernet
-/// and outer IPv6 header so the inner Ethernet frame becomes the L2 frame,
-/// then tag the SID's bridge domain (`sid.vrf_id`) into the XDP→TC metadata so
-/// the TC stage bridges it. MVP: reduced form only (no SRH).
+/// SRv6 `End.DT2U`/`End.DT2M` (EVPN over SRv6): the outer IPv6 DA matched a
+/// local L2 service SID whose next-header is Ethernet (143). Strip the outer
+/// Ethernet and outer IPv6 header so the inner Ethernet frame becomes the L2
+/// frame, then tag the SID's bridge domain (`sid.vrf_id`) into the XDP→TC
+/// metadata so the TC stage bridges it — a unicast inner MAC is forwarded
+/// (`DT2U`), a broadcast/multicast one is flooded (`DT2M`), both by `l2_switch`.
+/// MVP: reduced form only (no SRH).
 #[inline(always)]
 fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
