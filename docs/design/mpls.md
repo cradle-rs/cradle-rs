@@ -187,7 +187,11 @@ match u16::from_be(ethertype) {
    rewrite, below). Phase 1 bounds this to a single-label swap; a stack-growing
    swap (extra SR labels via `adjust_room` grow) is Phase 2.
 
-### `cradle_mpls` (XDP) — pops, PHP, and SR grow-swaps
+### `cradle_xdp` (XDP) — pops, PHP, and SR grow-swaps
+
+> The XDP stage was renamed `cradle_mpls` → `cradle_xdp` when SRv6 Phase 1
+> added an `End.DT*` decap branch beside MPLS — both overlays resize frames
+> the TC classifier can't. Dispatch is on the outer EtherType.
 
 Frame-resizing MPLS ops do **not** run at TC, for a reason discovered in
 implementation: `bpf_skb_adjust_room` returns `-ENOTSUPP` for any skb whose
@@ -271,7 +275,7 @@ bounded parse and a bounded push loop (`MAX_LABELS`), which is affordable for th
 swap/PHP/single-push MVP. If deep SR stacks or the VRF lookup push complexity
 past the limit, move MPLS into a **tail-call** program (the architecture doc
 already lists tail-call staging as a borrowed technique): the classifier
-tail-calls `cradle_mpls` on EtherType `0x8847`. This keeps the IP fast path lean
+tail-calls `cradle_xdp` on EtherType `0x8847`. This keeps the IP fast path lean
 and isolates MPLS complexity. The MVP stays inline; the tail call is the escape
 hatch.
 

@@ -1,0 +1,14 @@
+{
+  "ports": [
+    { "name": "pa", "l3": true },
+    { "name": "pb", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pb", "gateway": "2001:db8:2::2" },
+    { "id": 2, "oif": "pa", "gateway": "2001:db8:1::1" }
+  ],
+  "routes6": [
+    { "prefix": "fd00:2::/64", "nexthop": 1 },
+    { "prefix": "fd00:1::/64", "nexthop": 2 }
+  ]
+}

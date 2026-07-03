@@ -187,13 +187,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
         prog.load().context("loading cradle_tc")?;
     }
     {
-        // MPLS stage — XDP, because a TC program cannot shrink an MPLS
+        // XDP stage — XDP, because a TC program cannot shrink an MPLS
         // frame (bpf_skb_adjust_room is IP-only). Attached per L3 port.
         let prog: &mut aya::programs::Xdp = bpf
-            .program_mut("cradle_mpls")
-            .context("program cradle_mpls not found")?
+            .program_mut("cradle_xdp")
+            .context("program cradle_xdp not found")?
             .try_into()?;
-        prog.load().context("loading cradle_mpls")?;
+        prog.load().context("loading cradle_xdp")?;
     }
 
     let mut dp = Dataplane::from_ebpf(&mut bpf)?;
