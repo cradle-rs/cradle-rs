@@ -40,11 +40,12 @@ use cradle_common::{
     FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS,
     MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
     PORT_F_L3,
-    SRV6_BH_END, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, STAT_DROP,
-    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    SRV6_BH_END, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UN,
+    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END, XDP_META_MAGIC,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_USID,
+    XDP_META_MAGIC,
 };
 use network_types::eth::EthHdr;
 
@@ -1411,8 +1412,9 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
     match sid.behavior {
         SRV6_BH_END | SRV6_BH_END_X => return srv6_end(ctx, &sid),
+        SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
-        _ => return Ok(xdp_action::XDP_PASS), // uN/uA/B6 — later phases
+        _ => return Ok(xdp_action::XDP_PASS), // uA/B6 — later phases
     }
 
     // Reach the inner packet: outer next-header is the inner proto directly,
@@ -1508,6 +1510,46 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
+/// SRv6 uSID `uN` (NEXT-C-SID node transit): the outer IPv6 DA's active
+/// micro-SID matched this node's uN prefix (`block_bits + node_bits`, e.g.
+/// /48). Shift the uSID container left by one micro-SID — slide the bytes
+/// after the block up by `node_bits`, exposing the next micro-SID right after
+/// the locator block and zero-filling the vacated tail — then forward by the
+/// new DA (`XDP_PASS` → the TC FIB stage, which decrements the hop limit, as
+/// with `End`). No SRH is involved: the whole path rides in the DA carrier.
+///
+/// Only byte-aligned geometry is handled (micro-SIDs are 16-bit; the block is
+/// 16/32/48 — usid locators cap the block at 32, so /48 → block 32, node 16);
+/// anything else passes through untouched.
+#[inline(always)]
+fn srv6_un(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    let da = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+    let mut nda = da;
+    // Shift `da[block+node .. 16]` down to `da[block .. 16-node]`, zero the
+    // last `node` bytes. Constant ranges keep the shift verifier-safe.
+    match (sid.block_bits, sid.node_bits) {
+        (16, 16) => {
+            nda[2..14].copy_from_slice(&da[4..16]);
+            nda[14] = 0;
+            nda[15] = 0;
+        }
+        (32, 16) => {
+            nda[4..14].copy_from_slice(&da[6..16]);
+            nda[14] = 0;
+            nda[15] = 0;
+        }
+        (48, 16) => {
+            nda[6..14].copy_from_slice(&da[8..16]);
+            nda[14] = 0;
+            nda[15] = 0;
+        }
+        _ => return Ok(xdp_action::XDP_PASS), // unsupported uSID geometry
+    }
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = nda };
+    stat_inc(STAT_SRV6_USID);
+    Ok(xdp_action::XDP_PASS)
 }
 
 /// Remove `strip` bytes of outer header(s) between the Ethernet header and

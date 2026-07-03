@@ -3,7 +3,7 @@
 > Segment Routing over IPv6 in the eBPF data plane, driven by the zebra-rs SRv6
 > control plane (locators, End/End.DT behaviors, H.Encaps, L3VPN/EVPN over SRv6).
 
-Status: **Phases 1–3 implemented.** Phase 1: single-SID `H.Encaps.Red`
+Status: **Phases 1–4 (uN) implemented.** Phase 1: single-SID `H.Encaps.Red`
 imposition and `End.DT46/DT4/DT6` decap, **including the per-VRF binding**
 (the MVP absorbed the old "Phase 3" VRF item: MPLS Phase 3 already built the
 per-VRF FIB and the XDP→TC VRF-metadata channel, so `End.DT46` binds VRFs
@@ -14,11 +14,16 @@ Phase 3: **the zebra-rs tee** — `FibHandle::route_sid_install` tees the local
 SID (`AddLocalSid`), H.Encap route nexthops carry `segs`/`encap_mode`, and the
 encap source is derived from the first local SID's locator, so **BGP L3VPN over
 SRv6 programs cradle end to end** (the direct analog of the MPLS
-`cradle_l3vpn_zebra`). Static gRPC/JSON config for `cradle_srv6` (single-SID)
-and `cradle_srv6_te` (2-SID SR-TE via End + End.X); zebra-driven
+`cradle_l3vpn_zebra`). Phase 4: **uSID (NEXT-C-SID) transit** — the `uN`
+micro-SID node behavior, a prefix match (block+node, e.g. /48) that shifts the
+uSID container left by one micro-SID and forwards by the new DA, so a whole
+path rides in the IPv6 destination with no SRH and no per-hop table. Static
+gRPC/JSON config for `cradle_srv6` (single-SID), `cradle_srv6_te` (2-SID SR-TE
+via End + End.X), and `cradle_srv6_usid` (uN container transit); zebra-driven
 `cradle_srv6_l3vpn_zebra` (iBGP VPNv4+VPNv6 over IS-IS SRv6) proves the tee.
-BDDs cover both inner families across a v6 underlay. Phase 4 (uSID NEXT-C-SID
-datapath, EVPN over SRv6) remains design. It builds on the
+BDDs cover both inner families across a v6 underlay. The rest of Phase 4 —
+`uA`/`uALib` adjacency uSIDs and EVPN over SRv6 (L2 `End.DT2U`/`DT2M`) — remains
+design (EVPN gated on maturing cradle's L2 datapath). It builds on the
 [L2–L7 datapath](architecture.md) and reuses mechanisms from the
 [MPLS design](mpls.md) (packet geometry, the shared `cradle_xdp` stage, the
 VRF model, the zebra tee pattern).
@@ -262,6 +267,16 @@ Dispatch on `sid.behavior`:
   copy `Segment[SL]` into the IPv6 DA, decrement hop limit, forward (End: normal
   FIB; End.X: to `nexthop_id`'s adjacency). If `SL == 0` the SID is the last
   segment — proceed to upper-layer / decap per the flavor.
+- **uN** *(Phase 4, uSID / NEXT-C-SID)* — the DA matched this node's uN prefix
+  (`block_bits + node_bits`, e.g. /48). Shift the uSID container left by one
+  micro-SID: slide the address bytes after the block up by `node_bits`, exposing
+  the next micro-SID right after the locator block and zero-filling the vacated
+  tail; then forward by the new DA (`XDP_PASS` → the TC FIB stage decrements the
+  hop limit, as with `End`). No SRH — the path rides in the DA carrier. Only
+  byte-aligned geometry is handled (16-bit micro-SIDs; block 16/32/48 — usid
+  locators cap the block at 32, so /48 → block 32, node 16); other geometry
+  passes through. `stat_inc(STAT_SRV6_USID)`. `uA`/`uALib` (adjacency uSIDs) are
+  not yet handled (they pass).
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`
@@ -296,6 +311,7 @@ fast path lean. `MAX_SEGS` bounds the encap write loop and the SRH parse loop.
 STAT_SRV6_ENCAP   // H.Encaps imposed (ingress PE)
 STAT_SRV6_END     // End / End.X transit (Phase 2)
 STAT_SRV6_DECAP   // End.DT*/DX* decapsulation (egress PE)
+STAT_SRV6_USID    // uN NEXT-C-SID container shift (Phase 4)
 ```
 
 Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by
@@ -429,9 +445,11 @@ Kernel SRv6 processing (`net.ipv6.conf.all.seg6_enabled`, the kernel seg6local
 routes) stays **off** on the nodes, so a ping/HTTP that crosses proves the *eBPF*
 data plane did the encap and decap — the same "kernel forwarding off" trick the
 IP features use. Assert `srv6_encap` nonzero at the ingress PE and `srv6_decap`
-nonzero at the egress PE. Driven two ways: a static JSON config (nexthop
-`segs` + a `localsids` array) proves the datapath (`cradle_srv6`,
-`cradle_srv6_te`); `cradle_srv6_l3vpn_zebra` proves the Phase 3 integration —
+nonzero at the egress PE. Driven two ways: static JSON config (nexthop `segs`
++ a `localsids` array) proves the datapath — `cradle_srv6` (single-SID),
+`cradle_srv6_te` (2-SID SR-TE End + End.X), and `cradle_srv6_usid` (a uN uSID
+container `fcbb:bbbb:10:20::` shifted at the transit node — asserts `srv6_usid`
+nonzero there); `cradle_srv6_l3vpn_zebra` proves the Phase 3 integration —
 `c1 ── pe1[cradle+zebra] ── pe2[cradle+zebra] ── c2`, iBGP VPNv4+VPNv6 over
 IS-IS SRv6 with `encapsulation srv6`, kernel v4+v6 forwarding off on the PEs.
 It asserts the BGP session, the imported VPN prefixes, c1↔c2 v4 and v6 reach,
@@ -461,5 +479,18 @@ Each scenario ends with the mandatory `Scenario: Teardown topology`.
    landed in Phase 1; connected VRF routes come from `derive_port`, not the
    tee.) IS-IS/OSPF `End.X` adjacency SIDs and BGP color / SR-policy steering
    are producers the tee already supports but no BDD wires yet.
-4. **Phase 4 — uSID & EVPN.** NEXT-C-SID micro-SID (`uN`/`uA`) containers, plus
-   the L2 behaviors and the `End.M` egress-protection mirror for EVPN over SRv6.
+4. **Phase 4 — uSID & EVPN** *(uN done)*. NEXT-C-SID micro-SID transit: `uN`
+   is implemented — a prefix match (`block_bits + node_bits`) that shifts the
+   uSID container left by one micro-SID (`STAT_SRV6_USID`) and forwards by the
+   new DA; `LocalSid.block_bits`/`node_bits` carry the shift geometry, set by
+   the static `localsids` config (`prefix_len`/`block_bits`/`node_bits`) and by
+   the tee (from the SID structure's `lb_bits`/`ln_bits` — the tee already maps
+   `UN` → `SRV6_BH_UN` and installs uN at its block+node prefix). `cradle_srv6_usid`
+   BDD proves the datapath statically. **Still design:** `uA`/`uALib` adjacency
+   uSIDs (the LIB/GIB prefix-length semantics need a dedicated adjacency test —
+   zebra installs `uA` at /128 as classic End.X and `uALib` at a block+function
+   prefix), a control-plane-driven uSID test (IS-IS/OSPFv3 TI-LFA is the only
+   producer of multi-uSID carriers today, via `pack_carriers`), and **EVPN over
+   SRv6** (L2 `End.DT2U`/`DT2M` + the `End.M` egress-protection mirror), which is
+   gated on maturing cradle's L2 datapath (today a single-domain flood-and-learn
+   MVP — no 802.1Q, bridge domains, or overlay encap) before L2VPN can land.

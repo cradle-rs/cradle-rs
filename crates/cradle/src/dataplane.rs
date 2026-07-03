@@ -503,6 +503,7 @@ impl Dataplane {
 
     /// Install/replace a local SID (seg6local). Phase 1 executes the
     /// `End.DT4/DT6/DT46` behaviors; others are stored and punted.
+    #[allow(clippy::too_many_arguments)]
     pub fn localsid_add(
         &mut self,
         sid: Ipv6Addr,
@@ -510,6 +511,8 @@ impl Dataplane {
         behavior: u8,
         vrf_id: u32,
         nexthop_id: u32,
+        block_bits: u8,
+        node_bits: u8,
     ) -> Result<()> {
         let key = Key::new(prefix_len as u32, sid.octets());
         self.srv6_localsid.insert(
@@ -519,8 +522,8 @@ impl Dataplane {
                 _pad: [0; 3],
                 vrf_id,
                 nexthop_id,
-                block_bits: 0,
-                node_bits: 0,
+                block_bits,
+                node_bits,
                 _pad2: [0; 2],
             },
             0,

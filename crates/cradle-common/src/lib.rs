@@ -488,8 +488,10 @@ pub const STAT_SRV6_DECAP: u32 = 17;
 pub const STAT_FIB6_VRF_HIT: u32 = 18;
 /// SRv6: End / End.X segment transit (Segments Left walk).
 pub const STAT_SRV6_END: u32 = 19;
+/// SRv6 uSID: uN NEXT-C-SID transit (micro-SID container shift).
+pub const STAT_SRV6_USID: u32 = 20;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 20;
+pub const STAT_MAX: u32 = 21;
 
 // ============================== L7 proxy ===================================
 
