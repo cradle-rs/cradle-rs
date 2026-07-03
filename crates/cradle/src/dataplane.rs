@@ -311,9 +311,18 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Remove an overlay FDB entry.
+    /// Remove an overlay FDB entry — but only if it still IS one. After a
+    /// MAC moves to a local port, the datapath learn overwrites the remote
+    /// entry with a local one; the previous owner's Type-2 withdraw then
+    /// arrives and must not clobber the fresh local learn (RFC 7432 §7.7 —
+    /// the station is here now; the withdraw refers to a superseded remote
+    /// binding).
     pub fn fdb_remote_del(&mut self, mac: [u8; 6], bd: u16) -> Result<()> {
-        self.fdb.remove(&FdbKey { mac, vlan: bd })?;
+        let key = FdbKey { mac, vlan: bd };
+        if matches!(self.fdb.get(&key, 0), Ok(e) if e.flags & FDB_F_REMOTE == 0) {
+            return Ok(());
+        }
+        self.fdb.remove(&key)?;
         Ok(())
     }
 

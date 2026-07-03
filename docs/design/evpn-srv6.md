@@ -6,7 +6,7 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–7 implemented**: `End.DT2U` unicast,
+Status: **Slices 1–8 implemented**: `End.DT2U` unicast,
 `End.DT2M` BUM, **the BGP EVPN control-plane tee** — zebra-rs
 (`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
 per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
@@ -20,7 +20,9 @@ received IMET becomes a cradle-managed replication slot (`AddReplSlot`;
 cradle creates the veth pair, flood membership, and XDP attach itself), so
 any number of PEs works BGP-driven — plus **FDB aging**: idle local MACs
 expire (`FdbEntry.last_seen` + a user-space sweep, `fdb_age_secs`, default
-300) and their Type-2s are withdrawn via `WatchFdb` age events.
+300) and their Type-2s are withdrawn via `WatchFdb` age events — and **MAC
+mobility** (RFC 7432 §7.7): a moved station's Type-2 carries the MAC
+Mobility sequence (max remote + 1) so every PE follows the move.
 **BGP EVPN over SRv6 programs the L2 data
 plane end to end, fully dynamically** (the L2 analog of the L3VPN tee, plus
 the reverse channel L3 never needed). This was the last Phase-4 SRv6 item.
@@ -222,11 +224,25 @@ Mandatory teardown on each.
    Fresh traffic re-learns and the L2VPN reconverges by itself.
    `cradle_evpn_srv6_age` BDD (5s age, IPv6-quieted CE links: learn →
    idle → `fdb_aged` on both PEs → re-ping reconverges).
+8. **Slice 8 — MAC mobility (RFC 7432 §7.7)** *(done)*. The move machinery
+   mostly falls out of the earlier slices: at the NEW PE the datapath learn
+   overwrites the remote FDB entry → `WatchFdb` reports it → the Type-2 is
+   originated with the **MAC Mobility extended community** (seq =
+   `max(remote seqs) + 1`, tracked per `(vni, mac)` on `LocalRib`,
+   monotonic across re-advertisements; first-time local MACs stay at 0
+   with no EC); at the OLD PE, the new remote install flips its local
+   entry → the `WatchFdb` disappearance withdraws the stale Type-2. The
+   one datapath addition: `fdb_remote_del` is **local-guarded** — the old
+   owner's withdraw must not clobber the new PE's fresh local learn.
+   `rib::mac_add`'s existing seq staleness gate drops out-of-order
+   advertisements. `cradle_evpn_srv6_mob` BDD: a station (same MAC + IP)
+   migrates PE1 → PE2 → PE1 across a two-CE-port pe2; pings follow the
+   station at every step.
 
 ## Out of scope (still design)
 
 Refinements to aging (per-BD age knobs, event-driven expiry instead of the
-1s scan), MAC mobility (the learn channel reports learns; a move needs a
-sequence-number bump per RFC 7432 §7.7), symmetric IRB (L3 gateway on the
+1s scan), MAC mobility hardening (RFC 7432 §15.1 duplicate-MAC damping for
+flapping stations; the sticky/static bit), symmetric IRB (L3 gateway on the
 SRv6 L2 domain), 802.1Q-tagged bridge domains, and `End.M`
 egress-protection.
