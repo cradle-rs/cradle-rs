@@ -3,17 +3,23 @@
 > Segment Routing over IPv6 in the eBPF data plane, driven by the zebra-rs SRv6
 > control plane (locators, End/End.DT behaviors, H.Encaps, L3VPN/EVPN over SRv6).
 
-Status: **Phases 1–2 implemented.** Phase 1: single-SID `H.Encaps.Red`
+Status: **Phases 1–3 implemented.** Phase 1: single-SID `H.Encaps.Red`
 imposition and `End.DT46/DT4/DT6` decap, **including the per-VRF binding**
 (the MVP absorbed the old "Phase 3" VRF item: MPLS Phase 3 already built the
 per-VRF FIB and the XDP→TC VRF-metadata channel, so `End.DT46` binds VRFs
 from day one — Phase 1 only added the `FIB6_VRF` v6 mirror). Phase 2: **SRH
 transit** — multi-SID `H.Encaps.Red` that writes a real SRH, and the `End` /
 `End.X` endpoint behaviors that walk `Segments Left` (SR-TE waypoints).
-Static gRPC/JSON config; `cradle_srv6` (single-SID) and `cradle_srv6_te`
-(2-SID SR-TE via End + End.X) BDDs prove both inner families across a v6
-underlay. Phases 3–4 (the zebra tee, uSID/EVPN) remain design. It builds on
-the [L2–L7 datapath](architecture.md) and reuses mechanisms from the
+Phase 3: **the zebra-rs tee** — `FibHandle::route_sid_install` tees the local
+SID (`AddLocalSid`), H.Encap route nexthops carry `segs`/`encap_mode`, and the
+encap source is derived from the first local SID's locator, so **BGP L3VPN over
+SRv6 programs cradle end to end** (the direct analog of the MPLS
+`cradle_l3vpn_zebra`). Static gRPC/JSON config for `cradle_srv6` (single-SID)
+and `cradle_srv6_te` (2-SID SR-TE via End + End.X); zebra-driven
+`cradle_srv6_l3vpn_zebra` (iBGP VPNv4+VPNv6 over IS-IS SRv6) proves the tee.
+BDDs cover both inner families across a v6 underlay. Phase 4 (uSID NEXT-C-SID
+datapath, EVPN over SRv6) remains design. It builds on the
+[L2–L7 datapath](architecture.md) and reuses mechanisms from the
 [MPLS design](mpls.md) (packet geometry, the shared `cradle_xdp` stage, the
 VRF model, the zebra tee pattern).
 
@@ -359,22 +365,34 @@ fields, so no ABI break is needed).
 ## Control-plane integration (zebra-rs)
 
 zebra-rs tees IP FIB operations to cradle through `CradleFib`
-(`zebra-rs/src/fib/cradle.rs`), gated by `system cradle-grpc`. Its member
-extractors (`cradle_members_v6`) currently return only `(gateway, oif)` and
-**silently drop** `segs` / `encap_type` / `seg6local_action`, and neither
-`route_sid_install` nor the seg6-encap `nexthop_add` is teed — so SRv6 is
-invisible to cradle today. SRv6 extends both `proto/cradle.proto` and the tee at
-these hooks:
+(`zebra-rs/src/fib/cradle.rs`), gated by `system cradle-grpc`. **Phase 3 wired
+the SRv6 tee** (`zebra-rs` `feat/cradle-srv6-tee`): `proto/cradle.proto` gains
+`LocalSid` / `DelLocalSid` / `SetSrv6EncapSource` and `segs` + `encap_mode` on
+`Nexthop`, and the tee fires at these hooks:
 
-- **service SIDs / L3VPN egress** — tee `FibHandle::route_sid_install` /
-  `route_sid_uninstall` to `AddLocalSid` / `DelLocalSid`. BGP binds one
-  `End.DT46` per VRF (`src/bgp/vrf/spawn.rs`) with the VRF's kernel `table_id`;
-  IS-IS / OSPF locators originate `End` / `End.X` (`uN`/`uA` under uSID);
-- **transit encap / SR policy** — when a route's nexthop carries `segs`
-  (`encap_type = Seg6`), tee it as `Nexthop { segs, encap_mode }` and reference it
-  from the route (ingress `H.Encaps`); static routes and BGP color / SR-policy
-  steering are the producers;
-- **encap source** — forward the configured SRv6 source address once.
+- **service SIDs / L3VPN egress** — `FibHandle::route_sid_install` /
+  `route_sid_uninstall` tee to `AddLocalSid` / `DelLocalSid` (`local_sid_install`
+  maps `SidBehavior` → `SRV6_BH_*`, carries `vrf_table_id` and, for `End.X`,
+  resolves `(nh6, oif)` to a cradle nexthop id). BGP binds one `End.DT46` per VRF
+  (`src/bgp/vrf/spawn.rs`) with the VRF's `table_id`; IS-IS / OSPF locators
+  originate `End` / `End.X`;
+- **transit encap / SR policy** — a route nexthop carrying `segs`
+  (`encap_type = HEncap`/`HEncapRed`) tees as `Nexthop { segs, encap_mode }`; the
+  member extractor (`cradle_members`) now carries `u.segs` + `srv6_encap_mode`,
+  and `member_nexthop_id` dispatches SRv6 (v6-underlay) nexthops even for v4-inner
+  routes. BGP L3VPN-over-SRv6 imports (`build_srv6_vpn_fib_entry`) are the
+  producer;
+- **encap source** — derived once from the first local SID's locator and pushed
+  via `SetSrv6EncapSource` (zebra has no explicit encap-source config; a `::`
+  source still decap-and-forwards correctly, so this is off the critical path).
+
+**Connected VRF routes** are the one thing the tee does *not* carry: they are
+kernel-owned (created when the interface address is added), so zebra never
+`route_ipv4_add`s them. cradle instead derives them at `set_port` time from the
+kernel (`derive_port`, `getifaddrs`) into `FIB{4,6}_VRF[vrf]` — which means the
+PE customer-facing address must exist *before* cradle attaches. The
+`cradle_srv6_l3vpn_zebra` BDD seeds those addresses ahead of cradle for exactly
+this reason.
 
 The locator model is derived, not spelled out: `config.yang`'s
 `segment-routing { locator { prefix; behavior; } }` yields the SID structure from
@@ -411,10 +429,14 @@ Kernel SRv6 processing (`net.ipv6.conf.all.seg6_enabled`, the kernel seg6local
 routes) stays **off** on the nodes, so a ping/HTTP that crosses proves the *eBPF*
 data plane did the encap and decap — the same "kernel forwarding off" trick the
 IP features use. Assert `srv6_encap` nonzero at the ingress PE and `srv6_decap`
-nonzero at the egress PE. Drive it two ways: first a static JSON config (nexthop
-`segs` + a `localsids` array) to prove the datapath, then a zebra-rs SRv6 L3VPN /
-locator config teed over gRPC to prove the integration. Each scenario ends with
-the mandatory `Scenario: Teardown topology`.
+nonzero at the egress PE. Driven two ways: a static JSON config (nexthop
+`segs` + a `localsids` array) proves the datapath (`cradle_srv6`,
+`cradle_srv6_te`); `cradle_srv6_l3vpn_zebra` proves the Phase 3 integration —
+`c1 ── pe1[cradle+zebra] ── pe2[cradle+zebra] ── c2`, iBGP VPNv4+VPNv6 over
+IS-IS SRv6 with `encapsulation srv6`, kernel v4+v6 forwarding off on the PEs.
+It asserts the BGP session, the imported VPN prefixes, c1↔c2 v4 and v6 reach,
+and `srv6_encap` @pe1 / `srv6_decap` + `fib4_vrf_hit` + `fib6_vrf_hit` @pe2.
+Each scenario ends with the mandatory `Scenario: Teardown topology`.
 
 ## Phasing
 
@@ -431,9 +453,13 @@ the mandatory `Scenario: Teardown topology`.
    exercises Phase 1's exhausted-SRH-skip for real. `End.B6.Encaps` binding
    SIDs deferred; `End.X` adjacency SIDs get their IGP-originated exercise
    with the Phase 3 tee.
-3. **Phase 3 — zebra tee.** Wire the `CradleFib` SRv6 tee (`route_sid_install`
-   → `AddLocalSid`, `segs`-on-nexthop → the encap path, encap source) so
-   BGP L3VPN over SRv6 / IS-IS-OSPF locators / SR policies drive cradle. (The
-   per-VRF FIB the old Phase 3 also listed already landed in Phase 1.)
+3. **Phase 3 — zebra tee** *(done)*. The `CradleFib` SRv6 tee
+   (`route_sid_install` → `AddLocalSid`, `segs`-on-nexthop → the encap path,
+   encap source derived from the local SID's locator) so BGP L3VPN over SRv6
+   drives cradle end to end; `cradle_srv6_l3vpn_zebra` BDD (iBGP VPNv4+VPNv6
+   over IS-IS SRv6). (The per-VRF FIB the old Phase 3 also listed already
+   landed in Phase 1; connected VRF routes come from `derive_port`, not the
+   tee.) IS-IS/OSPF `End.X` adjacency SIDs and BGP color / SR-policy steering
+   are producers the tee already supports but no BDD wires yet.
 4. **Phase 4 — uSID & EVPN.** NEXT-C-SID micro-SID (`uN`/`uA`) containers, plus
    the L2 behaviors and the `End.M` egress-protection mirror for EVPN over SRv6.
