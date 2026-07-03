@@ -1,0 +1,55 @@
+# t — the End.T node: LOC1 is bound to vrf-t, so its node SID installs
+# as End.T with the VRF's table id (behavior 14 + vrf_table_id through
+# the tee) and `flavor: [usd]` lets the bare single-SID encap from s
+# decapsulate here. The c2 LAN (td) and the return link (tr) live in
+# vrf-t: the connected LAN route and the static return route exist
+# only in that table — main has no path to either side.
+system:
+  cradle-grpc: "unix:/tmp/cradle_endt_zebra_ctl2.sock"
+vrf:
+- name: vrf-t
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: ts
+  ipv6:
+    address: 2001:db8:1::2/64
+- if-name: tr
+  vrf: vrf-t
+  ipv6:
+    address: 2001:db8:3::2/64
+- if-name: td
+  vrf: vrf-t
+  ipv6:
+    address: fc00:2::ff/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fd00:5::/64
+    vrf: vrf-t
+    flavor:
+    - usd
+router:
+  static:
+    vrf:
+    - name: vrf-t
+      ipv6:
+        route:
+        - prefix: fc00:1::/64
+          nexthop:
+          - address: 2001:db8:3::1
+        - prefix: fc00:9::1/128
+          nexthop:
+          - address: fc00:2::1
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: t
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true

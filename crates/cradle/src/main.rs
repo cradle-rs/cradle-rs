@@ -200,6 +200,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
 
     let mut dp = Dataplane::from_ebpf(&mut bpf)?;
+    dp.meta_cookie_seed()?;
     if fib4_mode == Fib4Mode::Dir24 {
         dp.set_fib4_mode_dir24()?;
         info!("IPv4 FIB engine: dir24 (DIR-24-8 direct index)");

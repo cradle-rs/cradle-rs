@@ -96,7 +96,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 |---|---|---|
 | End | ✅ | SRH `Segments Left` walk (XDP) |
 | End.X | ✅ | adjacency cross-connect (XDP redirect) |
-| End.T | ⬜ | |
+| End.T | ✅ | End walk + table-scoped egress lookup (VRF metadata to the TC stage) |
 | End.DX2 / DX2V | ⬜ | |
 | End.DT2U | ✅ | EVPN unicast: decap + bridge by dst MAC |
 | End.DT2M | ✅ | EVPN BUM: decap + flood (split horizon) |
@@ -119,6 +119,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | uA | ✅ | adjacency micro-SID (/128, classic End.X form) |
 | uA (LIB) | ✅ | block:function prefix — shift + adjacency mid-carrier |
 | uDT4 / uDT6 / uDT46 | ✅ | End.DT* matched at the carrier's last micro-SID |
+| uT | ✅ | table-bound uN — End.T semantics at end-of-carrier |
 | uDX* / uB6 | ⬜ | |
 
 ### Flavors
@@ -145,3 +146,4 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | Mirror SID egress protection (End.M) | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
 | Locator flavors (PSP/USP/USD) | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |
 | REPLACE-C-SID locators | ✅ | `behavior: replace` → End(REP)/End.X(REP) at /(LB+LN+Fun), REP codepoints + Arg-length advertisement; eBPF-only (no kernel op); `cradle_replace_zebra` |
+| VRF-bound locators (End.T / uT) | ✅ | locator `vrf` leaf → RIB table resolution → End.T/uT codepoints + kernel End.T + tee; `cradle_endt_zebra` |

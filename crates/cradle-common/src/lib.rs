@@ -286,6 +286,10 @@ pub const SRV6_BH_END_REP: u8 = 12;
 /// `End.X with REPLACE-C-SID` (RFC 9800 §4.2.2): as `End` with REPLACE-C-SID,
 /// then forward out the SID's cross-connect adjacency.
 pub const SRV6_BH_END_X_REP: u8 = 13;
+/// `End.T` (RFC 8986 §4.3): the End walk, then the egress lookup scoped to
+/// the SID's table (`vrf_id`) via the XDP→TC metadata channel. A `uN` whose
+/// `vrf_id` is set behaves the same at end-of-carrier — that is zebra's uT.
+pub const SRV6_BH_END_T: u8 = 14;
 
 /// SRv6 endpoint flavors (RFC 8986 §4.16), OR-able in `LocalSid::flavors`.
 /// PSP: pop the SRH at the penultimate segment (this node's decrement hits
@@ -612,8 +616,10 @@ pub const STAT_SRV6_USD: u32 = 30;
 pub const STAT_SRV6_REPLACE: u32 = 31;
 /// End.B6.Encaps binds (inner End walk + policy encapsulation pushed).
 pub const STAT_SRV6_B6: u32 = 32;
+/// End.T table-scoped forwards (the End walk's lookup moved to table T).
+pub const STAT_SRV6_ENDT: u32 = 33;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 33;
+pub const STAT_MAX: u32 = 34;
 
 // ============================== L7 proxy ===================================
 
