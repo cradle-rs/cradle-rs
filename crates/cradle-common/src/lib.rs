@@ -127,6 +127,8 @@ pub const NH_F_V6: u32 = 1 << 0;
 pub const NH_F_ONLINK: u32 = 1 << 1;
 /// Nexthop imposes/swaps an MPLS label stack (`labels`/`num_labels`).
 pub const NH_F_MPLS: u32 = 1 << 2;
+/// Nexthop imposes an SRv6 encap (`SRV6_ENCAP[nexthop_id]`).
+pub const NH_F_SRV6: u32 = 1 << 3;
 
 /// Maximum out-label stack depth (bounds the datapath's parse/push loops for
 /// the verifier). Covers SR-MPLS depths seen in practice; deeper is rejected
@@ -210,6 +212,60 @@ pub const MPLS_OP_SWAP: u8 = 0;
 pub const MPLS_OP_POP_L3: u8 = 1;
 /// Pop one label, forward the remaining (still labeled) stack.
 pub const MPLS_OP_POP: u8 = 2;
+
+// ============================== SRv6 =======================================
+
+/// Local SID table entry (`SRV6_LOCALSID`, LPM by the IPv6 destination):
+/// the behavior this node executes when a packet's DA matches the SID.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LocalSid {
+    /// `SRV6_BH_*` behavior.
+    pub behavior: u8,
+    pub _pad: [u8; 3],
+    /// VRF/table id for `End.DT4/DT6/DT46` (0 = global).
+    pub vrf_id: u32,
+    /// Nexthop id for `End.X` / `uA` (adjacency cross-connect); 0 otherwise.
+    pub nexthop_id: u32,
+    /// uSID locator-block / node bit lengths (NEXT-C-SID shift; later phase).
+    pub block_bits: u8,
+    pub node_bits: u8,
+    pub _pad2: [u8; 2],
+}
+
+// Behaviors mirror zebra-rs's live `SidBehavior` set (RFC 8986 + NEXT-C-SID).
+pub const SRV6_BH_END: u8 = 0;
+pub const SRV6_BH_END_X: u8 = 1;
+pub const SRV6_BH_END_DT4: u8 = 2;
+pub const SRV6_BH_END_DT6: u8 = 3;
+pub const SRV6_BH_END_DT46: u8 = 4;
+pub const SRV6_BH_END_B6: u8 = 5;
+pub const SRV6_BH_UN: u8 = 6;
+pub const SRV6_BH_UA: u8 = 7;
+
+/// Maximum SIDs in an imposed segment list (bounds the encap/SRH loops).
+pub const MAX_SEGS: usize = 6;
+
+/// Segment list imposed by an `NH_F_SRV6` nexthop (`SRV6_ENCAP`, keyed by
+/// nexthop id — SIDs are 16 bytes, too big to inline on `NextHop`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Srv6Encap {
+    /// 1 = reduced single-SID (no SRH); >1 = SRH carried (later phase).
+    pub num_segs: u8,
+    pub _pad: [u8; 3],
+    /// `[0]` = first SID = the outer destination.
+    pub segs: [[u8; 16]; MAX_SEGS],
+}
+
+/// Per-VRF IPv6 LPM key — the v6 mirror of `Vrf4Key`: a route `addr/len` in
+/// VRF `v` is inserted with `prefix_len = 32 + len`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Vrf6Key {
+    pub vrf_id: u32,
+    pub addr: [u8; 16],
+}
 
 /// Pack an MPLS label stack entry: Label(20) | TC(3) | S(1) | TTL(8).
 /// Returns the host-order `u32` whose big-endian bytes are the wire LSE.
@@ -424,8 +480,14 @@ pub const STAT_FIB4_TBL8_HIT: u32 = 13;
 pub const STAT_FIB4_DEFAULT: u32 = 14;
 /// Resolved in a per-VRF FIB table.
 pub const STAT_FIB4_VRF_HIT: u32 = 15;
+/// SRv6: outer IPv6 imposed (ingress PE, H.Encaps).
+pub const STAT_SRV6_ENCAP: u32 = 16;
+/// SRv6: End.DT* decapsulation (egress PE).
+pub const STAT_SRV6_DECAP: u32 = 17;
+/// Resolved in a per-VRF IPv6 FIB table.
+pub const STAT_FIB6_VRF_HIT: u32 = 18;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 16;
+pub const STAT_MAX: u32 = 19;
 
 // ============================== L7 proxy ===================================
 
@@ -448,7 +510,7 @@ mod user {
 
     pod!(
         FibEntry, NextHop, Neigh4Key, Neigh6Key, NeighEntry, NhGroupKey,
-        MplsEntry, Vrf4Key,
+        MplsEntry, Vrf4Key, Vrf6Key, LocalSid, Srv6Encap,
         FdbKey, FdbEntry, PortConfig, L2MemberKey,
         ServiceKey, ServiceInfo, BackendKey, Backend, CtKey, CtEntry,
         ServiceKey6, Backend6, CtKey6, CtEntry6,

@@ -53,9 +53,6 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
             }
             info!("port {name}: derived v4 {ip}/{plen} (vrf {vrf})");
         } else if let (Some(sin6), Some(min6)) = (addr.as_sockaddr_in6(), mask.as_sockaddr_in6()) {
-            if vrf != 0 {
-                continue; // no FIB6_VRF yet — don't leak v6 into the global table
-            }
             let ip = Ipv6Addr::from(sin6.as_ref().sin6_addr.s6_addr);
             // Skip loopback and link-local (fe80::/10); those don't participate
             // in global forwarding here.
@@ -69,12 +66,12 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
                 .iter()
                 .map(|b| b.count_ones() as u8)
                 .sum();
-            dp.route6_add(ip, 128, 0, FIB_F_LOCAL)?;
+            dp.route6_add(vrf, ip, 128, 0, FIB_F_LOCAL)?;
             if plen < 128 {
                 let net = mask_v6(ip, plen);
                 let nh = CONNECTED_NH_BASE_V6 + ifindex;
                 dp.nexthop_set_v6(nh, None, ifindex, &[])?;
-                dp.route6_add(net, plen, nh, 0)?;
+                dp.route6_add(vrf, net, plen, nh, 0)?;
             }
             info!("port {name}: derived v6 {ip}/{plen}");
         }

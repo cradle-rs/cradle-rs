@@ -19,10 +19,10 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, FibEntry, FibWord, L2MemberKey, MplsEntry, Neigh4Key,
+    Backend, Backend6, BackendKey, FibEntry, FibWord, L2MemberKey, LocalSid, MplsEntry, Neigh4Key,
     Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Vrf4Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, LB_ALGO_RANDOM, MAX_LABELS,
-    NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_V6, STAT_MAX,
+    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, LB_ALGO_RANDOM, MAX_LABELS,
+    NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_MAX,
 };
 
 use crate::{
@@ -34,6 +34,10 @@ pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
     fib6: LpmTrie<MapData, [u8; 16], FibEntry>,
     fib4_vrf: LpmTrie<MapData, Vrf4Key, FibEntry>,
+    fib6_vrf: LpmTrie<MapData, Vrf6Key, FibEntry>,
+    srv6_localsid: LpmTrie<MapData, [u8; 16], LocalSid>,
+    srv6_encap: HashMap<MapData, u32, Srv6Encap>,
+    srv6_encap_src: Array<MapData, [u8; 16]>,
     tbl24: Array<MapData, FibWord>,
     tbl8: Array<MapData, FibWord>,
     default4: Array<MapData, FibWord>,
@@ -69,6 +73,18 @@ impl Dataplane {
             fib6: LpmTrie::try_from(bpf.take_map("FIB6").context("map FIB6 missing")?)?,
             fib4_vrf: LpmTrie::try_from(
                 bpf.take_map("FIB4_VRF").context("map FIB4_VRF missing")?,
+            )?,
+            fib6_vrf: LpmTrie::try_from(
+                bpf.take_map("FIB6_VRF").context("map FIB6_VRF missing")?,
+            )?,
+            srv6_localsid: LpmTrie::try_from(
+                bpf.take_map("SRV6_LOCALSID").context("map SRV6_LOCALSID missing")?,
+            )?,
+            srv6_encap: HashMap::try_from(
+                bpf.take_map("SRV6_ENCAP").context("map SRV6_ENCAP missing")?,
+            )?,
+            srv6_encap_src: Array::try_from(
+                bpf.take_map("SRV6_ENCAP_SRC").context("map SRV6_ENCAP_SRC missing")?,
             )?,
             tbl24: Array::try_from(bpf.take_map("TBL24").context("map TBL24 missing")?)?,
             tbl8: Array::try_from(bpf.take_map("TBL8").context("map TBL8 missing")?)?,
@@ -445,21 +461,119 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Install/replace an SRv6-encap nexthop: an IPv6 underlay nexthop
+    /// (`gateway`/`oif`) that imposes the segment list `segs` (H.Encaps).
+    pub fn nexthop_set_srv6(
+        &mut self,
+        id: u32,
+        gateway: Option<Ipv6Addr>,
+        oif: u32,
+        segs: &[Ipv6Addr],
+    ) -> Result<()> {
+        if segs.is_empty() || segs.len() > cradle_common::MAX_SEGS {
+            anyhow::bail!("SRv6 segment list must be 1..={}", cradle_common::MAX_SEGS);
+        }
+        let nh = NextHop {
+            gateway_v4: 0,
+            gateway_v6: gateway.map(|a| a.octets()).unwrap_or([0; 16]),
+            oif,
+            flags: NH_F_V6 | NH_F_SRV6,
+            labels: [0; MAX_LABELS],
+            num_labels: 0,
+            _pad: [0; 3],
+        };
+        self.nexthops.insert(id, nh, 0)?;
+        let mut enc = Srv6Encap {
+            num_segs: segs.len() as u8,
+            _pad: [0; 3],
+            segs: [[0u8; 16]; cradle_common::MAX_SEGS],
+        };
+        for (i, s) in segs.iter().enumerate() {
+            enc.segs[i] = s.octets();
+        }
+        self.srv6_encap.insert(id, enc, 0)?;
+        Ok(())
+    }
+
+    /// Set the SRv6 H.Encaps outer source address.
+    pub fn srv6_encap_source_set(&mut self, addr: Ipv6Addr) -> Result<()> {
+        self.srv6_encap_src.set(0, addr.octets(), 0)?;
+        Ok(())
+    }
+
+    /// Install/replace a local SID (seg6local). Phase 1 executes the
+    /// `End.DT4/DT6/DT46` behaviors; others are stored and punted.
+    pub fn localsid_add(
+        &mut self,
+        sid: Ipv6Addr,
+        prefix_len: u8,
+        behavior: u8,
+        vrf_id: u32,
+        nexthop_id: u32,
+    ) -> Result<()> {
+        let key = Key::new(prefix_len as u32, sid.octets());
+        self.srv6_localsid.insert(
+            &key,
+            LocalSid {
+                behavior,
+                _pad: [0; 3],
+                vrf_id,
+                nexthop_id,
+                block_bits: 0,
+                node_bits: 0,
+                _pad2: [0; 2],
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Remove a local SID.
+    pub fn localsid_del(&mut self, sid: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        let key = Key::new(prefix_len as u32, sid.octets());
+        self.srv6_localsid.remove(&key)?;
+        Ok(())
+    }
+
     /// Install an IPv6 route `addr/prefix_len` pointing at `nexthop_id`.
+    /// `vrf != 0` targets that VRF's IPv6 table.
     pub fn route6_add(
         &mut self,
+        vrf: u32,
         addr: Ipv6Addr,
         prefix_len: u8,
         nexthop_id: u32,
         flags: u32,
     ) -> Result<()> {
+        if vrf != 0 {
+            let key = Key::new(
+                32 + prefix_len as u32,
+                Vrf6Key {
+                    vrf_id: vrf,
+                    addr: addr.octets(),
+                },
+            );
+            self.fib6_vrf.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
+            return Ok(());
+        }
         let key = Key::new(prefix_len as u32, addr.octets());
         self.fib6.insert(&key, FibEntry { nexthop_id, flags }, 0)?;
         Ok(())
     }
 
     /// Remove an IPv6 route.
-    pub fn route6_del(&mut self, addr: Ipv6Addr, prefix_len: u8) -> Result<()> {
+    pub fn route6_del(&mut self, vrf: u32, addr: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        if vrf != 0 {
+            let key = Key::new(
+                32 + prefix_len as u32,
+                Vrf6Key {
+                    vrf_id: vrf,
+                    addr: addr.octets(),
+                },
+            );
+            self.fib6_vrf.remove(&key)?;
+            return Ok(());
+        }
         let key = Key::new(prefix_len as u32, addr.octets());
         self.fib6.remove(&key)?;
         Ok(())

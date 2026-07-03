@@ -34,15 +34,16 @@ use aya_ebpf::{
 };
 use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
-    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, MplsEntry,
+    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid, MplsEntry,
     Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
-    ServiceKey6, Vrf4Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK, FIBW_TBL8,
-    FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MPLS_OP_POP,
-    MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_V6, PORT_F_L2, PORT_F_L3, STAT_DROP,
-    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_L2_FLOOD,
+    ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FIBW_ID_MASK,
+    FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS,
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2, PORT_F_L3,
+    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, STAT_DROP, STAT_FIB4_DEFAULT,
+    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_L2_FLOOD,
     STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
     STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    XDP_META_MAGIC,
+    STAT_SRV6_DECAP, STAT_SRV6_ENCAP, XDP_META_MAGIC,
 };
 use network_types::eth::EthHdr;
 
@@ -60,6 +61,17 @@ static FIB6: LpmTrie<[u8; 16], FibEntry> = LpmTrie::with_max_entries(4096, 0);
 // vrf-prefixed key (mpls.md Phase 3; shared seam with SRv6/EVPN designs). ---
 #[map]
 static FIB4_VRF: LpmTrie<Vrf4Key, FibEntry> = LpmTrie::with_max_entries(4096, 0);
+#[map]
+static FIB6_VRF: LpmTrie<Vrf6Key, FibEntry> = LpmTrie::with_max_entries(4096, 0);
+
+// --- SRv6 (srv6.md): local SID table (probed before FIB6), the per-nexthop
+// segment list for H.Encaps, and the encap source address. ---
+#[map]
+static SRV6_LOCALSID: LpmTrie<[u8; 16], LocalSid> = LpmTrie::with_max_entries(4096, 0);
+#[map]
+static SRV6_ENCAP: HashMap<u32, Srv6Encap> = HashMap::with_max_entries(4096, 0);
+#[map]
+static SRV6_ENCAP_SRC: Array<[u8; 16]> = Array::with_max_entries(1, 0);
 
 // --- L3 DIR-24-8 v4 engine (large-fib.md). Declared at 1 entry; the loader
 // upsizes them (TBL24 → 2^24, TBL8 → groups*256) only in dir24 mode, so
@@ -671,7 +683,7 @@ fn l3_forward(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     match u16::from_be(ethertype) {
         ETH_P_IP => l3_forward_v4(ctx, port_vrf),
-        ETH_P_IPV6 => l3_forward_v6(ctx),
+        ETH_P_IPV6 => l3_forward_v6(ctx, port_vrf),
         ETH_P_MPLS_UC => mpls_forward(ctx),
         _ => Ok(TC_ACT_PIPE as i32), // ARP, ... -> stack
     }
@@ -829,6 +841,16 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
     let oif = nh.oif;
 
+    // SRv6 imposition (H.Encaps) of a v4-inner packet: impose an outer IPv6
+    // header toward the SID. Pipe-model — the inner IPv4 TTL is left as-is.
+    if nh.flags & NH_F_SRV6 != 0 {
+        let ttl: u8 = ctx.load(IP_TTL_OFF).map_err(|_| ())?;
+        if ttl <= 1 {
+            return Ok(TC_ACT_PIPE as i32);
+        }
+        return srv6_encap(ctx, nh_id, &nh, ETH_P_IP);
+    }
+
     // MPLS imposition (ingress LER): a labeled nexthop pushes its out-label
     // stack and egresses MPLS. Pipe-model TTL — the inner IP TTL is left
     // untouched; the label TTL is seeded from it (a dying packet still punts
@@ -886,11 +908,36 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     Ok(ret as i32)
 }
 
+/// v6 route lookup — the per-VRF LPM table when `vrf_id != 0`, else global.
 #[inline(always)]
-fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
+fn fib6_lookup(vrf_id: u32, dst: [u8; 16]) -> Option<FibEntry> {
+    if vrf_id != 0 {
+        let key = Key::new(32 + 128, Vrf6Key { vrf_id, addr: dst });
+        let fib = FIB6_VRF.get(&key).copied();
+        if fib.is_some() {
+            stat_inc(STAT_FIB6_VRF_HIT);
+        }
+        return fib;
+    }
+    FIB6.get(Key::new(128, dst)).copied()
+}
+
+#[inline(always)]
+fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     let dst: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
-    let fib = match FIB6.get(Key::new(128, dst)) {
-        Some(fib) => *fib,
+
+    // A local SID pre-empts the FIB (an SRv6 endpoint address is not an
+    // ordinary local address). Safety net for when the XDP decap stage is
+    // bypassed (generic XDP / not attached): punt so the host stack — or a
+    // re-run — handles it rather than mis-forwarding by the outer DA.
+    if SRV6_LOCALSID.get(Key::new(128, dst)).is_some() {
+        return Ok(TC_ACT_PIPE as i32);
+    }
+
+    // Port binding wins; else VRF context from a VPN-label / SRv6 decap.
+    let vrf_id = if port_vrf != 0 { port_vrf } else { tc_meta_vrf(ctx) };
+    let fib = match fib6_lookup(vrf_id, dst) {
+        Some(fib) => fib,
         None => return Ok(TC_ACT_PIPE as i32),
     };
     if fib.flags & FIB_F_BLACKHOLE != 0 {
@@ -914,6 +961,15 @@ fn l3_forward_v6(ctx: &TcContext) -> Result<i32, ()> {
     };
     let nh: NextHop = unsafe { *NEXTHOPS.get_ptr(&nh_id).ok_or(())? };
     let oif = nh.oif;
+
+    // SRv6 imposition (H.Encaps): impose an outer IPv6 header toward the SID.
+    if nh.flags & NH_F_SRV6 != 0 {
+        let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
+        if hop <= 1 {
+            return Ok(TC_ACT_PIPE as i32);
+        }
+        return srv6_encap(ctx, nh_id, &nh, ETH_P_IPV6);
+    }
 
     // MPLS imposition — as in the v4 path; the label TTL seeds from the
     // hop limit.
@@ -1033,6 +1089,18 @@ fn mpls_push(ctx: &TcContext, nh: &NextHop, ttl: u8) -> Result<i32, ()> {
 /// route.
 #[inline(always)]
 fn mpls_l2_xmit(ctx: &TcContext, nh: &NextHop) -> Result<i32, ()> {
+    l2_xmit(ctx, nh, ETH_P_MPLS_UC)
+}
+
+/// Explicit L2 rewrite + `bpf_redirect` for a frame whose egress EtherType
+/// is `ethertype`. Used by any path where `bpf_redirect_neigh` can't build
+/// the header from `skb->protocol`: MPLS (no IP nh_family) and SRv6 encap
+/// (the skb protocol still reads as the *inner* family while the frame is
+/// IPv6). Destination MAC from the control-plane neighbor maps, source from
+/// the egress port. A neighbor/port miss punts to the host (which resolves
+/// it and, via the tee, backfills the map).
+#[inline(always)]
+fn l2_xmit(ctx: &TcContext, nh: &NextHop, ethertype: u16) -> Result<i32, ()> {
     let dst_mac = if nh.flags & NH_F_V6 != 0 {
         match NEIGH6.get_ptr(&Neigh6Key {
             ifindex: nh.oif,
@@ -1056,9 +1124,65 @@ fn mpls_l2_xmit(ctx: &TcContext, nh: &NextHop) -> Result<i32, ()> {
     };
     ctx.store(ETH_DST_OFF, &dst_mac, 0).map_err(|_| ())?;
     ctx.store(ETH_SRC_OFF, &src_mac, 0).map_err(|_| ())?;
-    let ethertype = ETH_P_MPLS_UC.to_be();
-    ctx.store(ETH_TYPE_OFF, &ethertype, 0).map_err(|_| ())?;
+    ctx.store(ETH_TYPE_OFF, &ethertype.to_be(), 0).map_err(|_| ())?;
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as i32)
+}
+
+// =============================== SRv6 encap =================================
+
+const IP6_HDR_LEN: usize = 40;
+const IP6_PAYLOAD_LEN_OFF: usize = EthHdr::LEN + 4;
+const IP6_VER_TC_FL: u32 = 0x6000_0000; // version 6, TC 0, flow-label 0
+const IPPROTO_IPIP: u8 = 4; // inner IPv4
+const IPPROTO_IPV6: u8 = 41; // inner IPv6
+
+/// H.Encaps.Red (single-SID, reduced — no SRH): impose an outer IPv6 header
+/// whose DA is the SID and forward toward the underlay nexthop. Phase 1
+/// handles `num_segs == 1`; a longer segment list (needing an SRH) punts.
+///
+/// `inner_ethertype` is the frame's current EtherType (0x0800 / 0x86dd),
+/// which selects the outer Next Header. The inner skb is IP, so the
+/// `adjust_room` *grow* is allowed (unlike the MPLS-shrink case), and the
+/// egress uses the explicit `l2_xmit` — after the grow `skb->protocol` still
+/// reads as the inner family, so `bpf_redirect_neigh` would build the wrong
+/// L2 header.
+#[inline(always)]
+fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -> Result<i32, ()> {
+    let enc: Srv6Encap = match SRV6_ENCAP.get_ptr(&nh_id) {
+        Some(e) => unsafe { *e },
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    if enc.num_segs != 1 {
+        return Ok(TC_ACT_PIPE as i32); // SRH-carrying encap is Phase 2
+    }
+    let src: [u8; 16] = match SRV6_ENCAP_SRC.get(0) {
+        Some(s) => *s,
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    let next_hdr: u8 = if inner_ethertype == ETH_P_IPV6 {
+        IPPROTO_IPV6
+    } else {
+        IPPROTO_IPIP
+    };
+    // Inner payload length = everything after the Ethernet header (the outer
+    // IPv6 payload once the header is prepended).
+    let inner_len = (ctx.len() as usize).saturating_sub(EthHdr::LEN) as u16;
+
+    // Grow room for the 40-byte outer IPv6 header right after the MAC header.
+    ctx.skb
+        .adjust_room(IP6_HDR_LEN as i32, BPF_ADJ_ROOM_MAC, 0)
+        .map_err(|_| ())?;
+
+    // Write the outer IPv6 header.
+    ctx.store(EthHdr::LEN, &IP6_VER_TC_FL.to_be(), 0).map_err(|_| ())?;
+    ctx.store(IP6_PAYLOAD_LEN_OFF, &inner_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(IP6_NEXTHDR_OFF, &next_hdr, 0).map_err(|_| ())?;
+    ctx.store(IP6_HOP_OFF, &64u8, 0).map_err(|_| ())?;
+    ctx.store(IP6_SRC_OFF, &src, 0).map_err(|_| ())?;
+    ctx.store(IP6_DST_OFF, &enc.segs[0], 0).map_err(|_| ())?;
+
+    stat_inc(STAT_SRV6_ENCAP);
+    l2_xmit(ctx, nh, ETH_P_IPV6)
 }
 
 // ============================ MPLS XDP stage ===============================
@@ -1092,10 +1216,23 @@ fn xdp_ptr<T>(ctx: &XdpContext, off: usize) -> Result<*mut T, ()> {
 }
 
 #[xdp]
-pub fn cradle_mpls(ctx: XdpContext) -> u32 {
-    match try_mpls_xdp(&ctx) {
+pub fn cradle_xdp(ctx: XdpContext) -> u32 {
+    match try_xdp(&ctx) {
         Ok(act) => act,
         Err(()) => xdp_action::XDP_PASS,
+    }
+}
+
+/// The XDP stage hosts the two overlays whose frame-resizing the TC stage
+/// can't do on a non-IP or would-mis-forward skb: MPLS (pops/grow-swaps) and
+/// SRv6 (End.DT* decap). Dispatch on the outer EtherType.
+#[inline(always)]
+fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    let ethertype = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? });
+    match ethertype {
+        ETH_P_MPLS_UC => try_mpls_xdp(ctx),
+        ETH_P_IPV6 => try_srv6_xdp(ctx),
+        _ => Ok(xdp_action::XDP_PASS),
     }
 }
 
@@ -1227,6 +1364,89 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
         }
     }
     Ok(xdp_action::XDP_PASS)
+}
+
+const IPPROTO_ROUTING: u8 = 43;
+
+/// SRv6 `End.DT4/DT6/DT46` decap: the outer IPv6 DA matched a local SID, so
+/// strip the outer IPv6 header (and one *exhausted* SRH if present — segment
+/// walking is Phase 2) and hand the inner packet to the TC FIB stage,
+/// carrying the SID's VRF as metadata. `End`/`End.X` (segment transit) and
+/// the encap/other behaviors are not handled here (PASS).
+#[inline(always)]
+fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    let dst = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+    let sid: LocalSid = match SRV6_LOCALSID.get(&Key::new(128, dst)) {
+        Some(s) => *s,
+        None => return Ok(xdp_action::XDP_PASS), // not a local SID — normal fwd
+    };
+    match sid.behavior {
+        SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
+        _ => return Ok(xdp_action::XDP_PASS), // End/End.X etc. — Phase 2
+    }
+
+    // Reach the inner packet: outer next-header is the inner proto directly,
+    // or one Routing header (SRH) to skip. Phase 1 only accepts an already
+    // exhausted SRH (Segments Left == 0); a live SRH means transit, punt.
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    let (inner_proto, strip) = if outer_nh == IPPROTO_ROUTING {
+        let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN)? };
+        let ext_len = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN + 1)? };
+        let sl = unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + IP6_HDR_LEN + 3)? };
+        if sl != 0 || ext_len > 12 {
+            return Ok(xdp_action::XDP_PASS); // live/oversized SRH — Phase 2
+        }
+        (srh_nh, IP6_HDR_LEN + 8 * (ext_len as usize + 1))
+    } else {
+        (outer_nh, IP6_HDR_LEN)
+    };
+
+    // Family must match the behavior (DT46 accepts either).
+    let inner_et = match (inner_proto, sid.behavior) {
+        (IPPROTO_IPIP, SRV6_BH_END_DT4) | (IPPROTO_IPIP, SRV6_BH_END_DT46) => ETH_P_IP,
+        (IPPROTO_IPV6, SRV6_BH_END_DT6) | (IPPROTO_IPV6, SRV6_BH_END_DT46) => ETH_P_IPV6,
+        _ => {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+    };
+
+    decap_head(ctx, strip, inner_et)?;
+    stat_inc(STAT_SRV6_DECAP);
+    if sid.vrf_id != 0 {
+        if unsafe {
+            bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32))
+        } != 0
+        {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        let meta = xdp_meta_ptr(ctx)?;
+        unsafe {
+            (*meta).magic = XDP_META_MAGIC;
+            (*meta).vrf_id = sid.vrf_id;
+        }
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// Remove `strip` bytes of outer header(s) between the Ethernet header and
+/// the inner packet: slide the 12 Ethernet address bytes forward over them,
+/// write the inner EtherType, then trim `strip` leading bytes. Bounded for
+/// the verifier (`strip` covers a 40-byte IPv6 header plus at most a
+/// 104-byte SRH).
+#[inline(always)]
+fn decap_head(ctx: &XdpContext, strip: usize, new_ethertype: u16) -> Result<(), ()> {
+    if !(IP6_HDR_LEN..=IP6_HDR_LEN + 104).contains(&strip) {
+        return Err(());
+    }
+    let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
+    unsafe { *xdp_ptr::<[u8; 12]>(ctx, strip)? = macs };
+    unsafe { *xdp_ptr::<u16>(ctx, strip + ETH_TYPE_OFF)? = new_ethertype.to_be() };
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip as i32) } != 0 {
+        return Err(());
+    }
+    Ok(())
 }
 
 /// PHP: pop one label and forward the remaining frame — still-MPLS or the

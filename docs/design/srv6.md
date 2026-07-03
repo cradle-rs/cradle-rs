@@ -3,11 +3,33 @@
 > Segment Routing over IPv6 in the eBPF data plane, driven by the zebra-rs SRv6
 > control plane (locators, End/End.DT behaviors, H.Encaps, L3VPN/EVPN over SRv6).
 
-Status: **design / not yet implemented.** This proposes the map contract,
-data-plane logic, control-plane API, and a phased plan. It builds on the
+Status: **Phase 1 implemented** — single-SID `H.Encaps.Red` imposition and
+`End.DT46/DT4/DT6` decap, **including the per-VRF binding** (the MVP absorbed
+the old "Phase 3" VRF item: MPLS Phase 3 already built the per-VRF FIB and
+the XDP→TC VRF-metadata channel, so `End.DT46` binds VRFs from day one — this
+phase only added the `FIB6_VRF` v6 mirror). Static gRPC/JSON config;
+`cradle_srv6` BDD proves both inner families across a v6 underlay. Phases
+2–4 (SRH transit, the zebra tee, uSID/EVPN) remain design. It builds on the
 [L2–L7 datapath](architecture.md) and reuses mechanisms from the
-[MPLS design](mpls.md) (packet geometry, the verifier tail-call escape hatch, the
+[MPLS design](mpls.md) (packet geometry, the shared `cradle_xdp` stage, the
 VRF model, the zebra tee pattern).
+
+**Two corrections to the original design, from implementation:**
+
+- *`bpf_redirect_neigh` does **not** work for encap egress.* After the outer
+  IPv6 header is imposed, `skb->protocol` still reports the *inner* family,
+  and `bpf_redirect_neigh` builds the Ethernet header from it — wrong
+  EtherType on the wire. Encap egress instead uses the **explicit L2
+  rewrite** (`l2_xmit`, the MPLS path generalized to an EtherType), fed by
+  the `NEIGH6`/`PORTS` maps — the same neighbor tee MPLS needs. (Plain
+  transit `End` and post-decap forwarding are unaffected: those frames carry
+  a correct `skb->protocol`.)
+- *Decap runs in the shared XDP stage* (`cradle_xdp`, renamed from
+  `cradle_mpls` now that it hosts two overlays), not a TC tail-call: the
+  native-XDP receive path re-runs `eth_type_trans` after `adjust_head`, so
+  the inner packet enters TC with the right `skb->protocol`, and the
+  VRF-metadata channel is already there. A TC decap would hit the same
+  stale-`skb->protocol` trap on the inner forward.
 
 ## Goal and scope
 
@@ -384,16 +406,18 @@ the mandatory `Scenario: Teardown topology`.
 
 ## Phasing
 
-1. **Phase 1 — L3VPN core (single-SID).** `SRV6_LOCALSID`, `SRV6_ENCAP`,
-   `SRV6_ENCAP_SRC`; `H.Encaps.Red` single-SID encap; `End.DT46`/`End.DT4`/
-   `End.DT6` decap (global table, exhausted-SRH skip); the `cradle_srv6`
-   tail-call program; counters; gRPC `AddLocalSid` + `segs`-on-`Nexthop` + encap
-   source; static config + `cradle_srv6` BDD (static).
+1. **Phase 1 — L3VPN core (single-SID)** *(done)*. `SRV6_LOCALSID`,
+   `SRV6_ENCAP`, `SRV6_ENCAP_SRC`, `FIB6_VRF`; `H.Encaps.Red` single-SID
+   encap (TC, explicit L2 rewrite); `End.DT46`/`End.DT4`/`End.DT6` decap in
+   the `cradle_xdp` stage (per-VRF lookup, exhausted-SRH skip); counters;
+   gRPC `AddLocalSid` + `segs`-on-`Nexthop` + encap source; static config +
+   `cradle_srv6` BDD. **VRF binding included** (absorbed from Phase 3).
 2. **Phase 2 — SRH transit.** Full SRH write on encap (`>1` SID), and the `End` /
    `End.X` endpoint behaviors with `Segments Left` walking; `End.B6.Encaps`
    binding SIDs — SR-TE policies beyond single-SID L3VPN.
-3. **Phase 3 — VRF tables + zebra tee.** Per-VRF FIB so `End.DT46` looks up in
-   the bound VRF; wire the `CradleFib` SRv6 tee (BGP L3VPN over SRv6, IS-IS/OSPF
-   locators, SR policies).
+3. **Phase 3 — zebra tee.** Wire the `CradleFib` SRv6 tee (`route_sid_install`
+   → `AddLocalSid`, `segs`-on-nexthop → the encap path, encap source) so
+   BGP L3VPN over SRv6 / IS-IS-OSPF locators / SR policies drive cradle. (The
+   per-VRF FIB the old Phase 3 also listed already landed in Phase 1.)
 4. **Phase 4 — uSID & EVPN.** NEXT-C-SID micro-SID (`uN`/`uA`) containers, plus
    the L2 behaviors and the `End.M` egress-protection mirror for EVPN over SRv6.

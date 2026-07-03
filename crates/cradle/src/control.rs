@@ -29,7 +29,20 @@ use crate::{
     },
     util,
 };
-use cradle_common::{MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, STAT_MAX};
+use cradle_common::{
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_X, SRV6_BH_UA, SRV6_BH_UN,
+    STAT_MAX,
+};
+
+/// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
+fn srv6_behavior(code: u32) -> Result<u8> {
+    match code as u8 {
+        b @ (SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46
+        | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA) => Ok(b),
+        other => anyhow::bail!("unknown SRv6 behavior code {other}"),
+    }
+}
 
 /// Display names for the datapath stat counters, indexed by `STAT_*` (must match
 /// the indices defined in `cradle_common`).
@@ -50,6 +63,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "fib4_tbl8_hit",
     "fib4_default",
     "fib4_vrf_hit",
+    "srv6_encap",
+    "srv6_decap",
+    "fib6_vrf_hit",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.
@@ -125,8 +141,8 @@ impl Control {
         info!("attached cradle datapath to {name} (clsact ingress)");
         if l3 {
             let xdp: &mut Xdp = bpf
-                .program_mut("cradle_mpls")
-                .context("program cradle_mpls not found")?
+                .program_mut("cradle_xdp")
+                .context("program cradle_xdp not found")?
                 .try_into()?;
             // Native mode: generic XDP is skipped for TC-redirected skbs
             // (netif_receive_generic_xdp bails on skb_is_redirected), so a
@@ -134,7 +150,7 @@ impl Control {
             // generic-mode pop. veth supports native XDP; fall back to
             // generic (with that caveat) on drivers that don't.
             match xdp.attach(name, XdpMode::Driver) {
-                Ok(_) => info!("attached cradle MPLS stage to {name} (XDP native)"),
+                Ok(_) => info!("attached cradle XDP stage to {name} (XDP native)"),
                 Err(e) => {
                     warn!(
                         "native XDP attach on {name} failed ({e}); falling back to generic \
@@ -142,7 +158,7 @@ impl Control {
                     );
                     xdp.attach(name, XdpMode::Skb)
                         .with_context(|| format!("attaching XDP MPLS pop to {name}"))?;
-                    info!("attached cradle MPLS stage to {name} (XDP generic)");
+                    info!("attached cradle XDP stage to {name} (XDP generic)");
                 }
             }
         }
@@ -257,6 +273,7 @@ impl Control {
 
     pub async fn add_route6(
         &self,
+        vrf: u32,
         addr: Ipv6Addr,
         prefix_len: u8,
         nexthop_id: u32,
@@ -265,12 +282,51 @@ impl Control {
         self.dp
             .lock()
             .await
-            .route6_add(addr, prefix_len, nexthop_id, flags)?;
+            .route6_add(vrf, addr, prefix_len, nexthop_id, flags)?;
         Ok(())
     }
 
-    pub async fn del_route6(&self, addr: Ipv6Addr, prefix_len: u8) -> Result<()> {
-        self.dp.lock().await.route6_del(addr, prefix_len)?;
+    pub async fn del_route6(&self, vrf: u32, addr: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.route6_del(vrf, addr, prefix_len)?;
+        Ok(())
+    }
+
+    /// Set an SRv6-encap nexthop by ifindex (segment list = `segs`).
+    pub async fn set_nexthop_srv6(
+        &self,
+        id: u32,
+        gateway: Option<Ipv6Addr>,
+        oif: u32,
+        segs: &[Ipv6Addr],
+    ) -> Result<()> {
+        self.dp.lock().await.nexthop_set_srv6(id, gateway, oif, segs)?;
+        Ok(())
+    }
+
+    pub async fn set_srv6_encap_source(&self, addr: Ipv6Addr) -> Result<()> {
+        self.dp.lock().await.srv6_encap_source_set(addr)?;
+        Ok(())
+    }
+
+    /// Install a local SID. `oif`/`nh6` are resolved by the caller into a
+    /// `nexthop_id` for End.X (Phase 2); Phase 1's DT behaviors use `vrf`.
+    pub async fn add_localsid(
+        &self,
+        sid: Ipv6Addr,
+        prefix_len: u8,
+        behavior: u8,
+        vrf: u32,
+        nexthop_id: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .localsid_add(sid, prefix_len, behavior, vrf, nexthop_id)?;
+        Ok(())
+    }
+
+    pub async fn del_localsid(&self, sid: Ipv6Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.localsid_del(sid, prefix_len)?;
         Ok(())
     }
 
@@ -413,7 +469,30 @@ impl Cradle for GrpcService {
 
     async fn set_nexthop(&self, req: Request<pb::Nexthop>) -> Result<Response<pb::Empty>, Status> {
         let n = req.into_inner();
-        if n.v6 {
+        // A nexthop carrying SRv6 segments imposes an H.Encaps (always v6
+        // underlay), regardless of the `v6` flag.
+        if !n.segs.is_empty() {
+            let gw = if n.gateway.is_empty() {
+                None
+            } else {
+                Some(n.gateway.parse::<Ipv6Addr>().map_err(st)?)
+            };
+            let oif = if n.oif_index != 0 {
+                n.oif_index
+            } else {
+                util::ifindex_of(&n.oif).map_err(st)?
+            };
+            let segs = n
+                .segs
+                .iter()
+                .map(|s| s.parse::<Ipv6Addr>())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(st)?;
+            self.control
+                .set_nexthop_srv6(n.id, gw, oif, &segs)
+                .await
+                .map_err(st)?;
+        } else if n.v6 {
             let gw = if n.gateway.is_empty() {
                 None
             } else {
@@ -514,7 +593,7 @@ impl Cradle for GrpcService {
         let r = req.into_inner();
         let (addr, len) = util::parse_ipv6_prefix(&r.prefix).map_err(st)?;
         self.control
-            .add_route6(addr, len, r.nexthop_id, r.flags)
+            .add_route6(r.vrf_table_id, addr, len, r.nexthop_id, r.flags)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -523,7 +602,46 @@ impl Cradle for GrpcService {
     async fn del_route6(&self, req: Request<pb::Route6Del>) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
         let (addr, len) = util::parse_ipv6_prefix(&r.prefix).map_err(st)?;
-        self.control.del_route6(addr, len).await.map_err(st)?;
+        self.control
+            .del_route6(r.vrf_table_id, addr, len)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_local_sid(
+        &self,
+        req: Request<pb::LocalSid>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let s = req.into_inner();
+        let sid: Ipv6Addr = s.sid.parse().map_err(st)?;
+        let prefix_len = if s.prefix_len == 0 { 128 } else { s.prefix_len as u8 };
+        let behavior = srv6_behavior(s.behavior).map_err(st)?;
+        self.control
+            .add_localsid(sid, prefix_len, behavior, s.vrf_table_id, 0)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_local_sid(
+        &self,
+        req: Request<pb::LocalSidDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let s = req.into_inner();
+        let sid: Ipv6Addr = s.sid.parse().map_err(st)?;
+        let prefix_len = if s.prefix_len == 0 { 128 } else { s.prefix_len as u8 };
+        self.control.del_localsid(sid, prefix_len).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_srv6_encap_source(
+        &self,
+        req: Request<pb::Srv6EncapSource>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let s = req.into_inner();
+        let addr: Ipv6Addr = s.addr.parse().map_err(st)?;
+        self.control.set_srv6_encap_source(addr).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

@@ -35,9 +35,35 @@ pub struct Config {
     #[serde(default)]
     pub ilm: Vec<Ilm>,
     #[serde(default)]
+    pub routes6: Vec<Route6>,
+    #[serde(default)]
+    pub localsids: Vec<LocalSidCfg>,
+    /// SRv6 H.Encaps outer source address.
+    #[serde(default)]
+    pub srv6_source: Option<String>,
+    #[serde(default)]
     pub services: Vec<Service>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Route6 {
+    pub prefix: String,
+    pub nexthop: u32,
+    #[serde(default)]
+    pub vrf: u32,
+}
+
+/// A local SID: `behavior` is `end|end.x|end.dt4|end.dt6|end.dt46|end.b6|un|ua`.
+#[derive(Debug, Deserialize)]
+pub struct LocalSidCfg {
+    pub sid: String,
+    pub behavior: String,
+    #[serde(default)]
+    pub vrf: u32,
+    #[serde(default)]
+    pub nexthop: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +108,10 @@ pub struct Nexthop {
     /// MPLS out-label stack, `[0]` = outermost (swap value / imposition).
     #[serde(default)]
     pub labels: Vec<u32>,
+    /// SRv6 SID list (H.Encaps). A non-empty list makes this an SRv6 nexthop
+    /// (`gateway`/`oif` are the underlay next hop).
+    #[serde(default)]
+    pub segs: Vec<String>,
 }
 
 /// An incoming-label map entry: `action` is `"swap"`, `"pop"` or `"pop-l3"`.
@@ -149,6 +179,22 @@ pub fn proto_num(proto: &str) -> Result<u8> {
     }
 }
 
+/// Parse an SRv6 behavior string to its `SRV6_BH_*` value.
+pub fn srv6_behavior(s: &str) -> Result<u8> {
+    use cradle_common::*;
+    Ok(match s {
+        "end" => SRV6_BH_END,
+        "end.x" => SRV6_BH_END_X,
+        "end.dt4" => SRV6_BH_END_DT4,
+        "end.dt6" => SRV6_BH_END_DT6,
+        "end.dt46" => SRV6_BH_END_DT46,
+        "end.b6" => SRV6_BH_END_B6,
+        "un" => SRV6_BH_UN,
+        "ua" => SRV6_BH_UA,
+        other => anyhow::bail!("unknown SRv6 behavior {other:?}"),
+    })
+}
+
 /// Parse an ILM action string to its `MPLS_OP_*` value.
 pub fn ilm_action(action: &str) -> Result<u8> {
     match action {
@@ -174,15 +220,52 @@ impl Config {
         for (vlan, members) in l2_domains(&self.ports) {
             ctl.set_l2_domain(vlan, &members).await?;
         }
+        if let Some(src) = &self.srv6_source {
+            let addr = src.parse().with_context(|| format!("bad srv6_source {src:?}"))?;
+            ctl.set_srv6_encap_source(addr).await?;
+        }
         for nh in &self.nexthops {
-            let gw = match &nh.gateway {
-                Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
-                None => None,
-            };
-            match &nh.oif {
-                Some(oif) => ctl.set_nexthop(nh.id, gw, oif, &nh.labels).await?,
-                None => ctl.set_nexthop_idx(nh.id, gw, 0, &nh.labels).await?,
+            if !nh.segs.is_empty() {
+                let gw = match &nh.gateway {
+                    Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
+                    None => None,
+                };
+                let oif = match &nh.oif {
+                    Some(o) => util::ifindex_of(o)?,
+                    None => anyhow::bail!("SRv6 nexthop {} needs an oif", nh.id),
+                };
+                let segs = nh
+                    .segs
+                    .iter()
+                    .map(|s| s.parse().with_context(|| format!("bad SID {s:?}")))
+                    .collect::<Result<Vec<_>>>()?;
+                ctl.set_nexthop_srv6(nh.id, gw, oif, &segs).await?;
+                continue;
             }
+            // Family inferred from the gateway (a v6 gateway ⇒ v6 nexthop).
+            let is_v6 = nh.gateway.as_deref().map(|g| g.contains(':')).unwrap_or(false);
+            let oif = match &nh.oif {
+                Some(o) => util::ifindex_of(o)?,
+                None => 0,
+            };
+            if is_v6 {
+                let gw = match &nh.gateway {
+                    Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
+                    None => None,
+                };
+                ctl.set_nexthop_idx_v6(nh.id, gw, oif, &nh.labels).await?;
+            } else {
+                let gw = match &nh.gateway {
+                    Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
+                    None => None,
+                };
+                ctl.set_nexthop_idx(nh.id, gw, oif, &nh.labels).await?;
+            }
+        }
+        for ls in &self.localsids {
+            let sid = ls.sid.parse().with_context(|| format!("bad SID {:?}", ls.sid))?;
+            let behavior = srv6_behavior(&ls.behavior)?;
+            ctl.add_localsid(sid, 128, behavior, ls.vrf, ls.nexthop).await?;
         }
         for n in &self.neighbors {
             let ip: IpAddr = n.ip.parse().with_context(|| format!("bad neighbor ip {:?}", n.ip))?;
@@ -208,6 +291,10 @@ impl Config {
             .collect::<Result<Vec<_>>>()?;
         if !routes.is_empty() {
             ctl.add_routes4(&routes).await?;
+        }
+        for r in &self.routes6 {
+            let (addr, len) = util::parse_ipv6_prefix(&r.prefix)?;
+            ctl.add_route6(r.vrf, addr, len, r.nexthop, 0).await?;
         }
         for (i, svc) in self.services.iter().enumerate() {
             let proto = proto_num(&svc.proto)?;

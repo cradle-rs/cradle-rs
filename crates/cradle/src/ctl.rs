@@ -40,6 +40,11 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            if let Some(src) = &cfg.srv6_source {
+                client
+                    .set_srv6_encap_source(pb::Srv6EncapSource { addr: src.clone() })
+                    .await?;
+            }
             for nh in &cfg.nexthops {
                 client
                     .set_nexthop(pb::Nexthop {
@@ -47,8 +52,26 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         gateway: nh.gateway.clone().unwrap_or_default(),
                         oif: nh.oif.clone().unwrap_or_default(),
                         oif_index: 0,
-                        v6: false,
+                        v6: nh.gateway.as_deref().map(|g| g.contains(':')).unwrap_or(false),
                         labels: nh.labels.clone(),
+                        segs: nh.segs.clone(),
+                        encap_mode: 0,
+                    })
+                    .await?;
+            }
+            for ls in &cfg.localsids {
+                client
+                    .add_local_sid(pb::LocalSid {
+                        sid: ls.sid.clone(),
+                        prefix_len: 128,
+                        behavior: config::srv6_behavior(&ls.behavior)? as u32,
+                        vrf_table_id: ls.vrf,
+                        oif: 0,
+                        nh6: String::new(),
+                        lb_bits: 0,
+                        ln_bits: 0,
+                        fun_bits: 0,
+                        arg_bits: 0,
                     })
                     .await?;
             }
@@ -98,6 +121,16 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                                 vrf_table_id: r.vrf,
                             })
                             .collect(),
+                    })
+                    .await?;
+            }
+            for r in &cfg.routes6 {
+                client
+                    .add_route6(pb::Route6 {
+                        prefix: r.prefix.clone(),
+                        nexthop_id: r.nexthop,
+                        flags: 0,
+                        vrf_table_id: r.vrf,
                     })
                     .await?;
             }
