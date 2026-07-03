@@ -39,18 +39,18 @@ use cradle_common::{
     ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE,
     FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
     MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_DT2M,
-    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
+    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
     STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
-    SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
+    STAT_SRV6_B6, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID,
+    STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -1800,13 +1800,14 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
         SRV6_BH_END_REP | SRV6_BH_END_X_REP => return srv6_replace(ctx, &sid),
+        SRV6_BH_END_B6 => return srv6_b6_encaps(ctx, &sid),
         // DT2U (unicast) and DT2M (BUM) decap are identical: strip + bridge.
         // The inner frame's dst MAC (unicast vs broadcast) makes l2_switch
         // forward or flood it.
         SRV6_BH_END_DT2U | SRV6_BH_END_DT2M => return srv6_dt2u(ctx, &sid),
         SRV6_BH_END_M => return srv6_endm(ctx, &sid),
         SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46 => {}
-        _ => return Ok(xdp_action::XDP_PASS), // B6 — later phases
+        _ => return Ok(xdp_action::XDP_PASS),
     }
 
     // Reach the inner packet: outer next-header is the inner proto directly,
@@ -2217,6 +2218,125 @@ fn srv6_replace_once(ctx: &XdpContext, sid: &LocalSid) -> Result<ReplaceStep, ()
         return srv6_forward_adjacency(ctx, sid.nexthop_id).map(Act);
     }
     Ok(Act(xdp_action::XDP_PASS))
+}
+
+/// SRv6 `End.B6.Encaps` — the Binding SID (RFC 8986 §4.13). Run the End
+/// steps on the received SRH (hop-limit check + decrement, SL--, inner DA
+/// from Segment List[new SL]) and then push a new outer IPv6 (+SRH)
+/// carrying the bound SR Policy's segment list — read from `SRV6_ENCAP`
+/// via `sid.nexthop_id`, the same entry shape the TC H.Encaps path
+/// consumes. The pushed SRH is the Reduced form (§4.14: the first policy
+/// SID rides only in the outer DA; a single-SID policy omits the SRH
+/// entirely), matching `apply_hencap`. The outer source is the global
+/// encap source (`SRV6_ENCAP_SRC`) — the RFC's per-SID source A is not
+/// modeled. SL == 0 and no-SRH arrivals PASS to the stack (§4.1.1
+/// upper-layer processing; the kernel would silently drop them). After
+/// the push the packet PASSes to the TC FIB, which forwards by the new
+/// outer DA — S19's "egress IPv6 FIB lookup".
+#[inline(always)]
+fn srv6_b6_encaps(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    if outer_nh != IPPROTO_ROUTING {
+        return Ok(xdp_action::XDP_PASS); // no SRH — upper layer (S01 gate)
+    }
+    let ext_len = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 1)? };
+    if !(2..=12).contains(&ext_len) {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let sl = unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? };
+    if sl == 0 || sl as usize > MAX_SEGS {
+        return Ok(xdp_action::XDP_PASS); // S02: upper layer
+    }
+    // S09 bounds (Segments Left ≤ Last Entry + 1 tolerates reduced SRHs).
+    let last_entry = unsafe { *xdp_ptr::<u8>(ctx, SRH_LAST_ENTRY_OFF)? };
+    let max_le = ext_len / 2 - 1;
+    if last_entry > max_le || sl > last_entry + 1 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let hop = unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? };
+    if hop <= 1 {
+        return Ok(xdp_action::XDP_PASS); // S05: hop limit exhausted
+    }
+    // The bound policy — validated before any packet mutation. Read through
+    // the map pointer (the ~104-byte value would strain the stack).
+    let enc: &Srv6Encap = match SRV6_ENCAP.get_ptr(&sid.nexthop_id) {
+        Some(e) => unsafe { &*e },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    let n = enc.num_segs as usize;
+    if n == 0 || n > MAX_SEGS || enc.mode == SRV6_ENCAP_MODE_INSERT {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // Same post-guard barrier as `apply_hencap`: keep the segment loop's
+    // constant latch alive for the verifier.
+    let n = core::hint::black_box(n);
+    let src: [u8; 16] = match SRV6_ENCAP_SRC.get(0) {
+        Some(s) => *s,
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+
+    // S12–S14: the End steps on the received packet.
+    let new_sl = sl - 1;
+    let next_seg = unsafe { *xdp_ptr::<[u8; 16]>(ctx, SRH_SEGLIST_OFF + 16 * new_sl as usize)? };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = hop - 1 };
+    unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? = new_sl };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = next_seg };
+
+    // S15–S18: push the outer IPv6 (+ Reduced SRH) carrying the policy.
+    let inner_len = (ctx.data_end() - ctx.data() - EthHdr::LEN) as u16;
+    let srh_len = if n == 1 { 0 } else { 8 + 16 * (n - 1) };
+    let grow = (IP6_HDR_LEN + srh_len) as i32;
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, -grow) } != 0 {
+        // No headroom: the walked packet continues un-bound (End result).
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // The original Ethernet header now sits `grow` bytes in; slide it back
+    // to the new head (the ethertype stays IPv6).
+    let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, grow as usize)? };
+    unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? = macs };
+    unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? = (ETH_P_IPV6 as u16).to_be() };
+    let (outer_proto, payload_len) = if n == 1 {
+        (IPPROTO_IPV6, inner_len)
+    } else {
+        (IPPROTO_ROUTING, inner_len + srh_len as u16)
+    };
+    unsafe { *xdp_ptr::<u32>(ctx, EthHdr::LEN)? = IP6_VER_TC_FL.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? = payload_len.to_be() };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? = outer_proto };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = 64 };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)? = src };
+    // Stage each SID through the stack: a direct map-value→packet copy at
+    // a variable offset gets lowered to a byte loop whose intermediate
+    // packet offsets go transiently negative, which the verifier rejects.
+    let first_seg: [u8; 16] = enc.segs[0];
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = first_seg };
+    if n > 1 {
+        // Reduced SRH (§4.14): segs[0] rides only in the outer DA.
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF)? = IPPROTO_IPV6 };
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 1)? = 2 * (n as u8 - 1) };
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 2)? = 4 }; // routing type 4
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? = n as u8 - 1 };
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_LAST_ENTRY_OFF)? = n as u8 - 2 };
+        unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 5)? = 0 }; // flags
+        unsafe { *xdp_ptr::<u16>(ctx, SRH_OFF + 6)? = 0 }; // tag
+        // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
+        // The map index rides the constant-bounded loop counter; the
+        // reversal lives in the packet offset, MASKED so the address is
+        // not affine in `j` — otherwise LLVM rotates the loop into a
+        // pointer induction whose reassociated base carries a negative
+        // constant offset, which the verifier rejects on either pointer
+        // kind (packet and map_value both demand a non-negative minimum).
+        for j in 1..MAX_SEGS {
+            if j >= n {
+                break;
+            }
+            let seg: [u8; 16] = enc.segs[j];
+            let off = (SRH_SEGLIST_OFF + 16 * (n - 1 - j)) & 0x1ff;
+            unsafe { *xdp_ptr::<[u8; 16]>(ctx, off)? = seg };
+        }
+    }
+    stat_inc(STAT_SRV6_B6);
+    Ok(xdp_action::XDP_PASS)
 }
 
 /// SRv6 `End.M` — the egress-protection mirror (draft-ietf-rtgwg-srv6-

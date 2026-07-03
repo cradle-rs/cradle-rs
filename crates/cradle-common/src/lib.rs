@@ -256,6 +256,10 @@ pub const SRV6_BH_END_X: u8 = 1;
 pub const SRV6_BH_END_DT4: u8 = 2;
 pub const SRV6_BH_END_DT6: u8 = 3;
 pub const SRV6_BH_END_DT46: u8 = 4;
+/// `End.B6.Encaps` (RFC 8986 §4.13): the SRv6 Binding SID. Run the End walk
+/// on the received SRH, then push a new outer IPv6 (+SRH) carrying the bound
+/// SR Policy's segment list — `nexthop_id` points at the `SRV6_ENCAP` entry
+/// holding it. Emits the Reduced form (§4.14) like `apply_hencap`.
 pub const SRV6_BH_END_B6: u8 = 5;
 pub const SRV6_BH_UN: u8 = 6;
 /// `uA`: classic End.X adjacency at /128 (no NEXT-C-SID shift).
@@ -606,8 +610,10 @@ pub const STAT_SRV6_USP: u32 = 29;
 pub const STAT_SRV6_USD: u32 = 30;
 /// REPLACE-C-SID transits (C-SID rewrite or container-to-container advance).
 pub const STAT_SRV6_REPLACE: u32 = 31;
+/// End.B6.Encaps binds (inner End walk + policy encapsulation pushed).
+pub const STAT_SRV6_B6: u32 = 32;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 32;
+pub const STAT_MAX: u32 = 33;
 
 // ============================== L7 proxy ===================================
 
