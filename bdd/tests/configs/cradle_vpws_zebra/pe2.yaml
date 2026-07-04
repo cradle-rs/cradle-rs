@@ -23,12 +23,12 @@ router:
     interface:
     - if-name: lo
       ipv6:
-        enable: true
+        enabled: true
     - if-name: pe2u
       network-type: point-to-point
       metric: 1
       ipv6:
-        enable: true
+        enabled: true
   bgp:
     global:
       as: 65001
@@ -47,6 +47,13 @@ router:
         local-service-id: 102
         remote-service-id: 101
         interface: pe2c
+      # Mirror of pe1's VLAN-scoped eline2 (VID 30 on the same AC).
+      - name: eline2
+        evi: 200
+        local-service-id: 202
+        remote-service-id: 201
+        interface: pe2c
+        vlan: 30
     neighbor:
     - remote-address: 2001:db8::1
       remote-as: 65001

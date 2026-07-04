@@ -10,16 +10,16 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 2
     - if-name: r2a
       network-type: point-to-point
       ipv4:
-        enable: true
+        enabled: true
       metric: 10
     - if-name: r2b
       network-type: point-to-point
       ipv4:
-        enable: true
+        enabled: true
       metric: 10
