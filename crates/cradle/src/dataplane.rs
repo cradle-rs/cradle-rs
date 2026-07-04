@@ -475,7 +475,6 @@ impl Dataplane {
         Ok(())
     }
 
-
     pub fn repl_sid_del(&mut self, ifindex: u32) -> Result<()> {
         self.repl_sid.remove(&ifindex)?;
         Ok(())

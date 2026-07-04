@@ -322,9 +322,6 @@ impl Control {
         self.del_xconnect_idx(ifindex, local_sid).await
     }
 
-    /// Register a BUM replication slot by interface names (see
-    /// `Dataplane::repl_slot_add`).
-
     /// End.DX2V VLAN-table entry: (table, vid) → AC port.
     pub async fn add_dx2v(&self, table: u32, vid: u16, port: &str) -> Result<()> {
         let oif = util::ifindex_of(port)?;
@@ -332,6 +329,8 @@ impl Control {
         Ok(())
     }
 
+    /// Register a BUM replication slot by interface names (see
+    /// `Dataplane::repl_slot_add`).
     pub async fn add_repl_slot(
         &self,
         flood_port: &str,
