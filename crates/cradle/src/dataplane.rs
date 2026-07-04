@@ -19,7 +19,7 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
+    Backend, Backend6, BackendKey, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
     GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
     Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
@@ -67,6 +67,8 @@ pub struct Dataplane {
     /// BUM ingress-replication slots (EVPN over SRv6): ifindex → remote
     /// `End.DT2M` SID, both ends of each slot's veth pair.
     repl_sid: HashMap<MapData, u32, [u8; 16]>,
+    xconnect: HashMap<MapData, u32, [u8; 16]>,
+    dx2v: HashMap<MapData, Dx2vKey, u32>,
     /// Egress-protection mirror contexts (`End.M`): protected SID space →
     /// local DT-style reproduction.
     mirror: LpmTrie<MapData, MirrorKey, MirrorEntry>,
@@ -136,6 +138,10 @@ impl Dataplane {
             )?,
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
+            xconnect: HashMap::try_from(
+                bpf.take_map("XCONNECT").context("map XCONNECT missing")?,
+            )?,
+            dx2v: HashMap::try_from(bpf.take_map("DX2V").context("map DX2V missing")?)?,
             mirror: LpmTrie::try_from(bpf.take_map("MIRROR").context("map MIRROR missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
             backends: HashMap::try_from(bpf.take_map("BACKENDS").context("map BACKENDS missing")?)?,
@@ -448,6 +454,39 @@ impl Dataplane {
     }
 
     /// Remove a replication-slot SID binding.
+    /// Bind an attachment circuit to a remote End.DX2/DX2V SID (VPWS):
+    /// every frame arriving on `ifindex` encapsulates toward `remote_sid`.
+    pub fn xconnect_add(&mut self, ifindex: u32, remote_sid: Ipv6Addr) -> Result<()> {
+        self.xconnect.insert(ifindex, remote_sid.octets(), 0)?;
+        Ok(())
+    }
+
+    pub fn xconnect_del(&mut self, ifindex: u32) -> Result<()> {
+        self.xconnect.remove(&ifindex)?;
+        Ok(())
+    }
+
+    /// End.DX2V VLAN-table entry: (table, vid) → AC ifindex.
+    pub fn dx2v_add(&mut self, table: u32, vid: u16, oif: u32) -> Result<()> {
+        let key = Dx2vKey {
+            table,
+            vid,
+            _pad: [0; 2],
+        };
+        self.dx2v.insert(key, oif, 0)?;
+        Ok(())
+    }
+
+    pub fn dx2v_del(&mut self, table: u32, vid: u16) -> Result<()> {
+        let key = Dx2vKey {
+            table,
+            vid,
+            _pad: [0; 2],
+        };
+        self.dx2v.remove(&key)?;
+        Ok(())
+    }
+
     pub fn repl_sid_del(&mut self, ifindex: u32) -> Result<()> {
         self.repl_sid.remove(&ifindex)?;
         Ok(())

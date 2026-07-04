@@ -1,0 +1,28 @@
+{
+  "ports": [
+    { "name": "pe2c" },
+    { "name": "pe2v" },
+    { "name": "pe2u", "l3": true }
+  ],
+  "srv6_source": "fd00:2::1",
+  "nexthops": [
+    { "id": 1, "oif": "pe2u", "gateway": "2001:db8::1" }
+  ],
+  "neighbors": [
+    { "oif": "pe2u", "ip": "2001:db8::1", "mac": "02:00:00:00:0a:01" }
+  ],
+  "localsids": [
+    { "sid": "fd00:2::d2", "behavior": "end.dx2", "port": "pe2c" },
+    { "sid": "fd00:2::dd2", "behavior": "end.dx2v", "vrf": 7 }
+  ],
+  "dx2v": [
+    { "table": 7, "vid": 30, "port": "pe2v" }
+  ],
+  "xconnects": [
+    { "port": "pe2c", "remote_sid": "fd00:1::d2" },
+    { "port": "pe2v", "remote_sid": "fd00:1::dd2" }
+  ],
+  "routes6": [
+    { "prefix": "fd00:1::/64", "nexthop": 1 }
+  ]
+}

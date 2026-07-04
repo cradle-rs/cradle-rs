@@ -150,6 +150,20 @@ message FdbRemoteDel {
 // per-copy encapsulates — see docs/design/evpn-srv6.md). Idempotent per
 // (bd, remote_sid). The EVPN Type-3 tee drives these; a bridge domain using
 // slots must not also program the all-ones-MAC sentinel.
+// A VPWS cross-connect (EVPN E-Line, RFC 8214): bind the attachment
+// circuit `port` to the remote End.DX2/DX2V service SID — every frame
+// arriving on the AC is MAC-in-SRv6 encapsulated toward it (no FDB).
+message Xconnect {
+  string port      = 1;  // AC interface name (or use port_index)
+  uint32 port_index = 2; // AC ifindex (0 = resolve `port` by name)
+  string remote_sid = 3;
+}
+
+message XconnectDel {
+  string port       = 1;
+  uint32 port_index = 2;
+}
+
 message ReplSlot {
   uint32 bd         = 1;
   string remote_sid = 2;
@@ -282,6 +296,8 @@ service Cradle {
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);
+  rpc AddXconnect(Xconnect) returns (Empty);
+  rpc DelXconnect(XconnectDel) returns (Empty);
   rpc AddReplSlot(ReplSlot) returns (Empty);
   rpc DelReplSlot(ReplSlot) returns (Empty);
   rpc AddMirrorRoute(MirrorRoute) returns (Empty);

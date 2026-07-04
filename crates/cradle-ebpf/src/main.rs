@@ -35,24 +35,25 @@ use aya_ebpf::{
 };
 use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
-    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey,
-    L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry,
-    NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key,
-    Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8,
+    CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
+    GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
+    Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8,
     FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
     PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP,
-    STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM,
-    STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC,
-    XDP_META_MAGIC_DX, XDP_META_MAGIC_L2,
+    SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
+    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
+    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
+    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
+    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX,
+    STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
+    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
+    STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC,
+    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -142,6 +143,14 @@ static FDB: HashMap<FdbKey, FdbEntry> = HashMap::with_max_entries(8192, 0);
 /// frames (EVPN split horizon), the B end for the encap lookup in `try_xdp`.
 #[map]
 static REPL_SID: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
+/// VPWS cross-connect (EVPN E-Line, RFC 8214): AC ingress ifindex → the
+/// remote End.DX2/DX2V service SID. Every frame arriving on a bound AC is
+/// MAC-in-SRv6 encapsulated toward the SID — no FDB, no learning.
+#[map]
+static XCONNECT: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
+/// End.DX2V VLAN table: (SID's table id, inner 802.1Q VID) → AC ifindex.
+#[map]
+static DX2V: HashMap<Dx2vKey, u32> = HashMap::with_max_entries(1024, 0);
 /// Egress-protection mirror contexts (`End.M`): the protected egress PE's
 /// SID space, scoped by context id — how the protector reproduces the
 /// failed PE's decap behavior. Keyed like `FIB6_VRF` (`prefix_len =
@@ -181,6 +190,7 @@ const MAX_L2_MEMBERS: u16 = 64;
 
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_MPLS_UC: u16 = 0x8847;
+const ETH_P_8021Q: u16 = 0x8100; // 802.1Q tagged frame
 const ETH_TYPE_OFF: usize = 12;
 const ETH_DST_OFF: usize = 0;
 const ETH_SRC_OFF: usize = 6;
@@ -339,6 +349,12 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     // An SRv6 `End.DT2U` decap in the XDP stage tagged the frame with its
     // bridge domain: switch the inner Ethernet frame in that domain, whatever
     // the (underlay) port's own type is.
+    // VPWS egress (End.DX2/DX2V): XDP decapped and pinned the AC — emit
+    // the Ethernet frame raw, no bridge, no MAC rewrite.
+    let dx2_oif = tc_meta_dx2(ctx);
+    if dx2_oif != 0 {
+        return Ok(unsafe { bpf_redirect(dx2_oif, 0) } as i32);
+    }
     if let Some(bd) = tc_meta_l2(ctx) {
         return l2_switch(ctx, iif, bd, true);
     }
@@ -806,6 +822,22 @@ fn l3_forward(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
 /// VRF context attached by the XDP MPLS stage (VPN-label decap): read from
 /// the skb's `data_meta..data` window, guarded by the magic. 0 = none.
 #[inline(always)]
+fn tc_meta_dx2(ctx: &TcContext) -> u32 {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return 0;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe {
+        if (*m).magic != XDP_META_MAGIC_DX2 ^ meta_cookie() {
+            return 0;
+        }
+        (*m).vrf_id // the attachment-circuit ifindex
+    }
+}
+
 fn tc_meta_dx(ctx: &TcContext) -> u32 {
     let skb = ctx.skb.skb;
     let meta = unsafe { (*skb).data_meta } as usize;
@@ -1664,6 +1696,19 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         };
         return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
     }
+    // VPWS attachment circuit (RFC 8214 E-Line): every frame from a bound
+    // AC — any EtherType, any MAC — encapsulates toward the remote
+    // End.DX2/DX2V SID. Checked before the L2 bridge dispatch so the AC
+    // never MAC-learns or floods.
+    if let Some(sid) = XCONNECT.get_ptr(&iif) {
+        let ent = FdbEntry {
+            oif: 0, // resolve the underlay adjacency by FIB6 lookup
+            flags: FDB_F_REMOTE,
+            remote_sid: unsafe { *sid },
+            last_seen: 0,
+        };
+        return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_ENCAP);
+    }
     if let Some(p) = PORTS.get_ptr(&iif) {
         if unsafe { (*p).flags } & PORT_F_L2 != 0 {
             return l2_evpn_xdp(ctx, unsafe { (*p).vlan });
@@ -2020,6 +2065,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
         SRV6_BH_END_REP | SRV6_BH_END_X_REP => return srv6_replace(ctx, &sid),
         SRV6_BH_END_DX4 | SRV6_BH_END_DX6 => return srv6_dx(ctx, &sid),
+        SRV6_BH_END_DX2 | SRV6_BH_END_DX2V => return srv6_dx2(ctx, &sid),
         SRV6_BH_END_B6 => return srv6_b6_encaps(ctx, &sid),
         // DT2U (unicast) and DT2M (BUM) decap are identical: strip + bridge.
         // The inner frame's dst MAC (unicast vs broadcast) makes l2_switch
@@ -2630,6 +2676,66 @@ fn srv6_dx(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         (*meta).vrf_id = sid.nexthop_id;
     }
     stat_inc(STAT_SRV6_DX);
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// SRv6 `End.DX2` / `End.DX2V` — decapsulation and L2 cross-connect
+/// (RFC 8986 §4.9 / §4.10): the EVPN VPWS (E-Line) egress. Strip the
+/// outer Ethernet + IPv6 (reduced form, next-header 143 — an SRH-carried
+/// inner passes, like End.DT2*), then emit the inner Ethernet frame RAW
+/// on the attachment circuit: no FDB, no learning, no MAC rewrite. DX2's
+/// AC is `sid.vrf_id` (an ifindex); DX2V reads the inner frame's 802.1Q
+/// VID and selects the AC from the `DX2V` table keyed by
+/// (`sid.vrf_id` = table id, VID) — the tag stays on the frame. The
+/// emit finishes at the TC stage via DX2-typed metadata, like DX4/DX6
+/// (an XDP redirect into a NAPI-less CE veth would silently drop).
+#[inline(always)]
+fn srv6_dx2(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    if outer_nh != IPPROTO_ETHERNET {
+        return Ok(xdp_action::XDP_PASS); // SRH-carried L2 not handled yet
+    }
+    // Resolve the AC before mutating the packet.
+    let strip = (EthHdr::LEN + IP6_HDR_LEN) as i32;
+    let oif = if sid.behavior == SRV6_BH_END_DX2 {
+        sid.vrf_id
+    } else {
+        // DX2V: the inner frame's 802.1Q VID picks the AC. The inner
+        // Ethernet header sits right after the 54 outer bytes.
+        let inner_et =
+            u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, strip as usize + ETH_TYPE_OFF)? });
+        if inner_et != ETH_P_8021Q {
+            return Ok(xdp_action::XDP_PASS); // untagged — no VLAN to demux
+        }
+        let tci = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, strip as usize + EthHdr::LEN)? });
+        let key = Dx2vKey {
+            table: sid.vrf_id,
+            vid: tci & 0x0fff,
+            _pad: [0; 2],
+        };
+        match unsafe { DX2V.get(&key) } {
+            Some(o) => *o,
+            None => return Ok(xdp_action::XDP_PASS), // unknown VID
+        }
+    };
+    if oif == 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_SRV6_DX2);
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+        != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_DX2 ^ meta_cookie();
+        (*meta).vrf_id = oif;
+    }
     Ok(xdp_action::XDP_PASS)
 }
 

@@ -87,6 +87,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_dx",
     "gtp_encap",
     "gtp_decap",
+    "srv6_dx2",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -280,6 +281,36 @@ impl Control {
 
     /// Register a BUM replication slot by interface names (see
     /// `Dataplane::repl_slot_add`).
+    /// Bind a VPWS attachment circuit to its remote End.DX2/DX2V SID.
+    pub async fn add_xconnect(&self, port: &str, remote_sid: Ipv6Addr) -> Result<()> {
+        let ifindex = util::ifindex_of(port)?;
+        self.dp.lock().await.xconnect_add(ifindex, remote_sid)?;
+        Ok(())
+    }
+
+    pub async fn add_xconnect_idx(&self, ifindex: u32, remote_sid: Ipv6Addr) -> Result<()> {
+        self.dp.lock().await.xconnect_add(ifindex, remote_sid)?;
+        Ok(())
+    }
+
+    pub async fn del_xconnect_idx(&self, ifindex: u32) -> Result<()> {
+        self.dp.lock().await.xconnect_del(ifindex)?;
+        Ok(())
+    }
+
+    pub async fn del_xconnect(&self, port: &str) -> Result<()> {
+        let ifindex = util::ifindex_of(port)?;
+        self.dp.lock().await.xconnect_del(ifindex)?;
+        Ok(())
+    }
+
+    /// End.DX2V VLAN-table entry: (table, vid) → AC port.
+    pub async fn add_dx2v(&self, table: u32, vid: u16, port: &str) -> Result<()> {
+        let oif = util::ifindex_of(port)?;
+        self.dp.lock().await.dx2v_add(table, vid, oif)?;
+        Ok(())
+    }
+
     pub async fn add_repl_slot(
         &self,
         flood_port: &str,
@@ -1027,6 +1058,36 @@ impl Cradle for GrpcService {
             .del_fdb_remote(mac, f.bd as u16)
             .await
             .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_xconnect(
+        &self,
+        req: Request<pb::Xconnect>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let x = req.into_inner();
+        let sid: Ipv6Addr = x.remote_sid.parse().map_err(st)?;
+        if x.port_index != 0 {
+            self.control
+                .add_xconnect_idx(x.port_index, sid)
+                .await
+                .map_err(st)?;
+        } else {
+            self.control.add_xconnect(&x.port, sid).await.map_err(st)?;
+        }
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_xconnect(
+        &self,
+        req: Request<pb::XconnectDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let x = req.into_inner();
+        if x.port_index != 0 {
+            self.control.del_xconnect_idx(x.port_index).await.map_err(st)?;
+        } else {
+            self.control.del_xconnect(&x.port).await.map_err(st)?;
+        }
         Ok(Response::new(pb::Empty {}))
     }
 

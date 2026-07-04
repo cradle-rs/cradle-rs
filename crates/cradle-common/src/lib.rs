@@ -191,6 +191,10 @@ pub const XDP_META_MAGIC_L2: u32 = 0xC7AD_1E02;
 /// RFC 8986 §4.5/§4.4). XDP can't `bpf_redirect` toward a CE veth whose
 /// peer runs no NAPI, so the skb-path TC redirect finishes the job.
 pub const XDP_META_MAGIC_DX: u32 = 0xC7AD_1E03;
+/// DX2 cross-connect metadata: `vrf_id` carries the *AC ifindex* the TC
+/// stage must emit the decapped Ethernet frame out of — raw, no MAC
+/// rewrite (End.DX2/DX2V, RFC 8986 §4.9/§4.10).
+pub const XDP_META_MAGIC_DX2: u32 = 0xC7AD_1E04;
 
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
@@ -305,6 +309,15 @@ pub const SRV6_BH_END_T: u8 = 14;
 pub const SRV6_BH_END_DX4: u8 = 15;
 /// `End.DX6` (RFC 8986 §4.4): as `End.DX4` for an inner IPv6 packet.
 pub const SRV6_BH_END_DX6: u8 = 16;
+/// `End.DX2` (RFC 8986 §4.9): decapsulate and emit the inner **Ethernet
+/// frame** raw out the attachment circuit — `vrf_id` carries the AC
+/// ifindex. The EVPN VPWS (E-Line) egress; no FDB, no learning, no MAC
+/// rewrite.
+pub const SRV6_BH_END_DX2: u8 = 17;
+/// `End.DX2V` (RFC 8986 §4.10): as `End.DX2`, but the inner frame's
+/// 802.1Q VID selects the AC via the `DX2V` table — `vrf_id` is the
+/// VLAN-table id.
+pub const SRV6_BH_END_DX2V: u8 = 18;
 
 /// SRv6 endpoint flavors (RFC 8986 §4.16), OR-able in `LocalSid::flavors`.
 /// PSP: pop the SRH at the penultimate segment (this node's decrement hits
@@ -336,6 +349,16 @@ pub struct MirrorEntry {
     pub _pad: [u8; 3],
     /// Local VRF table the inner packet is looked up in.
     pub vrf_id: u32,
+}
+
+/// `DX2V` VLAN-table key (RFC 8986 §4.10): the End.DX2V SID's table id
+/// (`LocalSid::vrf_id`) plus the inner frame's 802.1Q VID.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Dx2vKey {
+    pub table: u32,
+    pub vid: u16,
+    pub _pad: [u8; 2],
 }
 
 /// Maximum SIDs in an imposed segment list (bounds the encap/SRH loops).
@@ -683,8 +706,10 @@ pub const STAT_SRV6_DX: u32 = 34;
 pub const STAT_GTP_ENCAP: u32 = 35;
 /// GTP-U decaps (`H.M.GTP4.D`: a G-PDU stripped, inner forwarded in its VRF).
 pub const STAT_GTP_DECAP: u32 = 36;
+/// End.DX2/DX2V decaps (EVPN VPWS egress — frame emitted raw on the AC).
+pub const STAT_SRV6_DX2: u32 = 37;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 37;
+pub const STAT_MAX: u32 = 38;
 
 // ============================== L7 proxy ===================================
 
@@ -724,6 +749,7 @@ mod user {
         GtpPdr,
         FdbKey,
         FdbEntry,
+        Dx2vKey,
         PortConfig,
         L2MemberKey,
         ServiceKey,
