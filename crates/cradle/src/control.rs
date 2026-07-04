@@ -85,6 +85,8 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_b6",
     "srv6_endt",
     "srv6_dx",
+    "gtp_encap",
+    "gtp_decap",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -489,6 +491,37 @@ impl Control {
         Ok(())
     }
 
+    /// Set a GTP-U-encap nexthop (`GTP4.E`) by ifindex: a v4 underlay
+    /// (`gateway`/`oif`) that imposes an outer IPv4 + UDP(2152) + GTP-U(`teid`)
+    /// header with tunnel endpoints `src`/`dst`.
+    pub async fn set_nexthop_gtp(
+        &self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: u32,
+        src: Ipv4Addr,
+        dst: Ipv4Addr,
+        teid: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .nexthop_set_gtp(id, gateway, oif, src, dst, teid)?;
+        Ok(())
+    }
+
+    /// Install a GTP-U decap PDR: `(dst, teid)` → strip + forward inner in `vrf`.
+    pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, vrf: u32) -> Result<()> {
+        self.dp.lock().await.gtp_pdr_add(dst, teid, vrf)?;
+        Ok(())
+    }
+
+    /// Remove a GTP-U decap PDR.
+    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32) -> Result<()> {
+        self.dp.lock().await.gtp_pdr_del(dst, teid)?;
+        Ok(())
+    }
+
     /// Start the link monitor: an `ip -o monitor link` subprocess feeds
     /// carrier/admin transitions into the `LINK_DOWN` map, arming the
     /// datapath's protected-nexthop failover within event latency.
@@ -726,9 +759,28 @@ impl Cradle for GrpcService {
                 });
             }
         }
+        // A GTP-U nexthop (non-empty `gtp_dst`) imposes a GTP4.E encap: outer
+        // IPv4 + UDP(2152) + GTP-U(gtp_teid) over the v4 underlay `gateway`.
+        if !n.gtp_dst.is_empty() {
+            let gw = if n.gateway.is_empty() {
+                None
+            } else {
+                Some(n.gateway.parse::<Ipv4Addr>().map_err(st)?)
+            };
+            let oif = if n.oif_index != 0 {
+                n.oif_index
+            } else {
+                util::ifindex_of(&n.oif).map_err(st)?
+            };
+            let src = n.gtp_src.parse::<Ipv4Addr>().map_err(st)?;
+            let dst = n.gtp_dst.parse::<Ipv4Addr>().map_err(st)?;
+            self.control
+                .set_nexthop_gtp(n.id, gw, oif, src, dst, n.gtp_teid)
+                .await
+                .map_err(st)?;
         // A nexthop carrying SRv6 segments imposes an H.Encaps (always v6
         // underlay), regardless of the `v6` flag.
-        if !n.segs.is_empty() {
+        } else if !n.segs.is_empty() {
             let gw = if n.gateway.is_empty() {
                 None
             } else {
@@ -900,6 +952,26 @@ impl Cradle for GrpcService {
             )
             .await
             .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn add_gtp_pdr(&self, req: Request<pb::GtpPdr>) -> Result<Response<pb::Empty>, Status> {
+        let p = req.into_inner();
+        let dst = p.dst.parse::<Ipv4Addr>().map_err(st)?;
+        self.control
+            .gtp_pdr_add(dst, p.teid, p.vrf)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_gtp_pdr(
+        &self,
+        req: Request<pb::GtpPdrDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let p = req.into_inner();
+        let dst = p.dst.parse::<Ipv4Addr>().map_err(st)?;
+        self.control.gtp_pdr_del(dst, p.teid).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

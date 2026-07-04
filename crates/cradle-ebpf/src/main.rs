@@ -35,23 +35,24 @@ use aya_ebpf::{
 };
 use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
-    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid,
-    MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
-    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT,
-    CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
-    FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3,
-    MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
-    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
-    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
-    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_L2_FLOOD,
-    STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
-    STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    STAT_NH_BACKUP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_ENCAP, STAT_SRV6_END,
-    STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
-    STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID,
-    STAT_SRV6_USP, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_L2,
+    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey,
+    L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry,
+    NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key,
+    Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8,
+    FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
+    PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
+    SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
+    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
+    STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP,
+    STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM,
+    STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
+    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC,
+    XDP_META_MAGIC_DX, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -80,6 +81,14 @@ static SRV6_LOCALSID: LpmTrie<[u8; 16], LocalSid> = LpmTrie::with_max_entries(40
 static SRV6_ENCAP: HashMap<u32, Srv6Encap> = HashMap::with_max_entries(4096, 0);
 #[map]
 static SRV6_ENCAP_SRC: Array<[u8; 16]> = Array::with_max_entries(1, 0);
+/// GTP-U encap side table (keyed by nexthop id, the `Srv6Encap` analogue): an
+/// `NH_F_GTP` nexthop's outer IPv4 src/dst + TEID.
+#[map]
+static GTP_ENCAP: HashMap<u32, GtpEncap> = HashMap::with_max_entries(4096, 0);
+/// GTP-U decap PDR table: a received G-PDU's (local outer dst, TEID) → decap +
+/// forward the inner in `vrf_id` (the `SRV6_LOCALSID` analogue for GTP).
+#[map]
+static GTP_PDR: HashMap<GtpPdrKey, GtpPdr> = HashMap::with_max_entries(4096, 0);
 /// Per-instance random cookie folded into the XDP→TC metadata magic. skb
 /// metadata SURVIVES a veth hop into the neighbour's TC stage (and is not
 /// even visible to its XDP program on the veth rx path), so a constant
@@ -184,6 +193,13 @@ const IP_SRC_OFF: usize = EthHdr::LEN + 12;
 const IP_DST_OFF: usize = EthHdr::LEN + 16;
 /// L4 header start, assuming no IPv4 options (IHL == 5).
 const L4_OFF: usize = EthHdr::LEN + 20;
+/// GTP-U over UDP port (3GPP TS 29.281).
+const GTP_PORT: u16 = 2152;
+/// Bytes a `GTP4.E` encap pushes: outer IPv4(20) + UDP(8) + GTP-U G-PDU(8).
+const GTP_ENCAP_HDR_LEN: usize = 36;
+/// Offset of the inner packet in a received no-options G-PDU:
+/// eth(14) + IPv4(20) + UDP(8) + GTP-U(8).
+const GTP_INNER_OFF: usize = L4_OFF + 16;
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -996,6 +1012,12 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
         return srv6_encap(ctx, nh_id, &nh, ETH_P_IP);
     }
 
+    // GTP-U imposition (GTP4.E): wrap the inner v4 packet in outer IPv4 + UDP
+    // (2152) + GTP-U(TEID). Tunnel/pipe model — the inner TTL is left as-is.
+    if nh.flags & NH_F_GTP != 0 {
+        return gtp_encap(ctx, nh_id, &nh);
+    }
+
     // MPLS imposition (ingress LER): a labeled nexthop pushes its out-label
     // stack and egresses MPLS. Pipe-model TTL — the inner IP TTL is left
     // untouched; the label TTL is seeded from it (a dying packet still punts
@@ -1128,6 +1150,12 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
             return Ok(TC_ACT_PIPE as i32);
         }
         return srv6_encap(ctx, nh_id, &nh, ETH_P_IPV6);
+    }
+
+    // GTP-U imposition (GTP4.E): an inner v6 packet wrapped in outer IPv4 + UDP
+    // (2152) + GTP-U(TEID). Tunnel/pipe model — the inner hop limit is kept.
+    if nh.flags & NH_F_GTP != 0 {
+        return gtp_encap(ctx, nh_id, &nh);
     }
 
     // MPLS imposition — as in the v4 path; the label TTL seeds from the
@@ -1445,6 +1473,73 @@ fn apply_hencap(ctx: &TcContext, enc: &Srv6Encap, inner_ethertype: u16) -> Resul
     Ok(None)
 }
 
+/// One's-complement checksum of the outer IPv4 header a GTP-U encap writes:
+/// the fixed words (`0x4500` = version/IHL/TOS, `0x4011` = TTL 64 / proto UDP)
+/// plus the total length and the src/dst address words. ID / flags / frag = 0.
+#[inline(always)]
+fn ipv4_hdr_csum(total_len: u16, src: [u8; 4], dst: [u8; 4]) -> u16 {
+    let mut sum: u32 = 0x4500 + total_len as u32 + 0x4011;
+    sum += ((src[0] as u32) << 8) | src[1] as u32;
+    sum += ((src[2] as u32) << 8) | src[3] as u32;
+    sum += ((dst[0] as u32) << 8) | dst[1] as u32;
+    sum += ((dst[2] as u32) << 8) | dst[3] as u32;
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum = (sum & 0xffff) + (sum >> 16);
+    !(sum as u16)
+}
+
+/// `GTP4.E` downlink encap: wrap the inner packet in outer IPv4 + UDP(2152) +
+/// an 8-byte GTP-U G-PDU header (`GTP_ENCAP[nh_id]`), then egress via the
+/// nexthop's adjacency. UDP checksum left 0 (optional over IPv4). Mirrors
+/// `srv6_encap`'s grow-at-MAC-boundary + `l2_xmit` shape.
+#[inline(always)]
+fn gtp_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop) -> Result<i32, ()> {
+    let enc: &GtpEncap = match GTP_ENCAP.get_ptr(&nh_id) {
+        Some(e) => unsafe { &*e },
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    // Inner IP length, captured before the outer headers grow the frame.
+    let inner_len = (ctx.len() as usize).saturating_sub(EthHdr::LEN) as u16;
+    let ip_total = inner_len + GTP_ENCAP_HDR_LEN as u16; // outer IPv4 total length
+    let udp_len = inner_len + 16; // UDP(8) + GTP-U(8) + inner
+    let gtp_len = inner_len; // payload after the 8-byte GTP-U header
+
+    ctx.skb
+        .adjust_room(GTP_ENCAP_HDR_LEN as i32, BPF_ADJ_ROOM_MAC, 0)
+        .map_err(|_| ())?;
+
+    // Outer IPv4 header.
+    let csum = ipv4_hdr_csum(ip_total, enc.src, enc.dst);
+    ctx.store(IP_VER_IHL_OFF, &0x45u8, 0).map_err(|_| ())?; // version 4, IHL 5
+    ctx.store(IP_VER_IHL_OFF + 1, &0u8, 0).map_err(|_| ())?; // TOS
+    ctx.store(IP_VER_IHL_OFF + 2, &ip_total.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(IP_VER_IHL_OFF + 4, &0u16, 0).map_err(|_| ())?; // identification
+    ctx.store(IP_VER_IHL_OFF + 6, &0u16, 0).map_err(|_| ())?; // flags / frag off
+    ctx.store(IP_TTL_OFF, &64u8, 0).map_err(|_| ())?;
+    ctx.store(IP_PROTO_OFF, &IPPROTO_UDP, 0).map_err(|_| ())?;
+    ctx.store(IP_CSUM_OFF, &csum.to_be(), 0).map_err(|_| ())?;
+    ctx.store(IP_SRC_OFF, &enc.src, 0).map_err(|_| ())?;
+    ctx.store(IP_DST_OFF, &enc.dst, 0).map_err(|_| ())?;
+
+    // UDP header (checksum 0 — optional over IPv4).
+    ctx.store(L4_OFF, &GTP_PORT.to_be(), 0).map_err(|_| ())?; // source port
+    ctx.store(L4_OFF + 2, &GTP_PORT.to_be(), 0)
+        .map_err(|_| ())?; // dest 2152
+    ctx.store(L4_OFF + 4, &udp_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(L4_OFF + 6, &0u16, 0).map_err(|_| ())?; // UDP checksum
+
+    // GTP-U header: version 1, PT 1, no optional fields; G-PDU (0xFF).
+    ctx.store(L4_OFF + 8, &0x30u8, 0).map_err(|_| ())?; // flags
+    ctx.store(L4_OFF + 9, &0xFFu8, 0).map_err(|_| ())?; // message type
+    ctx.store(L4_OFF + 10, &gtp_len.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(L4_OFF + 12, &enc.teid, 0).map_err(|_| ())?; // TEID
+
+    stat_inc(STAT_GTP_ENCAP);
+    l2_xmit(ctx, nh, ETH_P_IP)
+}
+
 /// SRv6 H.Insert (TI-LFA repair): insert an SRH into the *existing* IPv6
 /// packet — the original destination becomes the SRH's final segment
 /// (`segment_list[0]`), the repair segments ride above it reversed, and the
@@ -1578,6 +1673,9 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     match ethertype {
         ETH_P_MPLS_UC => try_mpls_xdp(ctx),
         ETH_P_IPV6 => try_srv6_xdp(ctx),
+        // GTP-U tunnel decap (H.M.GTP4.D): a G-PDU destined to a local tunnel
+        // endpoint is stripped in XDP; a non-GTP v4 packet falls through to TC.
+        ETH_P_IP => try_gtp_xdp(ctx),
         _ => Ok(xdp_action::XDP_PASS),
     }
 }
@@ -1829,6 +1927,74 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
         unsafe {
             (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
             (*meta).vrf_id = vrf_id;
+        }
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// GTP-U tunnel decap (`H.M.GTP4.D`): match a received no-options G-PDU on its
+/// (local outer dst, TEID) in `GTP_PDR`, strip the 36-byte outer IPv4+UDP+GTP-U,
+/// and hand the inner packet to the TC FIB stage (routed in the PDR's VRF via
+/// `CradleXdpMeta`, exactly like an `End.DT*` decap). A non-matching or non-GTP
+/// v4 packet returns `XDP_PASS` for normal forwarding. Mirrors `try_srv6_xdp`;
+/// the 36-byte strip is below `decap_head`'s IPv6 floor so it is inlined here.
+#[inline(always)]
+fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    // No-options IPv4 only — the L4 / GTP offsets assume IHL == 5.
+    let ver_ihl = unsafe { *xdp_ptr::<u8>(ctx, IP_VER_IHL_OFF)? };
+    if ver_ihl & 0x0f != 5 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { *xdp_ptr::<u8>(ctx, IP_PROTO_OFF)? } != IPPROTO_UDP {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let dport = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, L4_OFF + 2)? });
+    if dport != GTP_PORT {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // Plain G-PDU only: no S/PN/E optional fields (flags & 0x07 == 0), type 0xFF.
+    let gflags = unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 8)? };
+    let mtype = unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 9)? };
+    if gflags & 0x07 != 0 || mtype != 0xFF {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // PDR lookup keyed by (local tunnel endpoint, TEID) — both on-wire bytes.
+    let dst = unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_DST_OFF)? };
+    let teid = unsafe { *xdp_ptr::<[u8; 4]>(ctx, L4_OFF + 12)? };
+    let pdr: GtpPdr = match GTP_PDR.get_ptr(&GtpPdrKey { dst, teid }) {
+        Some(p) => unsafe { *p },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    // Inner ethertype from the decapped packet's IP version nibble.
+    let inner_et = match unsafe { *xdp_ptr::<u8>(ctx, GTP_INNER_OFF)? } >> 4 {
+        4 => ETH_P_IP,
+        6 => ETH_P_IPV6,
+        _ => {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+    };
+    // Strip the 36-byte outer headers: slide the MAC header forward over them
+    // and advance `data`, leaving a fresh Ethernet header on the inner packet.
+    let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
+    unsafe { *xdp_ptr::<[u8; 12]>(ctx, GTP_ENCAP_HDR_LEN)? = macs };
+    unsafe { *xdp_ptr::<u16>(ctx, GTP_ENCAP_HDR_LEN + ETH_TYPE_OFF)? = inner_et.to_be() };
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, GTP_ENCAP_HDR_LEN as i32) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_GTP_DECAP);
+    // Route the inner packet in the PDR's VRF (0 = global; no metadata needed).
+    if pdr.vrf_id != 0 {
+        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+            != 0
+        {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        let meta = xdp_meta_ptr(ctx)?;
+        unsafe {
+            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
+            (*meta).vrf_id = pdr.vrf_id;
         }
     }
     Ok(xdp_action::XDP_PASS)

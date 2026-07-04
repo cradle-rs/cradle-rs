@@ -1,0 +1,25 @@
+{
+  "ports": [
+    { "name": "pe2a", "l3": true },
+    { "name": "pe2b", "l3": true }
+  ],
+  "nexthops": [
+    {
+      "id": 1,
+      "oif": "pe2a",
+      "gateway": "10.0.12.1",
+      "gtp_src": "10.0.12.2",
+      "gtp_dst": "10.0.12.1",
+      "gtp_teid": 512
+    }
+  ],
+  "neighbors": [
+    { "oif": "pe2a", "ip": "10.0.12.1", "mac": "02:00:00:00:01:0b" }
+  ],
+  "gtp_pdrs": [
+    { "dst": "10.0.12.2", "teid": 256 }
+  ],
+  "routes": [
+    { "prefix": "10.0.1.0/24", "nexthop": 1 }
+  ]
+}
