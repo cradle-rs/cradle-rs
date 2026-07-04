@@ -19,11 +19,11 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid,
-    MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
-    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
-    DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
-    NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED, STAT_MAX,
+    Backend, Backend6, BackendKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
+    GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
+    Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
+    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED, STAT_MAX,
 };
 
 use crate::{
@@ -38,6 +38,8 @@ pub struct Dataplane {
     fib6_vrf: LpmTrie<MapData, Vrf6Key, FibEntry>,
     srv6_localsid: LpmTrie<MapData, [u8; 16], LocalSid>,
     srv6_encap: HashMap<MapData, u32, Srv6Encap>,
+    gtp_encap: HashMap<MapData, u32, GtpEncap>,
+    gtp_pdr: HashMap<MapData, GtpPdrKey, GtpPdr>,
     srv6_encap_src: Array<MapData, [u8; 16]>,
     meta_cookie: Array<MapData, u32>,
     tbl24: Array<MapData, FibWord>,
@@ -95,6 +97,10 @@ impl Dataplane {
                 bpf.take_map("SRV6_ENCAP")
                     .context("map SRV6_ENCAP missing")?,
             )?,
+            gtp_encap: HashMap::try_from(
+                bpf.take_map("GTP_ENCAP").context("map GTP_ENCAP missing")?,
+            )?,
+            gtp_pdr: HashMap::try_from(bpf.take_map("GTP_PDR").context("map GTP_PDR missing")?)?,
             srv6_encap_src: Array::try_from(
                 bpf.take_map("SRV6_ENCAP_SRC")
                     .context("map SRV6_ENCAP_SRC missing")?,
@@ -760,6 +766,63 @@ impl Dataplane {
             enc.segs[i] = s.octets();
         }
         self.srv6_encap.insert(id, enc, 0)?;
+        Ok(())
+    }
+
+    /// Install/replace a GTP-U-encap nexthop (`GTP4.E`): an IPv4 underlay
+    /// nexthop (`gateway`/`oif`) that imposes an outer IPv4 + UDP(2152) + GTP-U
+    /// header. `src`/`dst` are the tunnel endpoints and `teid` the GTP-U TEID
+    /// (stored as on-wire bytes in the `GTP_ENCAP` side table, keyed by id).
+    pub fn nexthop_set_gtp(
+        &mut self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: u32,
+        src: Ipv4Addr,
+        dst: Ipv4Addr,
+        teid: u32,
+    ) -> Result<()> {
+        let gateway_v4 = gateway.map(|a| u32::from_be_bytes(a.octets())).unwrap_or(0);
+        let nh = NextHop {
+            gateway_v4,
+            gateway_v6: [0; 16],
+            oif,
+            flags: NH_F_GTP,
+            labels: [0; MAX_LABELS],
+            num_labels: 0,
+            _pad: [0; 3],
+            backup_id: 0,
+        };
+        self.nexthops.insert(id, nh, 0)?;
+        let enc = GtpEncap {
+            src: src.octets(),
+            dst: dst.octets(),
+            teid: teid.to_be_bytes(),
+            qfi: 0,
+            _pad: [0; 3],
+        };
+        self.gtp_encap.insert(id, enc, 0)?;
+        Ok(())
+    }
+
+    /// Install a GTP-U decap PDR: a received G-PDU on (`dst`, `teid`) is
+    /// stripped and its inner packet forwarded in `vrf` (0 = global).
+    pub fn gtp_pdr_add(&mut self, dst: Ipv4Addr, teid: u32, vrf: u32) -> Result<()> {
+        let key = GtpPdrKey {
+            dst: dst.octets(),
+            teid: teid.to_be_bytes(),
+        };
+        self.gtp_pdr.insert(key, GtpPdr { vrf_id: vrf }, 0)?;
+        Ok(())
+    }
+
+    /// Remove a GTP-U decap PDR (idempotent).
+    pub fn gtp_pdr_del(&mut self, dst: Ipv4Addr, teid: u32) -> Result<()> {
+        let key = GtpPdrKey {
+            dst: dst.octets(),
+            teid: teid.to_be_bytes(),
+        };
+        let _ = self.gtp_pdr.remove(&key);
         Ok(())
     }
 

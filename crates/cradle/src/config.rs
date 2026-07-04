@@ -38,6 +38,10 @@ pub struct Config {
     pub routes6: Vec<Route6>,
     #[serde(default)]
     pub localsids: Vec<LocalSidCfg>,
+    /// GTP-U decap PDRs (`H.M.GTP4.D`): a G-PDU on `(dst, teid)` is stripped
+    /// and its inner packet forwarded in `vrf`.
+    #[serde(default)]
+    pub gtp_pdrs: Vec<GtpPdrCfg>,
     /// SRv6 H.Encaps outer source address.
     #[serde(default)]
     pub srv6_source: Option<String>,
@@ -176,6 +180,27 @@ pub struct Nexthop {
     /// Fast-reroute: nexthop id to fail over to when this one's link is down.
     #[serde(default)]
     pub backup: u32,
+    /// GTP-U encap (`GTP4.E`): a present `gtp_dst` makes this a GTP nexthop that
+    /// wraps the packet in outer IPv4 + UDP(2152) + GTP-U(`gtp_teid`) toward
+    /// `gtp_dst`, sourced from `gtp_src`, over the v4 underlay `gateway`/`oif`.
+    #[serde(default)]
+    pub gtp_src: Option<String>,
+    #[serde(default)]
+    pub gtp_dst: Option<String>,
+    #[serde(default)]
+    pub gtp_teid: u32,
+}
+
+/// A GTP-U decap PDR (`H.M.GTP4.D`).
+#[derive(Debug, Deserialize)]
+pub struct GtpPdrCfg {
+    /// Local outer IPv4 destination a received G-PDU arrives on.
+    pub dst: String,
+    /// GTP-U TEID.
+    pub teid: u32,
+    /// Inner VRF table id (0 = global).
+    #[serde(default)]
+    pub vrf: u32,
 }
 
 /// An incoming-label map entry: `action` is `"swap"`, `"pop"` or `"pop-l3"`.
@@ -314,6 +339,28 @@ impl Config {
             ctl.set_srv6_encap_source(addr).await?;
         }
         for nh in &self.nexthops {
+            if let Some(dst) = &nh.gtp_dst {
+                let gw = match &nh.gateway {
+                    Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
+                    None => None,
+                };
+                let oif = match &nh.oif {
+                    Some(o) => util::ifindex_of(o)?,
+                    None => anyhow::bail!("GTP nexthop {} needs an oif", nh.id),
+                };
+                let src = nh
+                    .gtp_src
+                    .as_deref()
+                    .unwrap_or("0.0.0.0")
+                    .parse()
+                    .context("bad gtp_src")?;
+                let dst = dst
+                    .parse()
+                    .with_context(|| format!("bad gtp_dst {dst:?}"))?;
+                ctl.set_nexthop_gtp(nh.id, gw, oif, src, dst, nh.gtp_teid)
+                    .await?;
+                continue;
+            }
             if !nh.segs.is_empty() {
                 let gw = match &nh.gateway {
                     Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
@@ -381,6 +428,13 @@ impl Config {
                 srv6_flavors(&ls.flavors)?,
             )
             .await?;
+        }
+        for pdr in &self.gtp_pdrs {
+            let dst = pdr
+                .dst
+                .parse()
+                .with_context(|| format!("bad gtp pdr dst {:?}", pdr.dst))?;
+            ctl.gtp_pdr_add(dst, pdr.teid, pdr.vrf).await?;
         }
         for f in &self.fdb {
             let mac = util::parse_mac(&f.mac)?;

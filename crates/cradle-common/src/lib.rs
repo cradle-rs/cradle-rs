@@ -133,6 +133,10 @@ pub const NH_F_ONLINK: u32 = 1 << 1;
 pub const NH_F_MPLS: u32 = 1 << 2;
 /// Nexthop imposes an SRv6 encap (`SRV6_ENCAP[nexthop_id]`).
 pub const NH_F_SRV6: u32 = 1 << 3;
+/// Nexthop imposes a GTP-U encap (`GTP_ENCAP[nexthop_id]`) — outer IPv4 + UDP
+/// (2152) + GTP-U(TEID) around the packet (draft-ietf-dmm-srv6-mobile-uplane
+/// `GTP4.E`, the downlink toward a gNB / peer UPF).
+pub const NH_F_GTP: u32 = 1 << 4;
 
 /// Maximum out-label stack depth (bounds the datapath's parse/push loops for
 /// the verifier). Covers SR-MPLS depths seen in practice; deeper is rejected
@@ -357,6 +361,50 @@ pub const SRV6_ENCAP_MODE_ENCAPS: u8 = 0;
 /// destination rides as the SRH's final segment and takes over at SL 0
 /// (TI-LFA repair; RFC 8986 §5.2 deprecated-but-deployed form). v6-only.
 pub const SRV6_ENCAP_MODE_INSERT: u8 = 2;
+
+/// GTP-U tunnel imposed by an `NH_F_GTP` nexthop (`GTP_ENCAP`, keyed by nexthop
+/// id — the side table to `NEXTHOPS`, mirroring `Srv6Encap`). The downlink
+/// `GTP4.E` behaviour wraps the (v4 or v6) inner packet in an outer IPv4 header,
+/// UDP dport 2152, and an 8-byte GTP-U G-PDU header carrying `teid`. Addresses
+/// and TEID are stored as their on-wire bytes so the datapath writes them
+/// directly (no endianness juggling).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GtpEncap {
+    /// Outer IPv4 source — the local N3/N9 tunnel address (wire bytes).
+    pub src: [u8; 4],
+    /// Outer IPv4 destination — the peer (gNB / peer UPF) tunnel address.
+    pub dst: [u8; 4],
+    /// GTP-U TEID, big-endian wire bytes.
+    pub teid: [u8; 4],
+    /// QFI for a PDU Session Container extension header; 0 = none (the MVP
+    /// writes a plain G-PDU and ignores this).
+    pub qfi: u8,
+    pub _pad: [u8; 3],
+}
+
+/// GTP-U decap match (a PDR), keyed exactly by the local tunnel endpoint +
+/// TEID a received G-PDU carries — the `GTP_PDR` hash probed in XDP before the
+/// FIB, mirroring the role of `SRV6_LOCALSID`. The `H.M.GTP4.D`-style uplink:
+/// a G-PDU on `(dst, teid)` is stripped and the inner packet forwarded in
+/// `vrf_id`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GtpPdrKey {
+    /// Local outer IPv4 destination the G-PDU arrived on (wire bytes).
+    pub dst: [u8; 4],
+    /// GTP-U TEID, big-endian wire bytes (as read off the packet).
+    pub teid: [u8; 4],
+}
+
+/// The action bound to a [`GtpPdrKey`]: forward the decapped inner packet in
+/// this VRF table (0 = global), handed to TC via `CradleXdpMeta` exactly like
+/// an `End.DT*` decap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GtpPdr {
+    pub vrf_id: u32,
+}
 
 /// Per-VRF IPv6 LPM key — the v6 mirror of `Vrf4Key`: a route `addr/len` in
 /// VRF `v` is inserted with `prefix_len = 32 + len`.
@@ -631,8 +679,12 @@ pub const STAT_SRV6_B6: u32 = 32;
 pub const STAT_SRV6_ENDT: u32 = 33;
 /// End.DX4/DX6 decap + cross-connect forwards (per-CE VPN egress).
 pub const STAT_SRV6_DX: u32 = 34;
+/// GTP-U encaps (`GTP4.E`: outer IPv4+UDP+GTP-U imposed on a downlink packet).
+pub const STAT_GTP_ENCAP: u32 = 35;
+/// GTP-U decaps (`H.M.GTP4.D`: a G-PDU stripped, inner forwarded in its VRF).
+pub const STAT_GTP_DECAP: u32 = 36;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 35;
+pub const STAT_MAX: u32 = 37;
 
 // ============================== L7 proxy ===================================
 
@@ -667,6 +719,9 @@ mod user {
         Vrf6Key,
         LocalSid,
         Srv6Encap,
+        GtpEncap,
+        GtpPdrKey,
+        GtpPdr,
         FdbKey,
         FdbEntry,
         PortConfig,

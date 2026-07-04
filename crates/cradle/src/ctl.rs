@@ -61,6 +61,9 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         segs: nh.segs.clone(),
                         encap_mode: nh.encap_mode as u32,
                         backup_id: nh.backup,
+                        gtp_src: nh.gtp_src.clone().unwrap_or_default(),
+                        gtp_dst: nh.gtp_dst.clone().unwrap_or_default(),
+                        gtp_teid: nh.gtp_teid,
                     })
                     .await?;
             }
@@ -83,6 +86,15 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         arg_bits: 0,
                         nexthop_id: ls.nexthop,
                         flavors: config::srv6_flavors(&ls.flavors)? as u32,
+                    })
+                    .await?;
+            }
+            for pdr in &cfg.gtp_pdrs {
+                client
+                    .add_gtp_pdr(pb::GtpPdr {
+                        dst: pdr.dst.clone(),
+                        teid: pdr.teid,
+                        vrf: pdr.vrf,
                     })
                     .await?;
             }
