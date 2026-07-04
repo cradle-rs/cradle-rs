@@ -719,9 +719,12 @@ mod tests {
         assert_ne!(g & FIBW_TBL8, 0);
         assert_eq!(g & FIBW_ID_MASK, 4095);
         // All current FIB_F_* flags fit the 4-bit field.
-        assert!(FIB_F_BLACKHOLE | FIB_F_LOCAL | FIB_F_CONNECTED | FIB_F_ECMP <= FIBW_FLAGS_MASK);
-        // Zero is the invalid word.
-        assert_eq!(0u32 & FIBW_VALID, 0);
+        assert_eq!(
+            (FIB_F_BLACKHOLE | FIB_F_LOCAL | FIB_F_CONNECTED | FIB_F_ECMP) & !FIBW_FLAGS_MASK,
+            0
+        );
+        // Zero is the invalid word: VALID is a real, non-zero bit.
+        assert_ne!(FIBW_VALID, 0);
     }
 
     #[test]

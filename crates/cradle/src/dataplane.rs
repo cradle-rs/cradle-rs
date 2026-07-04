@@ -22,9 +22,8 @@ use cradle_common::{
     Backend, Backend6, BackendKey, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid,
     MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
     PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
-    DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
-    FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    STAT_FDB_AGED, STAT_MAX,
+    DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
+    NEIGH_STATE_REACHABLE, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED, STAT_MAX,
 };
 
 use crate::{

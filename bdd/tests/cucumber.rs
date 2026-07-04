@@ -691,9 +691,13 @@ async fn disable_ipv4_forwarding(world: &mut World, namespace: String) {
 #[when(expr = "I disable IPv6 forwarding in namespace {string}")]
 async fn disable_ipv6_forwarding(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
-    netns::exec_in_netns(&scoped, "sysctl", &["-wq", "net.ipv6.conf.all.forwarding=0"])
-        .await
-        .expect("Failed to disable IPv6 forwarding");
+    netns::exec_in_netns(
+        &scoped,
+        "sysctl",
+        &["-wq", "net.ipv6.conf.all.forwarding=0"],
+    )
+    .await
+    .expect("Failed to disable IPv6 forwarding");
     println!("✓ disabled IPv6 forwarding in namespace {}", scoped);
 }
 
@@ -730,9 +734,13 @@ async fn start_cradle(world: &mut World, namespace: String, config: String) {
     assert!(
         netns::pidfile_alive(Path::new(&pid_file)).await,
         "cradle did not start in namespace {} (no live pid file {})",
-        scoped, pid_file
+        scoped,
+        pid_file
     );
-    println!("✓ cradle started in namespace {} (config {})", scoped, config);
+    println!(
+        "✓ cradle started in namespace {} (config {})",
+        scoped, config
+    );
 }
 
 #[when(expr = "I stop cradle in namespace {string}")]
@@ -750,7 +758,9 @@ async fn stop_cradle(world: &mut World, namespace: String) {
 }
 
 /// Poll `cradle ctl stats` over gRPC and assert the named counter is nonzero.
-#[then(expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should be nonzero")]
+#[then(
+    expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should be nonzero"
+)]
 async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String, sock: String) {
     let scoped = world.ns(&namespace);
     let ep = grpc_sock(world, &sock);
@@ -818,9 +828,13 @@ async fn cradle_del_route(world: &mut World, prefix: String, sock: String, names
     let scoped = world.ns(&namespace);
     let ep = grpc_sock(world, &sock);
     let cradle = cradle_bin();
-    netns::exec_in_netns(&scoped, &cradle, &["ctl", "--grpc", &ep, "del-route", &prefix])
-        .await
-        .expect("del-route failed");
+    netns::exec_in_netns(
+        &scoped,
+        &cradle,
+        &["ctl", "--grpc", &ep, "del-route", &prefix],
+    )
+    .await
+    .expect("del-route failed");
     println!("✓ route {} deleted in {}", prefix, scoped);
 }
 
@@ -865,7 +879,8 @@ fn grpc_sock(world: &World, name: &str) -> String {
 }
 
 fn zebra_bin() -> String {
-    std::env::var("ZEBRA").unwrap_or_else(|_| "/home/kunihiro/zebra-rs/target/debug/zebra-rs".into())
+    std::env::var("ZEBRA")
+        .unwrap_or_else(|_| "/home/kunihiro/zebra-rs/target/debug/zebra-rs".into())
 }
 
 fn zebra_yang() -> String {
@@ -904,9 +919,14 @@ async fn start_cradle_grpc_cfg(world: &mut World, namespace: String, config: Str
         pid,
         log
     );
-    netns::spawn_in_netns_env(&scoped, &[("RUST_LOG", "info,cradle=debug")], "sh", &["-c", &cmd])
-        .await
-        .expect("Failed to start cradle");
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info,cradle=debug")],
+        "sh",
+        &["-c", &cmd],
+    )
+    .await
+    .expect("Failed to start cradle");
     await_cradle(&scoped, &pid).await;
     println!("✓ cradle started in {} serving gRPC at {}", scoped, ep);
 }
@@ -933,9 +953,13 @@ async fn apply_cradle_grpc(world: &mut World, config: String, namespace: String,
     let scoped = world.ns(&namespace);
     let cfg = config_in(world, &config);
     let ep = grpc_sock(world, &sock);
-    netns::exec_in_netns(&scoped, &cradle_bin(), &["ctl", "--grpc", &ep, "apply", &cfg])
-        .await
-        .expect("Failed to apply cradle config via gRPC");
+    netns::exec_in_netns(
+        &scoped,
+        &cradle_bin(),
+        &["ctl", "--grpc", &ep, "apply", &cfg],
+    )
+    .await
+    .expect("Failed to apply cradle config via gRPC");
     println!("✓ applied {} to {} via gRPC {}", config, scoped, ep);
 }
 
@@ -970,7 +994,9 @@ async fn start_zebra_cfg(world: &mut World, namespace: String, config: String) {
 
 /// Start zebra-rs teeing its FIB installs to a cradle gRPC endpoint. Uses a
 /// distinct pid file so it can coexist with cradle in the same namespace.
-#[when(expr = "I start zebra-rs in namespace {string} with config {string} teeing to cradle as {string}")]
+#[when(
+    expr = "I start zebra-rs in namespace {string} with config {string} teeing to cradle as {string}"
+)]
 async fn start_zebra_tee(world: &mut World, namespace: String, config: String, sock: String) {
     let scoped = world.ns(&namespace);
     let pid = format!("/tmp/{}_zebra.pid", scoped);
@@ -1008,7 +1034,10 @@ async fn stop_zebra_tee(world: &mut World, namespace: String) {
     }
     let pid = format!("/tmp/{}_zebra.pid", world.ns(&namespace));
     let _ = netns::kill_pidfile(Path::new(&pid)).await;
-    println!("✓ zebra-rs tee stopped in namespace {}", world.ns(&namespace));
+    println!(
+        "✓ zebra-rs tee stopped in namespace {}",
+        world.ns(&namespace)
+    );
 }
 
 // ------------------------------ HTTP service ------------------------------
@@ -1043,7 +1072,10 @@ S((bind, port), H).serve_forever()
         .await
         .expect("Failed to start HTTP server");
     tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
-    println!("✓ HTTP {:?} serving in namespace {} on {}", body, scoped, bind);
+    println!(
+        "✓ HTTP {:?} serving in namespace {} on {}",
+        body, scoped, bind
+    );
 }
 
 #[when(expr = "I stop HTTP in namespace {string}")]
@@ -1086,7 +1118,10 @@ async fn http_get_contains(world: &mut World, url: String, namespace: String, ne
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
-    panic!("HTTP GET {} from {} did not return {:?}", url, scoped, needle);
+    panic!(
+        "HTTP GET {} from {} did not return {:?}",
+        url, scoped, needle
+    );
 }
 
 #[then(
@@ -1160,9 +1195,13 @@ async fn iface_tx(ns: &str, iface: &str) -> u64 {
 #[when(expr = "I add local route {string} in namespace {string}")]
 async fn add_local_route(world: &mut World, prefix: String, namespace: String) {
     let scoped = world.ns(&namespace);
-    netns::exec_in_netns(&scoped, "ip", &["route", "add", "local", &prefix, "dev", "lo"])
-        .await
-        .expect("Failed to add local route");
+    netns::exec_in_netns(
+        &scoped,
+        "ip",
+        &["route", "add", "local", &prefix, "dev", "lo"],
+    )
+    .await
+    .expect("Failed to add local route");
     println!("✓ added local route {} in namespace {}", prefix, scoped);
 }
 
@@ -1220,7 +1259,10 @@ async fn ecmp_balance(
             before[idx],
             after
         );
-        println!("✓ {} carried ECMP traffic (tx {} -> {})", iface, before[idx], after);
+        println!(
+            "✓ {} carried ECMP traffic (tx {} -> {})",
+            iface, before[idx], after
+        );
     }
 }
 

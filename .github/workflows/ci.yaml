@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Rust
+        # Installs the nightly toolchain + components pinned in
+        # rust-toolchain.toml (rust-src, rustfmt, clippy).
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install bpf-linker
+        # `cradle`'s build script compiles cradle-ebpf for bpfel-unknown-none
+        # via aya-build, which links with bpf-linker. A no-op when the binary
+        # is already in the rust-cache-restored ~/.cargo/bin.
+        run: cargo install bpf-linker
+      - name: Clippy
+        # cradle-ebpf is excluded: it only builds for the BPF target (via
+        # cradle's build script); --all-targets would try to give it a host
+        # test harness, which a no_std/no_main binary can't have.
+        run: cargo clippy --workspace --exclude cradle-ebpf --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+      - name: Test
+        # cradle-bdd's cucumber tests require root + Linux network namespaces
+        # and are not runnable in the GitHub Actions sandbox; they are
+        # intended to be run locally. cradle-ebpf never builds for the host.
+        run: cargo test --workspace --exclude cradle-bdd --exclude cradle-ebpf

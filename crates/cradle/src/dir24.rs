@@ -78,7 +78,10 @@ impl Dir24Engine {
         if len == 0 {
             // The default route is never expanded (large-fib.md): one word.
             self.shadow.insert((addr, len), entry);
-            return Ok(vec![SlotWrite::Default(fibw_entry(entry.nexthop_id, entry.flags))]);
+            return Ok(vec![SlotWrite::Default(fibw_entry(
+                entry.nexthop_id,
+                entry.flags,
+            ))]);
         }
 
         // Only a len>24 add can require a new group — exactly one — so
@@ -171,7 +174,10 @@ impl Dir24Engine {
             let addr = addr & mask(len);
             if len == 0 {
                 self.shadow.insert((addr, len), entry);
-                out.push(SlotWrite::Default(fibw_entry(entry.nexthop_id, entry.flags)));
+                out.push(SlotWrite::Default(fibw_entry(
+                    entry.nexthop_id,
+                    entry.flags,
+                )));
                 continue;
             }
             let prev = self.shadow.insert((addr, len), entry);
@@ -188,6 +194,7 @@ impl Dir24Engine {
 
     /// Reference longest-prefix-match over the shadow (includes `/0`).
     /// Also the oracle the property tests compare the tables against.
+    #[cfg(test)]
     pub fn lookup(&self, addr: u32) -> Option<FibEntry> {
         for len in (0..=32u8).rev() {
             if let Some(e) = self.shadow.get(&(addr & mask(len), len)) {
@@ -319,7 +326,9 @@ impl Dir24Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cradle_common::{fibw_unpack, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_ECMP, FIB_F_LOCAL};
+    use cradle_common::{
+        fibw_unpack, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_ECMP, FIB_F_LOCAL,
+    };
 
     /// Simulated data-plane tables — mirrors `fib4_lookup` in cradle-ebpf.
     struct Sim {
@@ -473,7 +482,10 @@ mod tests {
         sim.apply(&eng.route_add(0x0a000010, 32, e(1, 0)).unwrap());
         // Second block needs a second group: must fail without touching state.
         assert!(eng.route_add(0x0a000110, 32, e(2, 0)).is_err());
-        assert!(eng.lookup(0x0a000110).is_none(), "failed add leaked into shadow");
+        assert!(
+            eng.lookup(0x0a000110).is_none(),
+            "failed add leaked into shadow"
+        );
         assert_eq!(sim.lookup(0x0a000010), Some((1, 0)));
         // Same block is fine (group already allocated).
         sim.apply(&eng.route_add(0x0a000020, 32, e(3, 0)).unwrap());
@@ -490,7 +502,11 @@ mod tests {
                 let r = splitmix64(&mut rng);
                 let len = lens[(r >> 4) as usize % lens.len()];
                 let addr = (0x0a000000 | (r >> 16) as u32 & 0x007f_ffff) & mask(len);
-                routes.push((addr, len, e((r >> 40) as u32 & 0xffff, (r as u32 >> 1) & 0xf)));
+                routes.push((
+                    addr,
+                    len,
+                    e((r >> 40) as u32 & 0xffff, (r as u32 >> 1) & 0xf),
+                ));
             }
             routes.push((0, 0, e(999, 0))); // default route rides the bulk too
 
@@ -520,7 +536,11 @@ mod tests {
                     serial_sim.lookup(a),
                     "seed {seed} addr {a:#010x}"
                 );
-                assert_eq!(bulk_sim.lookup(a), expect(&bulk, a), "seed {seed} addr {a:#010x}");
+                assert_eq!(
+                    bulk_sim.lookup(a),
+                    expect(&bulk, a),
+                    "seed {seed} addr {a:#010x}"
+                );
             }
         }
     }
@@ -584,12 +604,7 @@ mod tests {
                 let mut probes = Vec::with_capacity(live.len() * 4 + 8);
                 for &(a, l) in &live {
                     let last = a | !mask(l);
-                    probes.extend_from_slice(&[
-                        a,
-                        last,
-                        a.wrapping_sub(1),
-                        last.wrapping_add(1),
-                    ]);
+                    probes.extend_from_slice(&[a, last, a.wrapping_sub(1), last.wrapping_add(1)]);
                 }
                 for _ in 0..8 {
                     probes.push(0x0a000000 | (splitmix64(&mut rng) as u32 & 0x00ff_ffff));
