@@ -144,6 +144,11 @@ pub struct LocalSidCfg {
 pub struct XconnectCfg {
     pub port: String,
     pub remote_sid: String,
+    /// Non-zero = VLAN-scoped E-Line: only 802.1Q frames with this VID on
+    /// `port` enter the cross-connect (tag kept). The return direction is
+    /// a separate `locals` End.DX2V + `dx2v` entry as usual.
+    #[serde(default)]
+    pub vid: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,7 +495,8 @@ impl Config {
                 .remote_sid
                 .parse()
                 .with_context(|| format!("bad remote SID {:?}", x.remote_sid))?;
-            ctl.add_xconnect(&x.port, remote_sid, None).await?;
+            ctl.add_xconnect(&x.port, remote_sid, None, x.vid, 0)
+                .await?;
         }
         for d in &self.dx2v {
             ctl.add_dx2v(d.table, d.vid, &d.port).await?;

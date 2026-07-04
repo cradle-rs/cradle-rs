@@ -32,9 +32,9 @@ use crate::{
 use cradle_common::{
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
-    SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    STAT_MAX,
+    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -283,15 +283,22 @@ impl Control {
     /// Bind a VPWS attachment circuit to its remote End.DX2/DX2V SID.
     /// `local_sid`, when given, also installs the matching End.DX2
     /// LocalSid on the same AC (decap + raw emit) — one call binds the
-    /// E-Line in both directions.
+    /// E-Line in both directions. A non-zero `vid` makes the service
+    /// VLAN-scoped (RFC 8214 VLAN-based E-Line): only 802.1Q frames with
+    /// that VID enter the cross-connect, `local_sid` installs an
+    /// End.DX2V over VLAN table `table`, and the `(table, vid)` entry
+    /// emits decapped frames back on the same AC.
     pub async fn add_xconnect(
         &self,
         port: &str,
         remote_sid: Ipv6Addr,
         local_sid: Option<Ipv6Addr>,
+        vid: u16,
+        table: u32,
     ) -> Result<()> {
         let ifindex = util::ifindex_of(port)?;
-        self.add_xconnect_idx(ifindex, remote_sid, local_sid).await
+        self.add_xconnect_idx(ifindex, remote_sid, local_sid, vid, table)
+            .await
     }
 
     pub async fn add_xconnect_idx(
@@ -299,27 +306,56 @@ impl Control {
         ifindex: u32,
         remote_sid: Ipv6Addr,
         local_sid: Option<Ipv6Addr>,
+        vid: u16,
+        table: u32,
     ) -> Result<()> {
         let mut dp = self.dp.lock().await;
-        dp.xconnect_add(ifindex, remote_sid)?;
-        if let Some(sid) = local_sid {
-            dp.localsid_add(sid, 128, SRV6_BH_END_DX2, ifindex, 0, 0, 0, 0, 0)?;
+        if vid == 0 {
+            dp.xconnect_add(ifindex, remote_sid)?;
+            if let Some(sid) = local_sid {
+                dp.localsid_add(sid, 128, SRV6_BH_END_DX2, ifindex, 0, 0, 0, 0, 0)?;
+            }
+        } else {
+            dp.xconnect_vlan_add(ifindex, vid, remote_sid)?;
+            if let Some(sid) = local_sid {
+                dp.localsid_add(sid, 128, SRV6_BH_END_DX2V, table, 0, 0, 0, 0, 0)?;
+                dp.dx2v_add(table, vid, ifindex)?;
+            }
         }
         Ok(())
     }
 
-    pub async fn del_xconnect_idx(&self, ifindex: u32, local_sid: Option<Ipv6Addr>) -> Result<()> {
+    pub async fn del_xconnect_idx(
+        &self,
+        ifindex: u32,
+        local_sid: Option<Ipv6Addr>,
+        vid: u16,
+        table: u32,
+    ) -> Result<()> {
         let mut dp = self.dp.lock().await;
-        dp.xconnect_del(ifindex)?;
+        if vid == 0 {
+            dp.xconnect_del(ifindex)?;
+        } else {
+            dp.xconnect_vlan_del(ifindex, vid)?;
+            if local_sid.is_some() {
+                dp.dx2v_del(table, vid)?;
+            }
+        }
         if let Some(sid) = local_sid {
             dp.localsid_del(sid, 128)?;
         }
         Ok(())
     }
 
-    pub async fn del_xconnect(&self, port: &str, local_sid: Option<Ipv6Addr>) -> Result<()> {
+    pub async fn del_xconnect(
+        &self,
+        port: &str,
+        local_sid: Option<Ipv6Addr>,
+        vid: u16,
+        table: u32,
+    ) -> Result<()> {
         let ifindex = util::ifindex_of(port)?;
-        self.del_xconnect_idx(ifindex, local_sid).await
+        self.del_xconnect_idx(ifindex, local_sid, vid, table).await
     }
 
     /// End.DX2V VLAN-table entry: (table, vid) → AC port.
@@ -1092,14 +1128,15 @@ impl Cradle for GrpcService {
         } else {
             Some(x.local_sid.parse().map_err(st)?)
         };
+        let vid = x.vid as u16;
         if x.port_index != 0 {
             self.control
-                .add_xconnect_idx(x.port_index, sid, local_sid)
+                .add_xconnect_idx(x.port_index, sid, local_sid, vid, x.dx2v_table)
                 .await
                 .map_err(st)?;
         } else {
             self.control
-                .add_xconnect(&x.port, sid, local_sid)
+                .add_xconnect(&x.port, sid, local_sid, vid, x.dx2v_table)
                 .await
                 .map_err(st)?;
         }
@@ -1116,14 +1153,15 @@ impl Cradle for GrpcService {
         } else {
             Some(x.local_sid.parse().map_err(st)?)
         };
+        let vid = x.vid as u16;
         if x.port_index != 0 {
             self.control
-                .del_xconnect_idx(x.port_index, local_sid)
+                .del_xconnect_idx(x.port_index, local_sid, vid, x.dx2v_table)
                 .await
                 .map_err(st)?;
         } else {
             self.control
-                .del_xconnect(&x.port, local_sid)
+                .del_xconnect(&x.port, local_sid, vid, x.dx2v_table)
                 .await
                 .map_err(st)?;
         }
