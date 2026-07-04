@@ -51,6 +51,13 @@ pub struct Config {
     /// BUM ingress-replication slots (EVPN over SRv6, multi-PE).
     #[serde(default)]
     pub repl_slots: Vec<ReplSlotCfg>,
+    /// VPWS cross-connects: every frame from `port` is MAC-in-SRv6
+    /// encapsulated toward the remote End.DX2/DX2V SID (no FDB).
+    #[serde(default)]
+    pub xconnects: Vec<XconnectCfg>,
+    /// End.DX2V VLAN-table entries: (table, vid) → AC port.
+    #[serde(default)]
+    pub dx2v: Vec<Dx2vCfg>,
     /// Idle timeout (seconds) for locally-learned FDB entries; 0 disables
     /// aging. Default 300 (the kernel bridge default).
     #[serde(default = "default_fdb_age_secs")]
@@ -123,9 +130,27 @@ pub struct LocalSidCfg {
     /// Function bit length (REPLACE-C-SID: C-SID width = node + fun bits).
     #[serde(default)]
     pub fun_bits: u8,
+    /// Attachment-circuit port for `end.dx2` (resolved to an ifindex and
+    /// carried in the SID's `vrf` slot). For `end.dx2v` use `vrf` as the
+    /// VLAN-table id and populate `dx2v` entries instead.
+    #[serde(default)]
+    pub port: String,
     /// Endpoint flavors (RFC 8986 §4.16): any of `psp`, `usp`, `usd`.
     #[serde(default)]
     pub flavors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct XconnectCfg {
+    pub port: String,
+    pub remote_sid: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Dx2vCfg {
+    pub table: u32,
+    pub vid: u16,
+    pub port: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,6 +309,8 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
         "end.t" => SRV6_BH_END_T,
         "end.dx4" => SRV6_BH_END_DX4,
         "end.dx6" => SRV6_BH_END_DX6,
+        "end.dx2" => SRV6_BH_END_DX2,
+        "end.dx2v" => SRV6_BH_END_DX2V,
         "end.dt2u" => SRV6_BH_END_DT2U,
         "end.dt2m" => SRV6_BH_END_DT2M,
         "end.replace" => SRV6_BH_END_REP,
@@ -416,11 +443,17 @@ impl Config {
             } else {
                 ls.prefix_len
             };
+            // end.dx2: the AC port rides in the vrf slot as an ifindex.
+            let vrf = if ls.port.is_empty() {
+                ls.vrf
+            } else {
+                util::ifindex_of(&ls.port)?
+            };
             ctl.add_localsid(
                 sid,
                 prefix_len,
                 behavior,
-                ls.vrf,
+                vrf,
                 ls.nexthop,
                 ls.block_bits,
                 ls.node_bits,
@@ -451,6 +484,16 @@ impl Config {
                 .with_context(|| format!("bad remote SID {:?}", r.remote_sid))?;
             ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid)
                 .await?;
+        }
+        for x in &self.xconnects {
+            let remote_sid = x
+                .remote_sid
+                .parse()
+                .with_context(|| format!("bad remote SID {:?}", x.remote_sid))?;
+            ctl.add_xconnect(&x.port, remote_sid, None).await?;
+        }
+        for d in &self.dx2v {
+            ctl.add_dx2v(d.table, d.vid, &d.port).await?;
         }
         for n in &self.neighbors {
             let ip: IpAddr =

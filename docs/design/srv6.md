@@ -359,6 +359,27 @@ Dispatch on `sid.behavior`:
   peer runs no NAPI, while the skb-path TC redirect always delivers. The
   uDX4/uDX6 forms are the same SIDs matched at the carrier's last
   micro-SID. `stat_inc(STAT_SRV6_DX)`.
+- **End.DX2 / End.DX2V** *(RFC 8986 §4.9 / §4.10)* — the EVPN VPWS
+  (E-Line, RFC 8214) egress: gate on outer next-header 143
+  (IPPROTO_ETHERNET, the reduced MAC-in-SRv6 form), strip the 54 outer
+  bytes, and emit the inner Ethernet frame **raw** on the attachment
+  circuit — no FDB, no learning, no MAC rewrite. DX2's AC rides in the
+  SID's `vrf_id` slot (an ifindex); DX2V instead reads the inner frame's
+  802.1Q TCI and picks the AC from the `DX2V` map keyed by
+  `(vrf_id = table, VID)` — the tag stays on the frame. Like DX4/DX6 the
+  emit finishes at the TC stage, via `XDP_META_MAGIC_DX2` metadata. The
+  ingress side is the `XCONNECT` map: an AC ifindex bound there
+  MAC-in-SRv6-encapsulates **every** arriving frame (any EtherType — ARP
+  rides the wire transparently) toward the remote service SID, checked
+  before the L2 bridge dispatch so a VPWS AC never learns or floods.
+  Caveat: the AC must carry its 802.1Q tags **in-band** for DX2V — veth
+  TX VLAN acceleration keeps the tag in `skb->vlan_tci` where XDP can't
+  see it (`ethtool -K <ac> txvlan off`). In the EVPN control plane (RFC
+  9252 §6.3) each `vpws` service advertises a per-EVI Ethernet A-D
+  (Type-1) route carrying an End.DX2 L2-Service Prefix-SID whose
+  Ethernet Tag is the service instance id; importing the peer's Type-1
+  drives one cradle `AddXconnect` that binds the AC both ways (ingress
+  XCONNECT entry + local End.DX2 decap). `stat_inc(STAT_SRV6_DX2)`.
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`
@@ -398,6 +419,7 @@ STAT_SRV6_REPLACE // REPLACE-C-SID rewrite / container advance (RFC 9800 §4.2)
 STAT_SRV6_B6      // End.B6.Encaps binds (End walk + policy push, RFC 8986 §4.13)
 STAT_SRV6_ENDT    // End.T table-scoped forwards (RFC 8986 §4.3)
 STAT_SRV6_DX      // End.DX4/DX6 decap + cross-connect (RFC 8986 §4.4/§4.5)
+STAT_SRV6_DX2     // End.DX2/DX2V decap + raw AC emit (EVPN VPWS, RFC 8986 §4.9/§4.10)
 ```
 
 Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by
