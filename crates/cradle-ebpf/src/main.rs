@@ -2725,8 +2725,7 @@ fn srv6_dx2(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         return Err(());
     }
     stat_inc(STAT_SRV6_DX2);
-    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-        != 0
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
     {
         stat_inc(STAT_DROP);
         return Ok(xdp_action::XDP_DROP);

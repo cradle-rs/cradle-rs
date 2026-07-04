@@ -138,9 +138,7 @@ impl Dataplane {
             )?,
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
-            xconnect: HashMap::try_from(
-                bpf.take_map("XCONNECT").context("map XCONNECT missing")?,
-            )?,
+            xconnect: HashMap::try_from(bpf.take_map("XCONNECT").context("map XCONNECT missing")?)?,
             dx2v: HashMap::try_from(bpf.take_map("DX2V").context("map DX2V missing")?)?,
             mirror: LpmTrie::try_from(bpf.take_map("MIRROR").context("map MIRROR missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
@@ -477,15 +475,6 @@ impl Dataplane {
         Ok(())
     }
 
-    pub fn dx2v_del(&mut self, table: u32, vid: u16) -> Result<()> {
-        let key = Dx2vKey {
-            table,
-            vid,
-            _pad: [0; 2],
-        };
-        self.dx2v.remove(&key)?;
-        Ok(())
-    }
 
     pub fn repl_sid_del(&mut self, ifindex: u32) -> Result<()> {
         self.repl_sid.remove(&ifindex)?;
