@@ -41,16 +41,18 @@ use cradle_common::{
     MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
     MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T,
+    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_FLAVOR_PSP,
+    SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
     STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
     STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_B6, STAT_SRV6_ENDT, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
-    STAT_SRV6_USID, STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC, XDP_META_MAGIC_L2,
+    STAT_SRV6_B6, STAT_SRV6_DX, STAT_SRV6_ENDT, STAT_SRV6_PSP, STAT_SRV6_REPLACE,
+    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC,
+    XDP_META_MAGIC_DX, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -789,6 +791,22 @@ fn l3_forward(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
 /// VRF context attached by the XDP MPLS stage (VPN-label decap): read from
 /// the skb's `data_meta..data` window, guarded by the magic. 0 = none.
 #[inline(always)]
+fn tc_meta_dx(ctx: &TcContext) -> u32 {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return 0;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe {
+        if (*m).magic != XDP_META_MAGIC_DX ^ meta_cookie() {
+            return 0;
+        }
+        (*m).vrf_id // the cross-connect nexthop id
+    }
+}
+
 fn tc_meta_vrf(ctx: &TcContext) -> u32 {
     let skb = ctx.skb.skb;
     let meta = unsafe { (*skb).data_meta } as usize;
@@ -925,6 +943,14 @@ fn fib4_lookup(vrf_id: u32, dst: [u8; 4]) -> Option<FibEntry> {
 
 #[inline(always)]
 fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
+    // End.DX4 hand-off — see the v6 sibling.
+    let dx_nh = tc_meta_dx(ctx);
+    if dx_nh != 0 {
+        if let Some((_, nh)) = resolve_nh(dx_nh) {
+            return l2_xmit(ctx, &nh, ETH_P_IP);
+        }
+        return Ok(TC_ACT_PIPE as i32);
+    }
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
     // Port binding wins; else VRF context from a VPN-label decap (XDP meta).
     let vrf_id = if port_vrf != 0 {
@@ -1044,6 +1070,16 @@ fn fib6_lookup(vrf_id: u32, dst: [u8; 16]) -> Option<FibEntry> {
 
 #[inline(always)]
 fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
+    // End.DX6 hand-off: XDP decapped and pinned the cross-connect
+    // adjacency in DX metadata — forward straight to it, no FIB and no
+    // hop-limit decrement (RFC 8986 §4.4 S03).
+    let dx_nh = tc_meta_dx(ctx);
+    if dx_nh != 0 {
+        if let Some((_, nh)) = resolve_nh(dx_nh) {
+            return l2_xmit(ctx, &nh, ETH_P_IPV6);
+        }
+        return Ok(TC_ACT_PIPE as i32);
+    }
     let dst: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
 
     // A local SID pre-empts the FIB (an SRv6 endpoint address is not an
@@ -1816,6 +1852,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
         SRV6_BH_END_REP | SRV6_BH_END_X_REP => return srv6_replace(ctx, &sid),
+        SRV6_BH_END_DX4 | SRV6_BH_END_DX6 => return srv6_dx(ctx, &sid),
         SRV6_BH_END_B6 => return srv6_b6_encaps(ctx, &sid),
         // DT2U (unicast) and DT2M (BUM) decap are identical: strip + bridge.
         // The inner frame's dst MAC (unicast vs broadcast) makes l2_switch
@@ -2379,6 +2416,60 @@ fn srv6_b6_encaps(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         }
     }
     stat_inc(STAT_SRV6_B6);
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// SRv6 `End.DX4` / `End.DX6` — decapsulation and cross-connect (RFC 8986
+/// §4.5 / §4.4): the per-CE VPN egress. Reach the inner packet (direct
+/// proto or one *exhausted* SRH — a live SRH is a §4.4 S02 error, passed
+/// to the stack in house style), check the family against the behavior,
+/// resolve the SID's adjacency, then decapsulate and hand the exposed
+/// packet straight to that adjacency — no FIB lookup and no TTL/hop-limit
+/// decrement (the tunnel ingress charged the inner header already). The
+/// adjacency is resolved BEFORE any packet mutation: an unresolved
+/// nexthop must not leak a decapped packet into the main FIB.
+#[inline(always)]
+fn srv6_dx(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
+    let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
+    let (inner_proto, strip) = if outer_nh == IPPROTO_ROUTING {
+        let srh_nh = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF)? };
+        let ext_len = unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 1)? };
+        let sl = unsafe { *xdp_ptr::<u8>(ctx, SRH_SL_OFF)? };
+        if sl != 0 || ext_len > 12 {
+            return Ok(xdp_action::XDP_PASS); // live/oversized SRH
+        }
+        (srh_nh, IP6_HDR_LEN + 8 * (ext_len as usize + 1))
+    } else {
+        (outer_nh, IP6_HDR_LEN)
+    };
+    let inner_et = match (inner_proto, sid.behavior) {
+        (IPPROTO_IPIP, SRV6_BH_END_DX4) => ETH_P_IP,
+        (IPPROTO_IPV6, SRV6_BH_END_DX6) => ETH_P_IPV6,
+        _ => {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP); // family mismatch (§4.1.1)
+        }
+    };
+    if NEXTHOPS.get_ptr(&sid.nexthop_id).is_none() {
+        return Ok(xdp_action::XDP_PASS); // unbound adjacency — leave intact
+    }
+    decap_head(ctx, strip, inner_et)?;
+    // The cross-connect finishes at the TC stage: an XDP `bpf_redirect`
+    // toward a CE veth silently drops when the peer runs no NAPI (no XDP
+    // program on the host side), while the skb-path TC redirect always
+    // works. Hand the adjacency over in DX-typed metadata.
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+        != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_DX ^ meta_cookie();
+        (*meta).vrf_id = sid.nexthop_id;
+    }
+    stat_inc(STAT_SRV6_DX);
     Ok(xdp_action::XDP_PASS)
 }
 

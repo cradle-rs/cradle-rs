@@ -100,7 +100,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | End.DX2 / DX2V | ⬜ | |
 | End.DT2U | ✅ | EVPN unicast: decap + bridge by dst MAC |
 | End.DT2M | ✅ | EVPN BUM: decap + flood (split horizon) |
-| End.DX4 / DX6 | ⬜ | |
+| End.DX4 / DX6 | ✅ | decap + cross-connect to the CE adjacency (per-CE VPN); XDP decap, TC-stage redirect |
 | End.DT4 | ✅ | decap + per-VRF v4 lookup |
 | End.DT6 | ✅ | decap + per-VRF v6 lookup |
 | End.DT46 | ✅ | dual-family; the BGP L3VPN service SID |
@@ -120,7 +120,8 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | uA (LIB) | ✅ | block:function prefix — shift + adjacency mid-carrier |
 | uDT4 / uDT6 / uDT46 | ✅ | End.DT* matched at the carrier's last micro-SID |
 | uT | ✅ | table-bound uN — End.T semantics at end-of-carrier |
-| uDX* / uB6 | ⬜ | |
+| uDX4 / uDX6 | ✅ | End.DX* matched at the carrier's last micro-SID |
+| uB6 | ⬜ | |
 
 ### Flavors
 
@@ -147,3 +148,4 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | Locator flavors (PSP/USP/USD) | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |
 | REPLACE-C-SID locators | ✅ | `behavior: replace` → End(REP)/End.X(REP) at /(LB+LN+Fun), REP codepoints + Arg-length advertisement; eBPF-only (no kernel op); `cradle_replace_zebra` |
 | VRF-bound locators (End.T / uT) | ✅ | locator `vrf` leaf → RIB table resolution → End.T/uT codepoints + kernel End.T + tee; `cradle_endt_zebra` |
+| Static seg6local SIDs (config-static `action`) | ✅ | route-embedded actions now tee as local SIDs; DX adjacency via `nh6`/`nh4`; `cradle_dx_zebra` |

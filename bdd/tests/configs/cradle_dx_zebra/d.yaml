@@ -1,0 +1,39 @@
+# d — static per-CE SRv6 egress: the DX action routes install as
+# route-embedded seg6local encaps in the kernel AND tee to cradle as
+# local SIDs carrying their cross-connect adjacency (nh6 / nh4). The
+# plain static routes are the return paths, also teed. No IGP at all —
+# this proves the config-static → tee → eBPF chain by itself.
+system:
+  cradle-grpc: "unix:/tmp/cradle_dx_zebra_ctl2.sock"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: ds
+  ipv4:
+    address: 10.0.12.2/24
+  ipv6:
+    address: 2001:db8:1::2/64
+- if-name: dc
+  ipv4:
+    address: 10.0.2.254/24
+  ipv6:
+    address: fc00:2::ff/64
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.0.1.0/24
+        nexthop:
+        - address: 10.0.12.1
+    ipv6:
+      route:
+      - prefix: fd00:d::64/128
+        action: End.DX6
+        nh6: fc00:2::1
+      - prefix: fd00:d::4/128
+        action: End.DX4
+        nh4: 10.0.2.1
+      - prefix: fc00:1::/64
+        nexthop:
+        - address: 2001:db8:1::1

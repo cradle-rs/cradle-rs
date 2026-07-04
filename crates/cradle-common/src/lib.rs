@@ -182,6 +182,11 @@ pub const XDP_META_MAGIC: u32 = 0xC7AD_1E01;
 /// L2 (`End.DT2U`) decap: TC bridges the inner Ethernet frame in `vrf_id`
 /// (reused as the bridge domain), regardless of the underlay port's type.
 pub const XDP_META_MAGIC_L2: u32 = 0xC7AD_1E02;
+/// DX cross-connect metadata: `vrf_id` carries the *nexthop id* the TC
+/// stage must forward the decapped packet to — no FIB lookup (End.DX4/DX6,
+/// RFC 8986 §4.5/§4.4). XDP can't `bpf_redirect` toward a CE veth whose
+/// peer runs no NAPI, so the skb-path TC redirect finishes the job.
+pub const XDP_META_MAGIC_DX: u32 = 0xC7AD_1E03;
 
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
@@ -290,6 +295,12 @@ pub const SRV6_BH_END_X_REP: u8 = 13;
 /// the SID's table (`vrf_id`) via the XDP→TC metadata channel. A `uN` whose
 /// `vrf_id` is set behaves the same at end-of-carrier — that is zebra's uT.
 pub const SRV6_BH_END_T: u8 = 14;
+/// `End.DX4` (RFC 8986 §4.5): decapsulate and cross-connect the inner IPv4
+/// packet straight to the SID's adjacency (`nexthop_id`) — the per-CE VPN
+/// form; no FIB lookup, no TTL decrement (the tunnel charged it at ingress).
+pub const SRV6_BH_END_DX4: u8 = 15;
+/// `End.DX6` (RFC 8986 §4.4): as `End.DX4` for an inner IPv6 packet.
+pub const SRV6_BH_END_DX6: u8 = 16;
 
 /// SRv6 endpoint flavors (RFC 8986 §4.16), OR-able in `LocalSid::flavors`.
 /// PSP: pop the SRH at the penultimate segment (this node's decrement hits
@@ -618,8 +629,10 @@ pub const STAT_SRV6_REPLACE: u32 = 31;
 pub const STAT_SRV6_B6: u32 = 32;
 /// End.T table-scoped forwards (the End walk's lookup moved to table T).
 pub const STAT_SRV6_ENDT: u32 = 33;
+/// End.DX4/DX6 decap + cross-connect forwards (per-CE VPN egress).
+pub const STAT_SRV6_DX: u32 = 34;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 34;
+pub const STAT_MAX: u32 = 35;
 
 // ============================== L7 proxy ===================================
 

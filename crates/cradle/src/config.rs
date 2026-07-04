@@ -257,6 +257,8 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
         "ua" => SRV6_BH_UA,
         "ualib" => SRV6_BH_UALIB,
         "end.t" => SRV6_BH_END_T,
+        "end.dx4" => SRV6_BH_END_DX4,
+        "end.dx6" => SRV6_BH_END_DX6,
         "end.dt2u" => SRV6_BH_END_DT2U,
         "end.dt2m" => SRV6_BH_END_DT2M,
         "end.replace" => SRV6_BH_END_REP,

@@ -32,8 +32,8 @@ use crate::{
 use cradle_common::{
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T,
+    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -42,7 +42,7 @@ fn srv6_behavior(code: u32) -> Result<u8> {
         b @ (SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46
         | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA | SRV6_BH_UALIB | SRV6_BH_END_DT2U
         | SRV6_BH_END_DT2M | SRV6_BH_END_M | SRV6_BH_END_REP | SRV6_BH_END_X_REP
-        | SRV6_BH_END_T) => Ok(b),
+        | SRV6_BH_END_T | SRV6_BH_END_DX4 | SRV6_BH_END_DX6) => Ok(b),
         other => anyhow::bail!("unknown SRv6 behavior code {other}"),
     }
 }
@@ -84,6 +84,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_replace",
     "srv6_b6",
     "srv6_endt",
+    "srv6_dx",
 ];
 
 /// Shared, cheaply-cloneable handle to the data plane.

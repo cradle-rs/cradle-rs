@@ -348,6 +348,17 @@ Dispatch on `sid.behavior`:
   its XDP program), so a constant magic would let one node's table id steer
   the next node's lookup — each instance seeds a random cookie at startup
   and XORs it into the magic, making inherited metadata fail the check.
+- **End.DX4 / End.DX6** *(RFC 8986 §4.5 / §4.4)* — the per-CE VPN egress:
+  reach the inner packet (direct proto or one exhausted SRH), check the
+  family against the behavior, decapsulate, and hand the exposed packet
+  straight to the SID's adjacency (`nexthop_id`) — no FIB lookup and no
+  TTL/hop-limit decrement (the tunnel ingress charged the inner already).
+  The cross-connect finishes at the TC stage via DX-typed metadata
+  (`XDP_META_MAGIC_DX`, cookie-guarded like the rest of the channel): an
+  XDP `bpf_redirect` toward a CE veth silently drops when the host-side
+  peer runs no NAPI, while the skb-path TC redirect always delivers. The
+  uDX4/uDX6 forms are the same SIDs matched at the carrier's last
+  micro-SID. `stat_inc(STAT_SRV6_DX)`.
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`
@@ -386,6 +397,7 @@ STAT_SRV6_USID    // uN NEXT-C-SID container shift (Phase 4)
 STAT_SRV6_REPLACE // REPLACE-C-SID rewrite / container advance (RFC 9800 §4.2)
 STAT_SRV6_B6      // End.B6.Encaps binds (End walk + policy push, RFC 8986 §4.13)
 STAT_SRV6_ENDT    // End.T table-scoped forwards (RFC 8986 §4.3)
+STAT_SRV6_DX      // End.DX4/DX6 decap + cross-connect (RFC 8986 §4.4/§4.5)
 ```
 
 Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by
