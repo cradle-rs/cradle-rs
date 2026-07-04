@@ -20,9 +20,10 @@
 
 use aya_ebpf::{
     bindings::{
-        bpf_adj_room_mode::{BPF_ADJ_ROOM_MAC, BPF_ADJ_ROOM_NET}, bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1,
-        bpf_sock_tuple, bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1,
-        xdp_action, TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
+        bpf_adj_room_mode::{BPF_ADJ_ROOM_MAC, BPF_ADJ_ROOM_NET},
+        bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, bpf_sock_tuple,
+        bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1, xdp_action,
+        TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
     },
     helpers::generated::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
@@ -34,25 +35,23 @@ use aya_ebpf::{
 };
 use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
-    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid, MplsEntry,
-    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey,
-    ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE,
-    FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT,
-    MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    MirrorEntry, MirrorKey, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
+    CtEntry6, CtKey, CtKey6, FdbEntry, FdbKey, FibEntry, FibWord, L2MemberKey, LocalSid,
+    MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
+    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT,
+    CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
+    FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3,
+    MPLS_OP_SWAP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T,
-    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_FLAVOR_PSP,
-    SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_DECAP, STAT_SRV6_ENCAP,
-    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
-    STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_B6, STAT_SRV6_DX, STAT_SRV6_ENDT, STAT_SRV6_PSP, STAT_SRV6_REPLACE,
-    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SRV6_ENCAP_MODE_INSERT, XDP_META_MAGIC,
-    XDP_META_MAGIC_DX, XDP_META_MAGIC_L2,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
+    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
+    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_L2_FLOOD,
+    STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
+    STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    STAT_NH_BACKUP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_ENCAP, STAT_SRV6_END,
+    STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
+    STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID,
+    STAT_SRV6_USP, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -1375,11 +1374,7 @@ fn srv6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_ethertype: u16) -
 /// once the layer is written. Factored out of `srv6_encap` so the
 /// egress-protection path can stack a second layer.
 #[inline(always)]
-fn apply_hencap(
-    ctx: &TcContext,
-    enc: &Srv6Encap,
-    inner_ethertype: u16,
-) -> Result<Option<i32>, ()> {
+fn apply_hencap(ctx: &TcContext, enc: &Srv6Encap, inner_ethertype: u16) -> Result<Option<i32>, ()> {
     let n = enc.num_segs as usize;
     if n == 0 || n > MAX_SEGS {
         return Ok(Some(TC_ACT_PIPE as i32));
@@ -1434,11 +1429,11 @@ fn apply_hencap(
         ctx.store(SRH_OFF + 4, &(n as u8 - 2), 0).map_err(|_| ())?; // last_entry
         ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
         ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
-        // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
-        // Indexed by the loop counter on the stack side (bounded by the
-        // constant range, kept alive by the volatile `n` above); the
-        // reversal rides in the skb offset, which the store helper
-        // validates at runtime.
+                                                           // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
+                                                           // Indexed by the loop counter on the stack side (bounded by the
+                                                           // constant range, kept alive by the volatile `n` above); the
+                                                           // reversal rides in the skb offset, which the store helper
+                                                           // validates at runtime.
         for j in 1..MAX_SEGS {
             if j >= n {
                 break;
@@ -1476,23 +1471,29 @@ fn srv6_insert(ctx: &TcContext, enc: &Srv6Encap, nh: &NextHop) -> Result<i32, ()
         .adjust_room(srh_len as i32, BPF_ADJ_ROOM_NET, 0)
         .map_err(|_| ())?;
 
-    ctx.store(IP6_NEXTHDR_OFF, &IPPROTO_ROUTING, 0).map_err(|_| ())?;
-    ctx.store(IP6_PAYLOAD_LEN_OFF, &(payload_len + srh_len as u16).to_be(), 0)
+    ctx.store(IP6_NEXTHDR_OFF, &IPPROTO_ROUTING, 0)
         .map_err(|_| ())?;
+    ctx.store(
+        IP6_PAYLOAD_LEN_OFF,
+        &(payload_len + srh_len as u16).to_be(),
+        0,
+    )
+    .map_err(|_| ())?;
     ctx.store(IP6_HOP_OFF, &(hop - 1), 0).map_err(|_| ())?;
     // SRH header.
     ctx.store(SRH_OFF, &orig_nh, 0).map_err(|_| ())?;
-    ctx.store(SRH_OFF + 1, &(2 * (n as u8 + 1)), 0).map_err(|_| ())?; // hdr_ext_len
+    ctx.store(SRH_OFF + 1, &(2 * (n as u8 + 1)), 0)
+        .map_err(|_| ())?; // hdr_ext_len
     ctx.store(SRH_OFF + 2, &4u8, 0).map_err(|_| ())?; // routing type 4
     ctx.store(SRH_SL_OFF, &(n as u8), 0).map_err(|_| ())?; // segments_left
     ctx.store(SRH_OFF + 4, &(n as u8), 0).map_err(|_| ())?; // last_entry
     ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
     ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
-    // segment_list[0] = the original destination (final); repair segments
-    // reversed above it so segment_list[n] = segs[0] = the active segment.
-    // Indexed forward on the map side (the loop constant bounds the map-value
-    // pointer for the verifier); the reversal rides in the skb offset, which
-    // the store helper validates at runtime.
+                                                       // segment_list[0] = the original destination (final); repair segments
+                                                       // reversed above it so segment_list[n] = segs[0] = the active segment.
+                                                       // Indexed forward on the map side (the loop constant bounds the map-value
+                                                       // pointer for the verifier); the reversal rides in the skb offset, which
+                                                       // the store helper validates at runtime.
     ctx.store(SRH_SEGLIST_OFF, &orig_da, 0).map_err(|_| ())?;
     for j in 0..MAX_SEGS {
         if j >= n {
@@ -1923,10 +1924,7 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 /// are not implemented; End.X/uA SIDs carry only the PSP bit.
 #[inline(always)]
 fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
-    let ult_ok = !matches!(
-        sid.behavior,
-        SRV6_BH_END_X | SRV6_BH_UA | SRV6_BH_UALIB
-    );
+    let ult_ok = !matches!(sid.behavior, SRV6_BH_END_X | SRV6_BH_UA | SRV6_BH_UALIB);
     let outer_nh = unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? };
     if outer_nh != IPPROTO_ROUTING {
         // No SRH. USD still decapsulates a bare IP-in-IPv6 addressed to the
@@ -2013,8 +2011,7 @@ fn endt_meta(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     if sid.vrf_id == 0 || !matches!(sid.behavior, SRV6_BH_END_T | SRV6_BH_UN) {
         return Ok(xdp_action::XDP_PASS);
     }
-    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-        != 0
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
     {
         stat_inc(STAT_DROP);
         return Ok(xdp_action::XDP_DROP);
@@ -2049,9 +2046,7 @@ fn pop_srh(ctx: &XdpContext) -> Result<(), ()> {
         return Err(()); // malformed — the subtraction below would wrap
     }
     unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? = srh_nh };
-    unsafe {
-        *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? = (payload_len - srh_len as u16).to_be()
-    };
+    unsafe { *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? = (payload_len - srh_len as u16).to_be() };
     let hdr = unsafe { *xdp_ptr::<[u8; 54]>(ctx, 0)? };
     unsafe { *xdp_ptr::<[u8; 54]>(ctx, srh_len)? = hdr };
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, srh_len as i32) } != 0 {
@@ -2399,13 +2394,13 @@ fn srv6_b6_encaps(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         unsafe { *xdp_ptr::<u8>(ctx, SRH_LAST_ENTRY_OFF)? = n as u8 - 2 };
         unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 5)? = 0 }; // flags
         unsafe { *xdp_ptr::<u16>(ctx, SRH_OFF + 6)? = 0 }; // tag
-        // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
-        // The map index rides the constant-bounded loop counter; the
-        // reversal lives in the packet offset, MASKED so the address is
-        // not affine in `j` — otherwise LLVM rotates the loop into a
-        // pointer induction whose reassociated base carries a negative
-        // constant offset, which the verifier rejects on either pointer
-        // kind (packet and map_value both demand a non-negative minimum).
+                                                           // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
+                                                           // The map index rides the constant-bounded loop counter; the
+                                                           // reversal lives in the packet offset, MASKED so the address is
+                                                           // not affine in `j` — otherwise LLVM rotates the loop into a
+                                                           // pointer induction whose reassociated base carries a negative
+                                                           // constant offset, which the verifier rejects on either pointer
+                                                           // kind (packet and map_value both demand a non-negative minimum).
         for j in 1..MAX_SEGS {
             if j >= n {
                 break;
@@ -2458,8 +2453,7 @@ fn srv6_dx(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     // toward a CE veth silently drops when the peer runs no NAPI (no XDP
     // program on the host side), while the skb-path TC redirect always
     // works. Hand the adjacency over in DX-typed metadata.
-    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-        != 0
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
     {
         stat_inc(STAT_DROP);
         return Ok(xdp_action::XDP_DROP);
@@ -2538,9 +2532,8 @@ fn srv6_endm(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     decap_head(ctx, strip2, inner_et)?;
     stat_inc(STAT_SRV6_ENDM);
     if ment.vrf_id != 0 {
-        if unsafe {
-            bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32))
-        } != 0
+        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+            != 0
         {
             stat_inc(STAT_DROP);
             return Ok(xdp_action::XDP_DROP);

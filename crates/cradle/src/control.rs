@@ -32,8 +32,8 @@ use crate::{
 use cradle_common::{
     MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T,
-    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -87,6 +87,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_dx",
 ];
 
+/// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
+type ReplSlot = (String, u32, u32);
+
 /// Shared, cheaply-cloneable handle to the data plane.
 #[derive(Clone)]
 pub struct Control {
@@ -98,7 +101,7 @@ pub struct Control {
     /// Dynamic BUM replication slots (EVPN Type-3 tee): `(bd, remote DT2M
     /// SID)` → the slot's veth (A-end name, A ifindex, B ifindex). cradle
     /// creates/destroys the pair itself.
-    repl_slots: Arc<Mutex<std::collections::HashMap<(u16, Ipv6Addr), (String, u32, u32)>>>,
+    repl_slots: Arc<Mutex<std::collections::HashMap<(u16, Ipv6Addr), ReplSlot>>>,
     /// Monotonic name counter for slot veth pairs (`crs<N>a`/`crs<N>b`).
     repl_next: Arc<std::sync::atomic::AtomicU32>,
 }
@@ -356,7 +359,10 @@ impl Control {
     }
 
     pub async fn del_mirror_route(&self, ctx: u32, prefix: Ipv6Addr, prefix_len: u8) -> Result<()> {
-        self.dp.lock().await.mirror_route_del(ctx, prefix, prefix_len)?;
+        self.dp
+            .lock()
+            .await
+            .mirror_route_del(ctx, prefix, prefix_len)?;
         Ok(())
     }
 

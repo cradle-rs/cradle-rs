@@ -106,7 +106,9 @@ pub fn parse_ipv4_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
         .split_once('/')
         .ok_or_else(|| anyhow!("missing '/' in prefix {s:?}"))?;
     let addr: Ipv4Addr = addr.parse().with_context(|| format!("bad IPv4 {addr:?}"))?;
-    let len: u8 = len.parse().with_context(|| format!("bad prefix length {len:?}"))?;
+    let len: u8 = len
+        .parse()
+        .with_context(|| format!("bad prefix length {len:?}"))?;
     if len > 32 {
         bail!("IPv4 prefix length {len} > 32");
     }
@@ -119,7 +121,9 @@ pub fn parse_ipv6_prefix(s: &str) -> Result<(Ipv6Addr, u8)> {
         .split_once('/')
         .ok_or_else(|| anyhow!("missing '/' in prefix {s:?}"))?;
     let addr: Ipv6Addr = addr.parse().with_context(|| format!("bad IPv6 {addr:?}"))?;
-    let len: u8 = len.parse().with_context(|| format!("bad prefix length {len:?}"))?;
+    let len: u8 = len
+        .parse()
+        .with_context(|| format!("bad prefix length {len:?}"))?;
     if len > 128 {
         bail!("IPv6 prefix length {len} > 128");
     }

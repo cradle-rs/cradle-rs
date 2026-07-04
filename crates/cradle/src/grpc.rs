@@ -21,10 +21,9 @@ impl GrpcEndpoint {
             Ok(Self::Uds(PathBuf::from(path)))
         } else {
             let addr = s.strip_prefix("tcp:").unwrap_or(s);
-            Ok(Self::Tcp(
-                addr.parse()
-                    .with_context(|| format!("bad gRPC TCP address {addr:?}"))?,
-            ))
+            Ok(Self::Tcp(addr.parse().with_context(|| {
+                format!("bad gRPC TCP address {addr:?}")
+            })?))
         }
     }
 
