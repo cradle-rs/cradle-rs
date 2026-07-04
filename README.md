@@ -97,7 +97,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | End | ✅ | SRH `Segments Left` walk (XDP) |
 | End.X | ✅ | adjacency cross-connect (XDP redirect) |
 | End.T | ✅ | End walk + table-scoped egress lookup (VRF metadata to the TC stage) |
-| End.DX2 / DX2V | ⬜ | |
+| End.DX2 / DX2V | ✅ | EVPN VPWS E-Line: AC xconnect encap (any EtherType) + decap-and-emit raw; DX2V demuxes the inner 802.1Q VID; XDP decap, TC-stage redirect |
 | End.DT2U | ✅ | EVPN unicast: decap + bridge by dst MAC |
 | End.DT2M | ✅ | EVPN BUM: decap + flood (split horizon) |
 | End.DX4 / DX6 | ✅ | decap + cross-connect to the CE adjacency (per-CE VPN); XDP decap, TC-stage redirect |
@@ -141,6 +141,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | IS-IS SRv6 (locators, uN/uA) | ✅ | locator routes + local SIDs teed |
 | BGP L3VPN over SRv6 (VPNv4/v6) | ✅ | per-VRF End.DT46, `encapsulation srv6` |
 | BGP EVPN over SRv6 (RFC 9252) | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
+| BGP EVPN VPWS (RFC 8214) | ✅ | per-EVI Type-1 ⇄ End.DX2, `vpws` service config, one-RPC AC bind (xconnect + local decap); `cradle_vpws_zebra` |
 | BGP SR Policy Binding SID (SAFI 73) | ✅ | controller-originated candidate path → headend BSID + policy list via tee; `cradle_b6_zebra` |
 | BGP color steering to a BSID | ⬜ | steering imposes raw segment lists today |
 | TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |

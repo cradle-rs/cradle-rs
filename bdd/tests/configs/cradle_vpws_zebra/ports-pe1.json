@@ -1,0 +1,6 @@
+{
+  "ports": [
+    { "name": "pe1c" },
+    { "name": "pe1u", "l3": true }
+  ]
+}

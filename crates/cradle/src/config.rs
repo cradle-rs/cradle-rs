@@ -490,7 +490,7 @@ impl Config {
                 .remote_sid
                 .parse()
                 .with_context(|| format!("bad remote SID {:?}", x.remote_sid))?;
-            ctl.add_xconnect(&x.port, remote_sid).await?;
+            ctl.add_xconnect(&x.port, remote_sid, None).await?;
         }
         for d in &self.dx2v {
             ctl.add_dx2v(d.table, d.vid, &d.port).await?;
