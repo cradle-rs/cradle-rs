@@ -705,6 +705,21 @@ impl Cradle for GrpcService {
 
     async fn set_nexthop(&self, req: Request<pb::Nexthop>) -> Result<Response<pb::Empty>, Status> {
         let n = req.into_inner();
+        // Nudge the kernel into resolving the gateway's neighbor: cradle
+        // owns the forwarding path, so nothing else would ever trigger
+        // ND/ARP for it — and the L2-rewrite egress paths need the entry,
+        // which the control plane tees back once the kernel learns it. A
+        // 0-byte UDP datagram to the discard port is enough; best-effort.
+        if !n.gateway.is_empty() {
+            if let Ok(gw) = n.gateway.parse::<std::net::IpAddr>() {
+                tokio::spawn(async move {
+                    let bind = if gw.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+                    if let Ok(sock) = tokio::net::UdpSocket::bind(bind).await {
+                        let _ = sock.send_to(&[], (gw, 9)).await;
+                    }
+                });
+            }
+        }
         // A nexthop carrying SRv6 segments imposes an H.Encaps (always v6
         // underlay), regardless of the `v6` flag.
         if !n.segs.is_empty() {
