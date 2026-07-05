@@ -888,10 +888,7 @@ impl Control {
                     )
                     .await
                 {
-                    warn!(
-                        "cni reconcile {}/{}: {e:#}",
-                        ep.container_id, ep.ifname
-                    );
+                    warn!("cni reconcile {}/{}: {e:#}", ep.container_id, ep.ifname);
                 }
             } else {
                 info!(
@@ -1592,7 +1589,10 @@ impl Cradle for GrpcService {
         } else {
             Some(r.ip.parse::<Ipv4Addr>().map_err(st)?)
         };
-        self.control.cni_release_ip(&r.owner, ip).await.map_err(st)?;
+        self.control
+            .cni_release_ip(&r.owner, ip)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 
@@ -1603,7 +1603,14 @@ impl Cradle for GrpcService {
         let e = req.into_inner();
         let ip = e.ip.parse::<Ipv4Addr>().map_err(st)?;
         self.control
-            .cni_create_endpoint(&e.container_id, &e.ifname, &e.netns, &e.host_if, ip, e.vrf_id)
+            .cni_create_endpoint(
+                &e.container_id,
+                &e.ifname,
+                &e.netns,
+                &e.host_if,
+                ip,
+                e.vrf_id,
+            )
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

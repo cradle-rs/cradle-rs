@@ -1258,7 +1258,10 @@ async fn run_cni(
     {
         use tokio::io::AsyncWriteExt as _;
         let mut stdin = child.stdin.take().expect("cni stdin");
-        stdin.write_all(conf.as_bytes()).await.expect("write netconf");
+        stdin
+            .write_all(conf.as_bytes())
+            .await
+            .expect("write netconf");
     }
     let out = child.wait_with_output().await.expect("cradle-cni run");
     let text = format!(
@@ -1301,7 +1304,13 @@ async fn cni_del(world: &mut World, container: String, pod: String, node: String
 #[when(
     expr = "I run CNI CHECK for container {string} in pod namespace {string} on node {string} with config {string}"
 )]
-async fn cni_check_ok(world: &mut World, container: String, pod: String, node: String, config: String) {
+async fn cni_check_ok(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+) {
     let (ok, out) = run_cni(world, "CHECK", &node, &pod, &container, &config).await;
     assert!(ok, "cradle-cni CHECK for {container} failed: {out}");
     println!("✓ CNI CHECK {} ok", container);
@@ -1310,9 +1319,18 @@ async fn cni_check_ok(world: &mut World, container: String, pod: String, node: S
 #[then(
     expr = "CNI CHECK for container {string} in pod namespace {string} on node {string} with config {string} should fail"
 )]
-async fn cni_check_fail(world: &mut World, container: String, pod: String, node: String, config: String) {
+async fn cni_check_fail(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+) {
     let (ok, out) = run_cni(world, "CHECK", &node, &pod, &container, &config).await;
-    assert!(!ok, "cradle-cni CHECK for {container} unexpectedly succeeded: {out}");
+    assert!(
+        !ok,
+        "cradle-cni CHECK for {container} unexpectedly succeeded: {out}"
+    );
     println!("✓ CNI CHECK {} failed (as expected)", container);
 }
 
@@ -1429,7 +1447,10 @@ async fn http_get_fails(world: &mut World, url: String, namespace: String) {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }
-    panic!("HTTP GET {} from {} still succeeded after waiting for it to fail", url, scoped);
+    panic!(
+        "HTTP GET {} from {} still succeeded after waiting for it to fail",
+        url, scoped
+    );
 }
 
 /// Every answered request must return exactly `needle` — asserts a service
