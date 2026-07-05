@@ -33,12 +33,13 @@ use cradle_common::{
     FlowRecord, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
 };
 
-use crate::control::Control;
+use crate::control::{Control, EpInfo};
 use crate::hpb::observer::observer_server::{Observer, ObserverServer};
 use crate::hpb::{flow, observer, relay};
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+const IPPROTO_ICMP: u8 = 1;
 
 /// How many recent flows the in-memory ring keeps (per node). `hubble observe`
 /// replays from here; older flows age out.
@@ -134,12 +135,25 @@ async fn drain_loop(ring: RingBuf<MapData>, control: Control, state: Arc<State>)
     }
 }
 
+/// Build a Cilium-style label set from what we know about an endpoint. Cilium
+/// always carries the namespace label; we add it (plus the pod name) so the
+/// `hubble` labels column and `--label` filters have something to match.
+fn endpoint_labels(info: &EpInfo) -> Vec<String> {
+    let mut labels = Vec::new();
+    if !info.namespace.is_empty() {
+        labels.push(format!(
+            "k8s:io.kubernetes.pod.namespace={}",
+            info.namespace
+        ));
+    }
+    if !info.pod_name.is_empty() {
+        labels.push(format!("k8s:io.kubernetes.pod.name={}", info.pod_name));
+    }
+    labels
+}
+
 /// Enrich one datapath record into a Hubble `Flow`.
-fn build_flow(
-    rec: &FlowRecord,
-    index: &HashMap<Ipv4Addr, (String, String)>,
-    node: &str,
-) -> flow::Flow {
+fn build_flow(rec: &FlowRecord, index: &HashMap<Ipv4Addr, EpInfo>, node: &str) -> flow::Flow {
     let src = Ipv4Addr::from(rec.saddr);
     let dst = Ipv4Addr::from(rec.daddr);
 
@@ -171,13 +185,26 @@ fn build_flow(
                 destination_port: dport,
             })),
         }),
+        // ICMP carries no ports; emit an (empty) ICMPv4 so `--protocol icmp`
+        // and the L4 column resolve for ping flows.
+        IPPROTO_ICMP => Some(flow::Layer4 {
+            protocol: Some(flow::layer4::Protocol::IcmPv4(flow::IcmPv4::default())),
+        }),
         _ => None,
     };
 
+    // An endpoint is emitted when we know anything about the IP (pod identity
+    // or a bound security identity); otherwise it stays unset (e.g. "world").
     let endpoint = |ip: &Ipv4Addr| -> Option<flow::Endpoint> {
-        index.get(ip).map(|(ns, pod)| flow::Endpoint {
-            namespace: ns.clone(),
-            pod_name: pod.clone(),
+        let info = index.get(ip)?;
+        if info.namespace.is_empty() && info.pod_name.is_empty() && info.identity == 0 {
+            return None;
+        }
+        Some(flow::Endpoint {
+            identity: info.identity,
+            namespace: info.namespace.clone(),
+            pod_name: info.pod_name.clone(),
+            labels: endpoint_labels(info),
             ..Default::default()
         })
     };
@@ -223,6 +250,180 @@ fn wrap_flow(f: flow::Flow, node: &str) -> observer::GetFlowsResponse {
     }
 }
 
+// ========================= FlowFilter matching ============================
+//
+// Whitelist/blacklist semantics (mirrors Hubble): a flow is kept if it matches
+// ANY whitelist filter (or the whitelist is empty) and matches NO blacklist
+// filter. Within one filter, every specified field must match (AND). Supported
+// fields: verdict, traffic_direction, source/destination ip (exact or CIDR),
+// source/destination pod (`ns/prefix`), source/destination identity, source/
+// destination label, protocol. Unsupported fields are ignored (permissive).
+
+fn flow_passes(
+    f: &flow::Flow,
+    whitelist: &[flow::FlowFilter],
+    blacklist: &[flow::FlowFilter],
+) -> bool {
+    if blacklist.iter().any(|flt| filter_matches(f, flt)) {
+        return false;
+    }
+    whitelist.is_empty() || whitelist.iter().any(|flt| filter_matches(f, flt))
+}
+
+fn filter_matches(f: &flow::Flow, flt: &flow::FlowFilter) -> bool {
+    if !flt.verdict.is_empty() && !flt.verdict.contains(&f.verdict) {
+        return false;
+    }
+    if !flt.traffic_direction.is_empty() && !flt.traffic_direction.contains(&f.traffic_direction) {
+        return false;
+    }
+    let (src_ip, dst_ip) = match &f.ip {
+        Some(ip) => (ip.source.as_str(), ip.destination.as_str()),
+        None => ("", ""),
+    };
+    if !flt.source_ip.is_empty() && !flt.source_ip.iter().any(|p| ip_matches(p, src_ip)) {
+        return false;
+    }
+    if !flt.destination_ip.is_empty() && !flt.destination_ip.iter().any(|p| ip_matches(p, dst_ip)) {
+        return false;
+    }
+    if !flt.source_pod.is_empty()
+        && !flt
+            .source_pod
+            .iter()
+            .any(|p| pod_matches(p, f.source.as_ref()))
+    {
+        return false;
+    }
+    if !flt.destination_pod.is_empty()
+        && !flt
+            .destination_pod
+            .iter()
+            .any(|p| pod_matches(p, f.destination.as_ref()))
+    {
+        return false;
+    }
+    if !flt.source_identity.is_empty() {
+        let id = f.source.as_ref().map(|e| e.identity).unwrap_or(0);
+        if !flt.source_identity.contains(&id) {
+            return false;
+        }
+    }
+    if !flt.destination_identity.is_empty() {
+        let id = f.destination.as_ref().map(|e| e.identity).unwrap_or(0);
+        if !flt.destination_identity.contains(&id) {
+            return false;
+        }
+    }
+    if !flt.source_label.is_empty()
+        && !flt
+            .source_label
+            .iter()
+            .any(|l| label_matches(l, f.source.as_ref()))
+    {
+        return false;
+    }
+    if !flt.destination_label.is_empty()
+        && !flt
+            .destination_label
+            .iter()
+            .any(|l| label_matches(l, f.destination.as_ref()))
+    {
+        return false;
+    }
+    if !flt.protocol.is_empty() && !flt.protocol.iter().any(|p| protocol_matches(p, f)) {
+        return false;
+    }
+    true
+}
+
+/// Pod filter: `namespace/podprefix`, `namespace/`, `/podprefix`, or a bare
+/// pod-name prefix (any namespace).
+fn pod_matches(pattern: &str, ep: Option<&flow::Endpoint>) -> bool {
+    let Some(ep) = ep else {
+        return false;
+    };
+    match pattern.split_once('/') {
+        Some((ns, pod)) => (ns.is_empty() || ep.namespace == ns) && ep.pod_name.starts_with(pod),
+        None => ep.pod_name.starts_with(pattern),
+    }
+}
+
+/// IP filter: exact match, or `a.b.c.d/len` CIDR (IPv4).
+fn ip_matches(pattern: &str, ip: &str) -> bool {
+    if ip.is_empty() {
+        return false;
+    }
+    let Some((net, plen)) = pattern.split_once('/') else {
+        return pattern == ip;
+    };
+    match (
+        net.parse::<Ipv4Addr>(),
+        plen.parse::<u8>(),
+        ip.parse::<Ipv4Addr>(),
+    ) {
+        (Ok(net), Ok(plen), Ok(addr)) if plen <= 32 => {
+            let mask = if plen == 0 {
+                0
+            } else {
+                u32::MAX << (32 - plen)
+            };
+            (u32::from(net) & mask) == (u32::from(addr) & mask)
+        }
+        _ => false,
+    }
+}
+
+/// Label filter: exact match against the endpoint's labels, tolerating the
+/// `k8s:` source prefix Cilium prepends (so `--label app=x` matches
+/// `k8s:app=x`).
+fn label_matches(selector: &str, ep: Option<&flow::Endpoint>) -> bool {
+    match ep {
+        Some(ep) => ep
+            .labels
+            .iter()
+            .any(|l| l == selector || l.trim_start_matches("k8s:") == selector),
+        None => false,
+    }
+}
+
+/// Protocol filter: `tcp` / `udp` / `icmp` / `icmpv4` / `icmpv6`.
+fn protocol_matches(name: &str, f: &flow::Flow) -> bool {
+    let proto = match f.l4.as_ref().and_then(|l4| l4.protocol.as_ref()) {
+        Some(flow::layer4::Protocol::Tcp(_)) => "tcp",
+        Some(flow::layer4::Protocol::Udp(_)) => "udp",
+        Some(flow::layer4::Protocol::IcmPv4(_)) => "icmpv4",
+        Some(flow::layer4::Protocol::IcmPv6(_)) => "icmpv6",
+        _ => return false,
+    };
+    name.eq_ignore_ascii_case(proto)
+        || (name.eq_ignore_ascii_case("icmp") && proto.starts_with("icmp"))
+}
+
+/// True if the flow's timestamp falls within `[since, until]` (open where a
+/// bound is absent; a flow with no timestamp always passes).
+fn in_time_window(
+    f: &flow::Flow,
+    since: Option<&::prost_types::Timestamp>,
+    until: Option<&::prost_types::Timestamp>,
+) -> bool {
+    let Some(t) = f.time.as_ref() else {
+        return true;
+    };
+    let tt = (t.seconds, t.nanos);
+    if let Some(s) = since {
+        if tt < (s.seconds, s.nanos) {
+            return false;
+        }
+    }
+    if let Some(u) = until {
+        if tt > (u.seconds, u.nanos) {
+            return false;
+        }
+    }
+    true
+}
+
 struct ObserverSvc {
     state: Arc<State>,
 }
@@ -257,21 +458,37 @@ impl Observer for ObserverSvc {
         let follow = req.follow;
         let number = req.number as usize;
         let node = self.state.node_name.clone();
+        let whitelist = req.whitelist.clone();
+        let blacklist = req.blacklist.clone();
+        let since = req.since;
+        let until = req.until;
 
         // Subscribe before snapshotting the ring so no flow slips through the
         // gap between replay and follow (a rare duplicate is preferable).
         let mut sub = self.state.tx.subscribe();
+        // `--last N` means the N most recent flows *that match the filter*, so
+        // filter first, then take from the matching set.
         let replay: Vec<flow::Flow> = {
             let q = self.state.flows.lock().await;
-            let n = if number == 0 || number > q.len() {
-                q.len()
+            let matched: Vec<&flow::Flow> = q
+                .iter()
+                .filter(|f| {
+                    in_time_window(f, since.as_ref(), until.as_ref())
+                        && flow_passes(f, &whitelist, &blacklist)
+                })
+                .collect();
+            let n = if number == 0 || number > matched.len() {
+                matched.len()
             } else {
                 number
             };
             if req.first {
-                q.iter().take(n).cloned().collect()
+                matched.into_iter().take(n).cloned().collect()
             } else {
-                q.iter().skip(q.len() - n).cloned().collect()
+                matched[matched.len() - n..]
+                    .iter()
+                    .map(|f| (*f).clone())
+                    .collect()
             }
         };
 
@@ -288,6 +505,11 @@ impl Observer for ObserverSvc {
             loop {
                 match sub.recv().await {
                     Ok(f) => {
+                        if !in_time_window(&f, since.as_ref(), until.as_ref())
+                            || !flow_passes(&f, &whitelist, &blacklist)
+                        {
+                            continue;
+                        }
                         if tx.send(Ok(wrap_flow(f, &node))).await.is_err() {
                             return;
                         }

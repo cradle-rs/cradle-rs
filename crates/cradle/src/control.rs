@@ -6,7 +6,7 @@
 //! mirrors `route_*_add/del`, nexthop and neighbor updates, plus L2/L4 setup.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
@@ -96,6 +96,15 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
 type ReplSlot = (String, u32, u32);
 
+/// What user space knows about a pod/node IP, for Hubble flow enrichment
+/// (empty strings / zero identity when unknown).
+#[derive(Clone, Debug, Default)]
+pub struct EpInfo {
+    pub namespace: String,
+    pub pod_name: String,
+    pub identity: u32,
+}
+
 /// Shared, cheaply-cloneable handle to the data plane.
 #[derive(Clone)]
 pub struct Control {
@@ -112,6 +121,10 @@ pub struct Control {
     repl_next: Arc<std::sync::atomic::AtomicU32>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
+    /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
+    /// identity), for Hubble flow enrichment. Kept in step with `set_identity`
+    /// / `del_identity`.
+    identities: Arc<Mutex<HashMap<Ipv4Addr, u32>>>,
 }
 
 impl Control {
@@ -124,6 +137,7 @@ impl Control {
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
+            identities: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -936,16 +950,33 @@ impl Control {
         Ok(())
     }
 
-    /// Snapshot of pod IPv4 → (namespace, pod_name) for Hubble flow
-    /// enrichment. Rebuilt from the endpoint store per drain wake (pod churn
-    /// is far slower than the flow rate).
-    pub async fn cni_ip_index(&self) -> std::collections::HashMap<Ipv4Addr, (String, String)> {
+    /// Snapshot of pod/node IPv4 → enrichment ([`EpInfo`]) for Hubble flows.
+    /// Rebuilt from the endpoint store + identity mirror per drain wake (pod
+    /// churn is far slower than the flow rate). Identity-only IPs (e.g. a
+    /// node/world address bound via config but not a CNI pod) still surface so
+    /// both ends of a flow can carry an identity.
+    pub async fn cni_ip_index(&self) -> HashMap<Ipv4Addr, EpInfo> {
+        let ids = self.identities.lock().await.clone();
         let cni = self.cni.lock().await;
-        let mut idx = std::collections::HashMap::new();
+        let mut idx: HashMap<Ipv4Addr, EpInfo> = HashMap::new();
         if let Ok(eps) = cni.list_endpoints() {
             for ep in eps {
-                idx.insert(ep.ip, (ep.pod_namespace.clone(), ep.pod_name.clone()));
+                idx.insert(
+                    ep.ip,
+                    EpInfo {
+                        namespace: ep.pod_namespace.clone(),
+                        pod_name: ep.pod_name.clone(),
+                        identity: ids.get(&ep.ip).copied().unwrap_or(0),
+                    },
+                );
             }
+        }
+        for (ip, id) in ids {
+            idx.entry(ip).or_insert(EpInfo {
+                namespace: String::new(),
+                pod_name: String::new(),
+                identity: id,
+            });
         }
         idx
     }
@@ -969,12 +1000,16 @@ impl Control {
 
     /// Bind a pod/node address to a policy identity.
     pub async fn set_identity(&self, ip: Ipv4Addr, identity: u32) -> Result<()> {
-        self.dp.lock().await.identity_set(ip, identity)
+        self.dp.lock().await.identity_set(ip, identity)?;
+        self.identities.lock().await.insert(ip, identity);
+        Ok(())
     }
 
     /// Remove an identity binding (idempotent).
     pub async fn del_identity(&self, ip: Ipv4Addr) -> Result<()> {
-        self.dp.lock().await.identity_del(ip)
+        self.dp.lock().await.identity_del(ip)?;
+        self.identities.lock().await.remove(&ip);
+        Ok(())
     }
 
     /// Resolve a policy target to its endpoint ifindex: by host veth name,

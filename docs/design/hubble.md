@@ -97,12 +97,17 @@ server, both on infrastructure that already exists.
   cradle node shows FORWARDED pod↔pod flows and a DROPPED flow when a
   NetworkPolicy blocks traffic — proven by the `cradle_hubble` BDD feature.
   A kind-e2e phase is still to come.
-- **H2 — enrichment + filters + service/masq verdicts.** Endpoint
-  identity/namespace/pod/labels on both ends; TRANSLATED for service DNAT +
-  masquerade; `FlowFilter` (verdict / namespace / pod / protocol);
-  `GetNamespaces` / `GetNodes`; `since`/`until`. **Acceptance**: `hubble
-  observe --namespace default --verdict DROPPED` filters correctly and shows
-  pod identities.
+- **H2 — enrichment + filters + service/masq verdicts. ✅ delivered.**
+  Endpoint identity/namespace/pod/labels on both ends (identity from a
+  user-space mirror of the `IDENTITY` map; namespace/pod-name labels
+  synthesized); TRANSLATED emitted at service DNAT and egress masquerade;
+  server-side `FlowFilter` (verdict / traffic-direction / source+destination
+  ip [exact or CIDR] / pod [`ns/prefix`] / identity / label / protocol) with
+  whitelist-OR / within-AND semantics; `since`/`until` time-window filtering.
+  **Acceptance (met)**: `hubble observe --namespace default --verdict DROPPED`
+  filters correctly (shows the policy drop, hides forwarded flows) and flows
+  carry pod identities — proven by the `cradle_hubble` BDD feature, which also
+  observes a TRANSLATED masqueraded flow.
 - **H3 — Hubble Relay + UI.** Serve the Peer/TCP Observer endpoint so the
   stock `hubble-relay` aggregates cradle nodes; DaemonSet wiring for
   hubble-relay + hubble-ui; kind-e2e shows the UI service map. IPv6 flows and
