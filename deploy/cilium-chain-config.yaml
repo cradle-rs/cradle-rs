@@ -1,0 +1,29 @@
+# The chained CNI configuration Cilium installs on each node
+# (cni.customConf=true + cni.configMap=cni-configuration): cradle-cni runs
+# first (IPAM, veth, routes; `chained` leaves the veth TC hook free), then
+# cilium-cni attaches Cilium's policy/observability datapath to the same
+# veth. Single-node clusters only as written — the subnet is this node's
+# podCIDR (kind's default first allocation).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cni-configuration
+  namespace: kube-system
+data:
+  cni-config: |
+    {
+      "cniVersion": "1.0.0",
+      "name": "cradle-chain",
+      "plugins": [
+        {
+          "type": "cradle-cni",
+          "chained": true,
+          "grpcEndpoint": "unix:/run/cradle/cradle.sock",
+          "ipam": { "type": "cradle", "subnet": "10.244.0.0/24" }
+        },
+        {
+          "type": "cilium-cni",
+          "chaining-mode": "generic-veth"
+        }
+      ]
+    }
