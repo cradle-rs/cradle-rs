@@ -178,6 +178,35 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            for i in &cfg.identities {
+                client
+                    .set_identity(pb::Identity {
+                        ip: i.ip.clone(),
+                        identity: i.id,
+                    })
+                    .await?;
+            }
+            for pol in &cfg.policies {
+                client
+                    .set_endpoint_policy(pb::EndpointPolicy {
+                        host_if: pol.host_if.clone(),
+                        pod_namespace: pol.namespace.clone(),
+                        pod_name: pol.pod.clone(),
+                        enforce: pol.enforce,
+                        rules: pol
+                            .rules
+                            .iter()
+                            .map(|r| {
+                                Ok(pb::PolicyRule {
+                                    identity: r.identity,
+                                    proto: config::rule_proto(&r.proto)? as u32,
+                                    port: r.port as u32,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    })
+                    .await?;
+            }
             for s in &cfg.l7_services {
                 let routes = s
                     .routes

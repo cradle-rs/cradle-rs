@@ -64,6 +64,12 @@ pub struct Config {
     pub fdb_age_secs: u64,
     #[serde(default)]
     pub services: Vec<Service>,
+    /// Policy identities: pod/node IP → identity (docs/design/policy.md).
+    #[serde(default)]
+    pub identities: Vec<IdentityCfg>,
+    /// Endpoint ingress policies (replace semantics per endpoint).
+    #[serde(default)]
+    pub policies: Vec<PolicyCfg>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
 }
@@ -257,6 +263,51 @@ pub struct Neighbor {
     pub oif: String,
     pub ip: String,
     pub mac: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IdentityCfg {
+    pub ip: String,
+    pub id: u32,
+}
+
+/// An endpoint ingress policy: target by `host_if` or `namespace`/`pod`.
+#[derive(Debug, Deserialize)]
+pub struct PolicyCfg {
+    #[serde(default)]
+    pub host_if: String,
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub pod: String,
+    #[serde(default = "default_true")]
+    pub enforce: bool,
+    #[serde(default)]
+    pub rules: Vec<PolicyRuleCfg>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// An allow rule: 0 / empty = wildcard.
+#[derive(Debug, Deserialize)]
+pub struct PolicyRuleCfg {
+    #[serde(default)]
+    pub identity: u32,
+    /// "tcp", "udp", or empty = any.
+    #[serde(default)]
+    pub proto: String,
+    #[serde(default)]
+    pub port: u16,
+}
+
+/// Parse a policy-rule proto ("" = any).
+pub fn rule_proto(s: &str) -> Result<u8> {
+    match s {
+        "" | "any" => Ok(0),
+        other => proto_num(other),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,6 +620,24 @@ impl Config {
                         .await?;
                 }
             }
+        }
+
+        for i in &self.identities {
+            let ip =
+                i.ip.parse()
+                    .with_context(|| format!("bad identity ip {:?}", i.ip))?;
+            ctl.set_identity(ip, i.id).await?;
+        }
+        for pol in &self.policies {
+            let ep = ctl
+                .resolve_endpoint(&pol.host_if, &pol.namespace, &pol.pod)
+                .await?;
+            let rules = pol
+                .rules
+                .iter()
+                .map(|r| Ok((r.identity, rule_proto(&r.proto)?, r.port)))
+                .collect::<Result<Vec<_>>>()?;
+            ctl.set_endpoint_policy(ep, pol.enforce, &rules).await?;
         }
 
         for svc in &self.l7_services {

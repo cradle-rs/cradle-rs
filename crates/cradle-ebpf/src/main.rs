@@ -37,23 +37,24 @@ use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
     CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
     GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
-    Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8,
-    FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PORT_F_L2,
-    PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
-    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
-    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
-    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
-    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
-    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX,
-    STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
-    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
-    STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC,
-    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
+    NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
+    Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK,
+    FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, IDENTITY_WORLD, L7_PROXY_PORT,
+    MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS,
+    NH_F_SRV6, NH_F_V6, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
+    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
+    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
+    STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP,
+    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
+    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
+    STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
+    XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -175,6 +176,20 @@ static SERVICES: HashMap<ServiceKey, ServiceInfo> = HashMap::with_max_entries(10
 static BACKENDS: HashMap<BackendKey, Backend> = HashMap::with_max_entries(8192, 0);
 #[map]
 static CT: LruHashMap<CtKey, CtEntry> = LruHashMap::with_max_entries(65536, 0);
+
+// --- ingress network policy (docs/design/policy.md) ---
+/// Source IPv4 (map-encoded) → identity. Miss = `IDENTITY_WORLD`.
+#[map]
+static IDENTITY: HashMap<u32, u32> = HashMap::with_max_entries(65536, 0);
+/// Enforced endpoints: host-veth ifindex → 1. Miss = default-allow.
+#[map]
+static EP_POLICY: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
+/// Allow rules; present = allow (wildcard fallback in `policy_denied`).
+#[map]
+static POLICY: HashMap<PolicyKey, u8> = HashMap::with_max_entries(65536, 0);
+/// Pod-initiated flows (pre-NAT 5-tuples): replies bypass ingress policy.
+#[map]
+static PCT: LruHashMap<CtKey, u8> = LruHashMap::with_max_entries(65536, 0);
 // L4 IPv6
 #[map]
 static SERVICES6: HashMap<ServiceKey6, ServiceInfo> = HashMap::with_max_entries(1024, 0);
@@ -382,6 +397,10 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
         if let Some(act) = l7_redirect(ctx) {
             return Ok(act);
         }
+        // Pod egress: track the pre-NAT flow so replies pass ingress policy.
+        if port.flags & PORT_F_ENDPOINT != 0 {
+            let _ = pct_track(ctx);
+        }
         // L4 NAT is a best-effort pre-routing stage; it rewrites the packet in
         // place (service DNAT / reverse SNAT) so routing then targets the real
         // endpoint. Failures fall through to plain routing.
@@ -479,6 +498,111 @@ fn l4_nat(ctx: &TcContext) -> Result<(), ()> {
         ETH_P_IPV6 => l4_nat_v6(ctx),
         _ => Ok(()),
     }
+}
+
+// ============================ network policy ===============================
+
+/// Record a pod-egress flow (pre-NAT IPv4 5-tuple) in `PCT`, so its replies
+/// bypass ingress policy at the pod — Kubernetes policy is stateful. Runs on
+/// `PORT_F_ENDPOINT` ingress before `l4_nat` (the pre-translation tuple is
+/// what the reverse-SNAT'd reply matches).
+#[inline(always)]
+fn pct_track(ctx: &TcContext) -> Result<(), ()> {
+    let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
+    if u16::from_be(ethertype) != ETH_P_IP {
+        return Ok(());
+    }
+    let ver_ihl: u8 = ctx.load(IP_VER_IHL_OFF).map_err(|_| ())?;
+    if ver_ihl & 0x0f != 5 {
+        return Ok(());
+    }
+    let proto: u8 = ctx.load(IP_PROTO_OFF).map_err(|_| ())?;
+    if proto != IPPROTO_TCP && proto != IPPROTO_UDP {
+        return Ok(());
+    }
+    let src: u32 = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
+    let dst: u32 = ctx.load(IP_DST_OFF).map_err(|_| ())?;
+    let sport: u16 = ctx.load(L4_OFF).map_err(|_| ())?;
+    let dport: u16 = ctx.load(L4_OFF + 2).map_err(|_| ())?;
+    let _ = PCT.insert(
+        &CtKey {
+            src,
+            dst,
+            src_port: sport,
+            dst_port: dport,
+            proto,
+            _pad: [0; 3],
+        },
+        &1u8,
+        0,
+    );
+    Ok(())
+}
+
+/// Ingress-policy verdict for a packet about to egress the enforced endpoint
+/// veth `ep`: false = allow. Allows replies to pod-initiated flows (`PCT`
+/// reverse hit), then probes `POLICY` most-specific-first with wildcard
+/// fallback (identity/proto/port each 0 = any). Runs post-NAT, so verdicts
+/// apply to the real pod destination.
+#[inline(always)]
+fn policy_denied(ctx: &TcContext, ep: u32) -> Result<bool, ()> {
+    let proto: u8 = ctx.load(IP_PROTO_OFF).map_err(|_| ())?;
+    let src: u32 = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
+    let dst: u32 = ctx.load(IP_DST_OFF).map_err(|_| ())?;
+    let ver_ihl: u8 = ctx.load(IP_VER_IHL_OFF).map_err(|_| ())?;
+    let (sport, dport) = if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) && ver_ihl & 0x0f == 5 {
+        (
+            ctx.load::<u16>(L4_OFF).map_err(|_| ())?,
+            ctx.load::<u16>(L4_OFF + 2).map_err(|_| ())?,
+        )
+    } else {
+        (0, 0)
+    };
+
+    // Reply to a flow this pod initiated?
+    if PCT
+        .get_ptr(&CtKey {
+            src: dst,
+            dst: src,
+            src_port: dport,
+            dst_port: sport,
+            proto,
+            _pad: [0; 3],
+        })
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    let identity = match unsafe { IDENTITY.get(&src) } {
+        Some(id) => *id,
+        None => IDENTITY_WORLD,
+    };
+    // Most-specific-first allow probes; each identity/proto/port slot may be
+    // wildcarded with 0. Unrolled — six exact-match lookups, no loop.
+    let probes = [
+        (identity, proto, dport),
+        (identity, proto, 0),
+        (identity, 0, 0),
+        (0, proto, dport),
+        (0, proto, 0),
+        (0, 0, 0),
+    ];
+    for &(id, pr, po) in probes.iter() {
+        if POLICY
+            .get_ptr(&PolicyKey {
+                ep,
+                identity: id,
+                port: po,
+                proto: pr,
+                _pad: 0,
+            })
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[inline(always)]
@@ -1044,6 +1168,15 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
 
     let (nh_id, nh) = resolve_nh(nh_id).ok_or(())?;
     let oif = nh.oif;
+
+    // Ingress network policy: the destination resolved to an enforced pod
+    // endpoint — the packet must be a reply to a pod-initiated flow or match
+    // an allow rule (docs/design/policy.md). One hash miss on the common
+    // (non-endpoint) path.
+    if EP_POLICY.get_ptr(&oif).is_some() && policy_denied(ctx, oif).unwrap_or(true) {
+        stat_inc(STAT_POLICY_DROP);
+        return Ok(TC_ACT_SHOT as i32);
+    }
 
     // SRv6 imposition (H.Encaps) of a v4-inner packet: impose an outer IPv6
     // header toward the SID. Pipe-model — the inner IPv4 TTL is left as-is.

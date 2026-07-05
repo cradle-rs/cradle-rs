@@ -59,6 +59,43 @@ check_crds() {
     exit 1
 }
 
+# NetworkPolicy: a default-deny-ingress on web must block the client, and
+# deleting it must restore connectivity — enforced by cradle's eBPF datapath
+# (no Cilium in this cluster). Uses a direct pod IP so kube-proxy DNAT can't
+# mask the drop.
+check_policy() {
+    echo "==> checking NetworkPolicy enforcement"
+    local pod_ip
+    pod_ip=$(kubectl get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: deny-web, namespace: default }
+spec:
+  podSelector: { matchLabels: { app: web } }
+  policyTypes: [ Ingress ]
+EOF
+    local blocked=0
+    for i in $(seq 1 30); do
+        if ! kubectl exec client -- curl -s --max-time 3 "http://$pod_ip/" 2>/dev/null | grep -q nginx; then
+            blocked=1; break
+        fi
+        sleep 2
+    done
+    [ "$blocked" = 1 ] || { echo "✗ NetworkPolicy did not block client->web pod $pod_ip" >&2; exit 1; }
+    echo "✓ NetworkPolicy blocks client -> web ($pod_ip), enforced in cradle eBPF"
+    kubectl delete networkpolicy deny-web
+    local restored=0
+    for i in $(seq 1 30); do
+        if kubectl exec client -- curl -s --max-time 3 "http://$pod_ip/" 2>/dev/null | grep -q nginx; then
+            restored=1; break
+        fi
+        sleep 2
+    done
+    [ "$restored" = 1 ] || { echo "✗ connectivity did not recover after policy delete" >&2; exit 1; }
+    echo "✓ deleting the NetworkPolicy restores connectivity"
+}
+
 VIP=$(kubectl get svc web -o jsonpath='{.spec.clusterIP}')
 echo "==> curling ClusterIP $VIP from the client pod"
 for i in $(seq 1 30); do
@@ -71,6 +108,7 @@ for i in $(seq 1 30); do
         if [ "${DNAT:-0}" -gt 0 ]; then
             echo "✓ ClusterIP $VIP served through the cradle eBPF datapath (l4_dnat=$DNAT)"
             check_crds
+            check_policy
             exit 0
         fi
         echo "✗ VIP answered but l4_dnat=0 — served by kube-proxy, not eBPF" >&2

@@ -13,6 +13,7 @@
 //!    config when ready" flow.
 
 mod cep;
+mod netpol;
 mod pb;
 mod sync;
 
@@ -60,6 +61,10 @@ struct Args {
     /// endpoints (needs the cilium.io/v2 CRDs installed — see deploy/crds/).
     #[arg(long)]
     publish_crds: bool,
+    /// Translate Kubernetes NetworkPolicies into cradle ingress policy for
+    /// this node's endpoints (docs/design/policy.md).
+    #[arg(long)]
+    enforce_policy: bool,
 }
 
 fn connect_uri(ep: &str) -> String {
@@ -105,7 +110,96 @@ async fn main() -> Result<()> {
         tokio::spawn(publish_crds_task(client.clone(), node, args.grpc.clone()));
     }
 
+    if args.enforce_policy {
+        tokio::spawn(policy_task(client.clone(), args.grpc.clone()));
+    }
+
     service_sync(client, &args.grpc, args.resync_secs).await
+}
+
+/// NetworkPolicy enforcement loop: watch Pods/Namespaces/NetworkPolicies and,
+/// on any change (plus a periodic tick), push identities + per-endpoint
+/// ingress policy for this node's endpoints to the daemon.
+async fn policy_task(client: Client, grpc: String) {
+    use k8s_openapi::api::core::v1::{Namespace, Pod};
+    use k8s_openapi::api::networking::v1::NetworkPolicy;
+
+    let pods: Api<Pod> = Api::all(client.clone());
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let policies: Api<NetworkPolicy> = Api::all(client.clone());
+
+    let notify = Arc::new(Notify::new());
+    tokio::spawn(watch_notify(pods.clone(), notify.clone()));
+    tokio::spawn(watch_notify(policies.clone(), notify.clone()));
+    tokio::spawn(watch_notify(namespaces.clone(), notify.clone()));
+    notify.notify_one();
+
+    let mut cradle: Option<CradleClient<tonic::transport::Channel>> = None;
+    let mut resync = tokio::time::interval(Duration::from_secs(30));
+    resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    resync.tick().await;
+    info!("NetworkPolicy enforcement started (cradle at {grpc})");
+
+    loop {
+        tokio::select! {
+            _ = notify.notified() => {}
+            _ = resync.tick() => {}
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let lp = kube::api::ListParams::default();
+        let (pl, nl, npl) = tokio::join!(pods.list(&lp), namespaces.list(&lp), policies.list(&lp));
+        let (pl, nl, npl) = match (pl, nl, npl) {
+            (Ok(a), Ok(b), Ok(c)) => (a.items, b.items, c.items),
+            _ => {
+                warn!("enforce-policy: listing Pods/Namespaces/NetworkPolicies failed");
+                continue;
+            }
+        };
+        if cradle.is_none() {
+            match CradleClient::connect(connect_uri(&grpc)).await {
+                Ok(c) => cradle = Some(c),
+                Err(e) => {
+                    warn!("enforce-policy: connecting to cradle at {grpc}: {e}");
+                    continue;
+                }
+            }
+        }
+        let cl = cradle.as_mut().unwrap();
+        // This node's endpoints from the daemon's store.
+        let endpoints = match cl.list_endpoints(pb::Empty {}).await {
+            Ok(r) => r.into_inner().endpoints,
+            Err(e) => {
+                warn!("enforce-policy: ListEndpoints: {e}");
+                cradle = None;
+                continue;
+            }
+        };
+        if let Err(e) = push_policy(cl, &pl, &nl, &npl, &endpoints).await {
+            warn!("enforce-policy: {e:#}");
+            cradle = None;
+        }
+    }
+}
+
+async fn push_policy(
+    cl: &mut CradleClient<tonic::transport::Channel>,
+    pods: &[k8s_openapi::api::core::v1::Pod],
+    namespaces: &[k8s_openapi::api::core::v1::Namespace],
+    policies: &[k8s_openapi::api::networking::v1::NetworkPolicy],
+    endpoints: &[pb::CniEndpoint],
+) -> Result<()> {
+    for (ip, id) in netpol::identities(pods) {
+        cl.set_identity(pb::Identity { ip, identity: id }).await?;
+    }
+    for ep in endpoints {
+        if ep.pod_name.is_empty() {
+            continue;
+        }
+        let policy = netpol::endpoint_policy(ep, policies, pods, namespaces);
+        cl.set_endpoint_policy(policy).await?;
+    }
+    Ok(())
 }
 
 /// CRD publication loop: every few seconds, mirror the daemon's endpoint
