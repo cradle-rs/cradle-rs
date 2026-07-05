@@ -1,0 +1,57 @@
+# z1 — a standalone MUP UPF anchor whose `dataplane gtp` datapath is a real
+# GTP-U tunnel programmed into cradle over gRPC (no SRv6, no kernel GTP). It
+# needs no BGP peer: two PFCP sessions (one per Network Instance) originate the
+# node's own Type-1 (downlink) and Type-2 (uplink) Session-Transformed routes,
+# which best-path locally and reconcile into cradle:
+#   - VRF Ndl (route st1, NI `ndl`): a UE-prefix -> GTP4.E encap toward the gNB
+#     (endpoint 10.0.12.2, source = the UPF anchor 10.0.12.1).
+#   - VRF Nul (route st2, NI `nul`): a H.M.GTP4.D decap PDR on (10.0.12.1, TEID)
+#     that forwards the inner packet into VRF Nul.
+# The gNB peer is a static cradle node that mirrors the tunnel.
+system:
+  cradle-grpc: "unix:/tmp/cradle_mup_gtp_zebra_ctl1.sock"
+vrf:
+- name: Ndl
+- name: Nul
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1n3
+  ipv4:
+    address: 10.0.12.1/24
+- if-name: z1cdl
+  vrf: Ndl
+  ipv4:
+    address: 10.0.1.1/24
+- if-name: z1cul
+  vrf: Nul
+  ipv4:
+    address: 10.0.3.1/24
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: Ndl
+      rd: "65000:1"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st1
+            network-instance: ndl
+    - name: Nul
+      rd: "65000:2"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st2
+            network-instance: nul
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 127.0.0.1
