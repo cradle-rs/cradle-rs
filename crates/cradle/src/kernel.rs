@@ -23,7 +23,7 @@ use cradle_common::FIB_F_LOCAL;
 /// Connected nexthops get ids in high ranges keyed by ifindex, so they never
 /// collide with control-plane-assigned ids (zebra-rs tee starts at 1).
 pub const CONNECTED_NH_BASE_V4: u32 = 1_000_000;
-const CONNECTED_NH_BASE_V6: u32 = 2_000_000;
+pub const CONNECTED_NH_BASE_V6: u32 = 2_000_000;
 
 /// Install local + connected routes for `name` (ifindex `ifindex`) from its
 /// current kernel addresses (IPv4 and global IPv6). `vrf` scopes the derived
@@ -139,6 +139,32 @@ pub fn del_dev_route_v4(ip: Ipv4Addr, dev: &str) {
     let dst = format!("{ip}/32");
     let _ = Command::new("ip")
         .args(["route", "del", &dst, "dev", dev])
+        .output();
+}
+
+/// IPv6 sibling of [`replace_dev_route_v4`]: `ip -6 route replace
+/// <ip6>/128 dev <dev>`, so `bpf_redirect_neigh` (AF_INET6) can resolve the
+/// pod's ND entry over the veth. Idempotent.
+pub fn replace_dev_route_v6(ip: Ipv6Addr, dev: &str) -> Result<()> {
+    let dst = format!("{ip}/128");
+    let out = Command::new("ip")
+        .args(["-6", "route", "replace", &dst, "dev", dev])
+        .output()
+        .with_context(|| format!("running `ip -6 route replace {dst} dev {dev}`"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip -6 route replace {dst} dev {dev}` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Remove the kernel host route installed by [`replace_dev_route_v6`].
+pub fn del_dev_route_v6(ip: Ipv6Addr, dev: &str) {
+    let dst = format!("{ip}/128");
+    let _ = Command::new("ip")
+        .args(["-6", "route", "del", &dst, "dev", dev])
         .output();
 }
 

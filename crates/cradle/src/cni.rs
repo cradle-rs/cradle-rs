@@ -8,7 +8,7 @@
 //! so file-per-op I/O buys restart consistency for free. Callers serialize
 //! access through `Control`'s mutex.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -41,6 +41,9 @@ pub struct Endpoint {
     pub host_if: String,
     pub host_ifindex: u32,
     pub ip: Ipv4Addr,
+    /// Pod IPv6 address (dual-stack); absent when the pool is v4-only.
+    #[serde(default)]
+    pub ip6: Option<Ipv6Addr>,
     pub vrf_id: u32,
     /// Kubernetes pod identity (empty outside Kubernetes) — feeds the
     /// CiliumEndpoint CRD publication. Defaults keep pre-M6 records readable.
@@ -54,11 +57,13 @@ pub struct Endpoint {
     pub chained: bool,
 }
 
-/// One pod-IP allocation: address → owner.
+/// One pod-IP allocation: address → owner (per family).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct IpamFile {
     #[serde(default)]
     allocations: std::collections::BTreeMap<Ipv4Addr, String>,
+    #[serde(default)]
+    allocations6: std::collections::BTreeMap<Ipv6Addr, String>,
 }
 
 /// File-backed CNI state under the daemon's state dir.
@@ -145,15 +150,58 @@ impl Store {
         anyhow::bail!("pod CIDR {pool} exhausted");
     }
 
-    /// Release an allocation by owner and/or address. Missing entries are not
-    /// an error (CNI DEL must be idempotent).
-    pub fn release_ip(&self, owner: &str, ip: Option<Ipv4Addr>) -> Result<()> {
+    /// Allocate a pod IPv6 address from `pool6`, idempotent per `owner`. The
+    /// network address and the first host address (the ptp gateway) are
+    /// reserved; there is no v6 broadcast.
+    pub fn alloc_ip6(&self, pool6: &str, owner: &str) -> Result<(Ipv6Addr, u8)> {
+        let (net, plen) = util::parse_ipv6_prefix(pool6)?;
+        if plen > 126 {
+            anyhow::bail!("pod CIDR6 {pool6} too small (need at least a /126)");
+        }
+        let mask = if plen == 0 {
+            0
+        } else {
+            u128::MAX << (128 - plen as u32)
+        };
+        let base = u128::from(net) & mask;
+
         let path = self.ipam_path();
         let mut ipam: IpamFile = Self::read_json(&path)?;
-        let before = ipam.allocations.len();
-        ipam.allocations
-            .retain(|a, o| !(Some(*a) == ip || (!owner.is_empty() && o.as_str() == owner)));
-        if ipam.allocations.len() != before {
+        if let Some((&ip, _)) = ipam.allocations6.iter().find(|(_, o)| o.as_str() == owner) {
+            return Ok((ip, plen));
+        }
+        // From base+2 (skip the subnet-router anycast + the ptp gateway).
+        let first = base + 2;
+        let last = base | !mask;
+        let mut candidate = first;
+        while candidate < last {
+            let ip = Ipv6Addr::from(candidate);
+            if let std::collections::btree_map::Entry::Vacant(slot) = ipam.allocations6.entry(ip) {
+                slot.insert(owner.to_string());
+                Self::write_json(&path, &ipam)?;
+                return Ok((ip, plen));
+            }
+            candidate += 1;
+        }
+        anyhow::bail!("pod CIDR6 {pool6} exhausted");
+    }
+
+    /// Release both-family allocations by owner and/or a specific v4/v6
+    /// address. Missing entries are not an error (CNI DEL is idempotent).
+    pub fn release_ip(
+        &self,
+        owner: &str,
+        ip: Option<Ipv4Addr>,
+        ip6: Option<Ipv6Addr>,
+    ) -> Result<()> {
+        let path = self.ipam_path();
+        let mut ipam: IpamFile = Self::read_json(&path)?;
+        let before = (ipam.allocations.len(), ipam.allocations6.len());
+        let owns = |o: &str| !owner.is_empty() && o == owner;
+        ipam.allocations.retain(|a, o| !(Some(*a) == ip || owns(o)));
+        ipam.allocations6
+            .retain(|a, o| !(Some(*a) == ip6 || owns(o)));
+        if (ipam.allocations.len(), ipam.allocations6.len()) != before {
             Self::write_json(&path, &ipam)?;
         }
         Ok(())

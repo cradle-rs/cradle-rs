@@ -281,11 +281,14 @@ message ServiceDel {
 message AllocIpRequest {
   string pool = 1;   // pod CIDR, e.g. "10.244.0.0/24"
   string owner = 2;  // "<container_id>/<ifname>" — alloc is idempotent per owner
+  string pool6 = 3;  // optional pod IPv6 CIDR — set for a dual-stack pod
 }
 
 message AllocIpReply {
   string ip = 1;
   uint32 prefix_len = 2;  // the pool's prefix length
+  string ip6 = 3;         // allocated IPv6 (empty when pool6 was empty)
+  uint32 prefix_len6 = 4;
 }
 
 message ReleaseIpRequest {
@@ -305,6 +308,8 @@ message CniEndpoint {
   // the CiliumEndpoint CRD publication; empty outside Kubernetes.
   string pod_name = 8;
   string pod_namespace = 9;
+  // Pod IPv6 address (dual-stack); empty for a v4-only pod.
+  string ip6 = 11;
   // CNI-chained deployment (e.g. Cilium generic-veth on top): cradle skips
   // attaching its datapath to the pod veth — the chained plugin owns that
   // hook — but still allocates, records, installs the kernel route, and

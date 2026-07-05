@@ -406,21 +406,26 @@ async fn render_cni_conf(client: Client, node: String, path: PathBuf, grpc: Stri
         match nodes.get(&node).await {
             Ok(n) => {
                 let spec = n.spec.unwrap_or_default();
-                // Prefer the IPv4 entry of podCIDRs (dual-stack nodes).
-                let cidr = spec
-                    .pod_cidrs
-                    .unwrap_or_default()
-                    .into_iter()
+                let cidrs = spec.pod_cidrs.unwrap_or_default();
+                // IPv4 podCIDR (required) + optional IPv6 podCIDR (dual-stack).
+                let cidr = cidrs
+                    .iter()
                     .find(|c| c.contains('.'))
-                    .or(spec.pod_cidr.filter(|c| c.contains('.')));
+                    .cloned()
+                    .or(spec.pod_cidr.clone().filter(|c| c.contains('.')));
+                let cidr6 = cidrs.iter().find(|c| c.contains(':')).cloned();
                 if let Some(cidr) = cidr {
+                    let mut ipam = serde_json::json!({ "type": "cradle", "subnet": cidr });
+                    if let Some(c6) = &cidr6 {
+                        ipam["subnet6"] = serde_json::json!(c6);
+                    }
                     let conf = serde_json::json!({
                         "cniVersion": "1.0.0",
                         "name": "cradle",
                         "plugins": [{
                             "type": "cradle-cni",
                             "grpcEndpoint": grpc,
-                            "ipam": { "type": "cradle", "subnet": cidr }
+                            "ipam": ipam
                         }]
                     });
                     let tmp = path.with_extension("tmp");
@@ -428,7 +433,11 @@ async fn render_cni_conf(client: Client, node: String, path: PathBuf, grpc: Stri
                         .and_then(|()| std::fs::rename(&tmp, &path));
                     match write {
                         Ok(()) => {
-                            info!("wrote {} (podCIDR {cidr})", path.display());
+                            info!(
+                                "wrote {} (podCIDR {cidr}{})",
+                                path.display(),
+                                cidr6.map(|c| format!(" + {c}")).unwrap_or_default()
+                            );
                             return;
                         }
                         Err(e) => warn!("writing {}: {e}", path.display()),
