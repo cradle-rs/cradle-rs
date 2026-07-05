@@ -802,6 +802,7 @@ impl Control {
     /// the pod /32 at a connected nexthop on that veth, install the kernel
     /// twin route `bpf_redirect_neigh` resolves the pod's neighbor through,
     /// and persist the endpoint record. Idempotent per (container, ifname).
+    #[allow(clippy::too_many_arguments)]
     pub async fn cni_create_endpoint(
         &self,
         container_id: &str,
@@ -810,6 +811,8 @@ impl Control {
         host_if: &str,
         ip: Ipv4Addr,
         vrf: u32,
+        pod_name: &str,
+        pod_namespace: &str,
     ) -> Result<()> {
         let ifindex = util::ifindex_of(host_if)?;
         self.set_port(host_if, None, true, 0, vrf).await?;
@@ -828,6 +831,8 @@ impl Control {
             host_ifindex: ifindex,
             ip,
             vrf_id: vrf,
+            pod_name: pod_name.to_string(),
+            pod_namespace: pod_namespace.to_string(),
         })?;
         info!("cni endpoint {container_id}/{ifname}: {ip} via {host_if} (vrf {vrf})");
         Ok(())
@@ -885,6 +890,8 @@ impl Control {
                         &ep.host_if,
                         ep.ip,
                         ep.vrf_id,
+                        &ep.pod_name,
+                        &ep.pod_namespace,
                     )
                     .await
                 {
@@ -1610,6 +1617,8 @@ impl Cradle for GrpcService {
                 &e.host_if,
                 ip,
                 e.vrf_id,
+                &e.pod_name,
+                &e.pod_namespace,
             )
             .await
             .map_err(st)?;
@@ -1643,6 +1652,8 @@ impl Cradle for GrpcService {
                 ifname: ep.ifname,
                 netns: ep.netns,
                 host_if: ep.host_if,
+                pod_name: ep.pod_name,
+                pod_namespace: ep.pod_namespace,
                 host_ifindex: ep.host_ifindex,
                 ip: ep.ip.to_string(),
                 vrf_id: ep.vrf_id,

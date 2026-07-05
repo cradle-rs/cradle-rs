@@ -25,7 +25,8 @@ kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 kind create cluster --name "$CLUSTER" --config deploy/kind-config.yaml --wait 0s
 kind load docker-image cradle:dev --name "$CLUSTER"
 
-echo "==> installing cradle"
+echo "==> installing cradle (+ vendored cilium.io CRDs)"
+kubectl apply -f deploy/crds/ciliumendpoints.yaml -f deploy/crds/ciliumnodes.yaml
 kubectl apply -f deploy/cradle.yaml
 kubectl -n cradle-system rollout status ds/cradle --timeout=180s
 kubectl wait node --all --for=condition=Ready --timeout=180s
@@ -36,6 +37,27 @@ kubectl expose deployment web --port 80
 kubectl run client --image=curlimages/curl --restart=Never --command -- sleep 3600
 kubectl wait deploy/web --for=condition=Available --timeout=300s
 kubectl wait pod/client --for=condition=Ready --timeout=300s
+
+# CiliumEndpoint/CiliumNode publication: every cradle-managed pod must show
+# up as a CEP with its IP (the kubectl IPv4 printer column), and the node
+# must have a CiliumNode carrying its podCIDR.
+check_crds() {
+    echo "==> checking CiliumEndpoint/CiliumNode publication"
+    for i in $(seq 1 30); do
+        CEPS=$(kubectl get ciliumendpoints -o jsonpath='{range .items[*]}{.metadata.name}={.status.networking.addressing[0].ipv4}{"\n"}{end}' 2>/dev/null | grep -c "=10\." || true)
+        PODS=$(kubectl get pods --field-selector=status.phase=Running -o name | wc -l)
+        if [ "${CEPS:-0}" -ge "$PODS" ] && [ "$PODS" -gt 0 ]; then
+            kubectl get ciliumendpoints
+            kubectl get ciliumnode "$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')" \
+                -o jsonpath='{.metadata.name} podCIDRs={.spec.ipam.podCIDRs}{"\n"}'
+            echo "✓ $CEPS CiliumEndpoints published for $PODS running pods"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "✗ CiliumEndpoints not published (got ${CEPS:-0} for $PODS pods)" >&2
+    exit 1
+}
 
 VIP=$(kubectl get svc web -o jsonpath='{.spec.clusterIP}')
 echo "==> curling ClusterIP $VIP from the client pod"
@@ -48,6 +70,7 @@ for i in $(seq 1 30); do
             | awk '$1=="l4_dnat"{print $2}')
         if [ "${DNAT:-0}" -gt 0 ]; then
             echo "✓ ClusterIP $VIP served through the cradle eBPF datapath (l4_dnat=$DNAT)"
+            check_crds
             exit 0
         fi
         echo "✗ VIP answered but l4_dnat=0 — served by kube-proxy, not eBPF" >&2
