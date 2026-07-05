@@ -1231,13 +1231,16 @@ async fn start_cradle_cni_node_hubble(
         .status()
         .await;
     let log = format!("logs/{}.cradle.log", scoped);
+    // Also serve the Observer/Peer API over TCP inside the node netns so the
+    // relay can dial it (127.0.0.1:4244 is per-netns, no cross-feature clash).
     let cmd = format!(
-        "exec {} serve --config {} --grpc {} --state-dir {} --hubble-sock {} --node-name {} --pid-file {} >> {} 2>&1",
+        "exec {} serve --config {} --grpc {} --state-dir {} --hubble-sock {} --hubble-listen {} --node-name {} --pid-file {} >> {} 2>&1",
         cradle_bin(),
         cfg,
         ep,
         state,
         hub,
+        HUBBLE_TCP_ADDR,
         scoped,
         pid,
         log
@@ -1252,9 +1255,95 @@ async fn start_cradle_cni_node_hubble(
     .expect("Failed to start cradle CNI node with Hubble");
     await_cradle(&scoped, &pid).await;
     println!(
-        "✓ cradle CNI node started in {} (gRPC {}, hubble {})",
-        scoped, ep, hub
+        "✓ cradle CNI node started in {} (gRPC {}, hubble {}, tcp {})",
+        scoped, ep, hub, HUBBLE_TCP_ADDR
     );
+}
+
+/// The node's in-netns TCP Observer/Peer address (per-netns, so the same
+/// literal is safe across concurrently-running features).
+const HUBBLE_TCP_ADDR: &str = "127.0.0.1:4244";
+/// The relay's in-netns listen address (what `hubble observe --server` dials).
+const HUBBLE_RELAY_ADDR: &str = "127.0.0.1:4245";
+
+/// Resolve the stock `hubble-relay` binary (extracted from the pinned image by
+/// `deploy/fetch-hubble-relay.sh`; overridable via $HUBBLE_RELAY).
+fn hubble_relay_bin() -> String {
+    std::env::var("HUBBLE_RELAY").unwrap_or_else(|_| {
+        format!(
+            "{}/.cache/cradle-bdd/hubble-relay",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    })
+}
+
+/// Start the stock `hubble-relay` in the node namespace, discovering the node
+/// through its Peer service on the unix socket and dialling the advertised TCP
+/// Observer — the same flow a real cluster's relay uses.
+#[when(expr = "I start hubble-relay in namespace {string} peering Hubble {string}")]
+async fn start_hubble_relay(world: &mut World, namespace: String, hsock: String) {
+    let scoped = world.ns(&namespace);
+    let peer = format!("unix://{}", hubble_sock(world, &hsock));
+    let pid = format!("/tmp/{}.relay.pid", scoped);
+    let log = format!("logs/{}.relay.log", scoped);
+    let cmd = format!(
+        "echo $$ > {}; exec {} serve --peer-service {} --listen-address {} --disable-server-tls --disable-client-tls >> {} 2>&1",
+        pid,
+        hubble_relay_bin(),
+        peer,
+        HUBBLE_RELAY_ADDR,
+        log,
+    );
+    netns::spawn_in_netns(&scoped, "sh", &["-c", &cmd])
+        .await
+        .expect("Failed to start hubble-relay");
+    // Give relay a moment to dial the peer + Observer.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    println!("✓ hubble-relay started in {scoped} (peer {peer}, listen {HUBBLE_RELAY_ADDR})");
+}
+
+/// Stop the `hubble-relay` started in `namespace` (best-effort).
+#[when(expr = "I stop hubble-relay in namespace {string}")]
+async fn stop_hubble_relay(world: &mut World, namespace: String) {
+    if keep_topology() {
+        return;
+    }
+    let scoped = world.ns(&namespace);
+    let pid = format!("/tmp/{}.relay.pid", scoped);
+    let _ = netns::kill_pidfile(Path::new(&pid)).await;
+    println!("✓ hubble-relay stopped in {scoped}");
+}
+
+/// Poll `hubble observe --server <relay>` (through the relay, not the node
+/// directly) until the expected flow shows up — proving the stock relay
+/// aggregated this cradle node's flows.
+#[then(
+    expr = "hubble observe via relay in namespace {string} should show a {string} flow from {string} to {string}"
+)]
+async fn hubble_via_relay_show(
+    world: &mut World,
+    namespace: String,
+    verdict: String,
+    src: String,
+    dst: String,
+) {
+    let scoped = world.ns(&namespace);
+    for _ in 0..20 {
+        let out = hubble_observe(&scoped, HUBBLE_RELAY_ADDR, &[]).await;
+        if json_line_has(
+            &out,
+            &[
+                &format!("\"{verdict}\""),
+                &format!("\"{src}\""),
+                &format!("\"{dst}\""),
+            ],
+        ) {
+            println!("✓ hubble observe via relay saw {verdict} {src} -> {dst}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("hubble observe via relay never showed a {verdict} flow from {src} to {dst}");
 }
 
 /// Poll the stock `hubble observe` CLI until a flow with the given verdict

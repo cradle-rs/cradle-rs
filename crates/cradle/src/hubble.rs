@@ -12,7 +12,7 @@
 //! are pinned to Cilium v1.19.5 (`api/v1/observer`, `api/v1/flow`).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +24,7 @@ use aya::maps::{Map, MapData, RingBuf};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
@@ -35,7 +35,8 @@ use cradle_common::{
 
 use crate::control::{Control, EpInfo};
 use crate::hpb::observer::observer_server::{Observer, ObserverServer};
-use crate::hpb::{flow, observer, relay};
+use crate::hpb::peer::peer_server::{Peer, PeerServer};
+use crate::hpb::{flow, observer, peer, relay};
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -58,12 +59,19 @@ struct State {
     node_name: String,
 }
 
-/// Serve the Hubble Observer API on `path` until the process exits, draining
+/// Serve the Hubble Observer (+ Peer) API until the process exits, draining
 /// `flows_map` (the `FLOWS` ring buffer taken from the loaded eBPF object) in
 /// the background.
+///
+/// The Observer + Peer services are served on the unix socket `path` (for
+/// local `hubble observe` and for `hubble-relay`'s peer discovery). When
+/// `listen_addr` is set, the same services are also served over TCP, and the
+/// Peer service advertises that address so a relay reached via the unix socket
+/// dials this node's Observer over TCP (H3, `docs/design/hubble.md`).
 pub async fn serve(
     control: Control,
     path: PathBuf,
+    listen_addr: Option<SocketAddr>,
     flows_map: Map,
     node_name: String,
 ) -> Result<()> {
@@ -75,7 +83,7 @@ pub async fn serve(
         tx,
         seen: AtomicU64::new(0),
         start: SystemTime::now(),
-        node_name,
+        node_name: node_name.clone(),
     });
 
     // Background: drain the ring buffer into the in-memory flow ring.
@@ -88,6 +96,15 @@ pub async fn serve(
         });
     }
 
+    // The Peer service advertises this node's Observer address to a relay. It
+    // must be the TCP endpoint (a relay is typically off-node); empty when no
+    // TCP listener is configured.
+    let peer = PeerSvc {
+        node_name,
+        address: listen_addr.map(|a| a.to_string()).unwrap_or_default(),
+    };
+    let obs = ObserverSvc { state };
+
     let _ = std::fs::remove_file(&path); // clear a stale socket
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -95,11 +112,26 @@ pub async fn serve(
     let uds = tokio::net::UnixListener::bind(&path)
         .with_context(|| format!("binding {}", path.display()))?;
     let incoming = UnixListenerStream::new(uds);
-    info!("serving Hubble Observer API on unix {}", path.display());
-    Server::builder()
-        .add_service(ObserverServer::new(ObserverSvc { state }))
-        .serve_with_incoming(incoming)
-        .await?;
+    info!(
+        "serving Hubble Observer/Peer API on unix {}",
+        path.display()
+    );
+    let uds_server = Server::builder()
+        .add_service(ObserverServer::new(obs.clone()))
+        .add_service(PeerServer::new(peer.clone()))
+        .serve_with_incoming(incoming);
+
+    match listen_addr {
+        Some(addr) => {
+            info!("serving Hubble Observer/Peer API on tcp {addr}");
+            let tcp_server = Server::builder()
+                .add_service(ObserverServer::new(obs))
+                .add_service(PeerServer::new(peer))
+                .serve(addr);
+            tokio::try_join!(uds_server, tcp_server)?;
+        }
+        None => uds_server.await?,
+    }
     Ok(())
 }
 
@@ -424,6 +456,7 @@ fn in_time_window(
     true
 }
 
+#[derive(Clone)]
 struct ObserverSvc {
     state: Arc<State>,
 }
@@ -601,5 +634,45 @@ impl Observer for ObserverSvc {
     ) -> Result<Response<Self::GetDebugEventsStream>, Status> {
         debug!("hubble GetDebugEvents: no debug event source (returning empty)");
         Ok(Response::new(Box::pin(tokio_stream::empty())))
+    }
+}
+
+/// The Hubble Peer service: how `hubble-relay` discovers this node's Observer
+/// endpoint. cradle is a single peer (itself); `Notify` announces it once as
+/// `PEER_ADDED` and then holds the stream open (there are no further changes
+/// to report). `address` is the node's TCP Observer endpoint.
+#[derive(Clone)]
+struct PeerSvc {
+    node_name: String,
+    address: String,
+}
+
+type NotifyStream =
+    Pin<Box<dyn Stream<Item = Result<peer::ChangeNotification, Status>> + Send + 'static>>;
+
+#[tonic::async_trait]
+impl Peer for PeerSvc {
+    type NotifyStream = NotifyStream;
+
+    async fn notify(
+        &self,
+        _request: Request<peer::NotifyRequest>,
+    ) -> Result<Response<Self::NotifyStream>, Status> {
+        let added = peer::ChangeNotification {
+            name: self.node_name.clone(),
+            address: self.address.clone(),
+            r#type: peer::ChangeNotificationType::PeerAdded as i32,
+            tls: None,
+        };
+        info!(
+            "hubble Peer/Notify: advertising node {} at {}",
+            self.node_name, self.address
+        );
+        // One PEER_ADDED, then keep the stream open (no further changes) so the
+        // relay stays connected rather than reconnecting every retry interval.
+        let stream = tokio_stream::once(Ok(added)).chain(tokio_stream::pending::<
+            Result<peer::ChangeNotification, Status>,
+        >());
+        Ok(Response::new(Box::pin(stream)))
     }
 }

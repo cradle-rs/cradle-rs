@@ -108,10 +108,19 @@ server, both on infrastructure that already exists.
   filters correctly (shows the policy drop, hides forwarded flows) and flows
   carry pod identities — proven by the `cradle_hubble` BDD feature, which also
   observes a TRANSLATED masqueraded flow.
-- **H3 — Hubble Relay + UI.** Serve the Peer/TCP Observer endpoint so the
-  stock `hubble-relay` aggregates cradle nodes; DaemonSet wiring for
-  hubble-relay + hubble-ui; kind-e2e shows the UI service map. IPv6 flows and
-  L7/HTTP flows (via the TPROXY emitting) are follow-ons.
+- **H3 — Hubble Relay + UI. ✅ delivered.** cradle serves the `peer.Peer`
+  service + the Observer over TCP (`serve --hubble-listen <addr>`), advertising
+  the node's Observer address, so the stock `hubble-relay` discovers the node
+  and aggregates its flows. Deploy wiring: `deploy/hubble.yaml` (hubble-peer
+  Service + hubble-relay + hubble-ui) + `deploy/hubble-cradle-patch.yaml`
+  (enables Hubble on the cradle DaemonSet). **Acceptance (met)**: the
+  `cradle_hubble` BDD runs the UNMODIFIED `hubble-relay` v1.19.5 against a
+  node's Peer service and `hubble observe --server <relay>` shows the node's
+  flows; `deploy/kind-hubble-e2e.sh` deploys relay + hubble-ui to a kind
+  cluster and shows the stock stack observing cradle flows + the UI service
+  map. Follow-ons: multi-node peer federation (the Peer service currently
+  advertises this node only — a relay sees the node it connects to), IPv6
+  flows, and L7/HTTP flows (via the TPROXY emitting).
 
 ## Leverage & non-goals
 

@@ -93,6 +93,11 @@ struct ServeArgs {
     /// /var/run/cilium/hubble.sock.
     #[arg(long)]
     hubble_sock: Option<PathBuf>,
+    /// Also serve the Hubble Observer + Peer API over TCP on this address
+    /// (e.g. 0.0.0.0:4244), so the stock `hubble-relay` can discover and
+    /// aggregate this node. Requires `--hubble-sock`.
+    #[arg(long)]
+    hubble_listen: Option<std::net::SocketAddr>,
     /// Node name reported to Hubble (defaults to $NODE_NAME / $HOSTNAME / the
     /// kernel hostname).
     #[arg(long)]
@@ -301,9 +306,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     if let Some(sock) = args.hubble_sock.clone() {
         let map = flows_map.expect("FLOWS map taken when --hubble-sock is set");
         let node = args.node_name.clone().unwrap_or_else(default_node_name);
+        let listen = args.hubble_listen;
         let c = control.clone();
         tokio::spawn(async move {
-            if let Err(e) = hubble::serve(c, sock, map, node).await {
+            if let Err(e) = hubble::serve(c, sock, listen, map, node).await {
                 tracing::warn!("hubble API stopped: {e:#}");
             }
         });
