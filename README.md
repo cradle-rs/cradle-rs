@@ -18,7 +18,10 @@ design and roadmap.
 |---|---|---|
 | `cradle-common` | host + bpf | Data-plane contract: `#[repr(C)]` map key/value types. |
 | `cradle-ebpf`   | `bpfel-unknown-none` | eBPF programs (XDP + TC). |
-| `cradle`        | host | User-space control plane: loads/attaches programs, programs maps. |
+| `cradle`        | host | User-space control plane: loads/attaches programs, programs maps, serves the gRPC API. |
+| `cradle-cni`    | host | Kubernetes CNI plugin (spec 1.1): attaches pods to the data plane. |
+| `cradle-k8s`    | host | Kubernetes controller: Services → eBPF L4 LB, CNI conflist render. |
+| `bdd`           | host | Cucumber BDD suite over network namespaces. |
 
 ## Build & run
 
@@ -44,6 +47,9 @@ drivable over gRPC, and [zebra-rs](https://github.com/zebra-rs/zebra-rs)
 drives it as a real control plane: IS-IS SR/SRv6, BGP L3VPN (MPLS and SRv6),
 and BGP EVPN program the eBPF FIBs through the `FibHandle` tee, with a
 reverse `WatchFdb` channel reporting data-plane MAC learning back up.
+cradle also runs as a **Kubernetes CNI** (plugin + node controller +
+DaemonSet packaging, proven in kind — see below), with Cilium API
+compatibility as the next arc.
 
 ## MPLS support status
 
@@ -150,39 +156,48 @@ for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet.
 | VRF-bound locators (End.T / uT) | SRv6 | ✅ | locator `vrf` leaf → RIB table resolution → End.T/uT codepoints + kernel End.T + tee; `cradle_endt_zebra` |
 | Static seg6local SIDs (config-static `action`) | SRv6 | ✅ | route-embedded actions now tee as local SIDs; DX adjacency via `nh6`/`nh4`; `cradle_dx_zebra` |
 
-## Kubernetes CNI
+## Kubernetes CNI support status
 
-`cradle-cni` is a CNI spec 1.1 plugin (ADD/DEL/CHECK/STATUS/GC/VERSION) that
-attaches pods to the cradle data plane: the daemon allocates the pod address
-(`AllocIp`, node-local IPAM persisted under `--state-dir`), the plugin plumbs
-the veth pair and the pod's ptp default route (169.254.1.1 + permanent
-neighbor entry), and `CreateEndpoint` programs the pod /32 into the eBPF FIB
-on the host-side veth. Plan and roadmap: `docs/design/cni-cilium.md`.
+cradle runs as a Kubernetes CNI provider: `cradle-cni` (a CNI spec 1.1
+plugin) plumbs each pod's veth and ptp default route (169.254.1.1 with a
+permanent neighbor entry) and hands the host end to the daemon, which
+allocates the pod address from node-local IPAM and programs the pod /32
+into the eBPF FIB; `cradle-k8s` maps Services onto the eBPF L4 load
+balancer and renders the kubelet CNI conflist from the Node's podCIDR.
+`deploy/` carries the DaemonSet and `kind-e2e.sh` (a kind cluster with the
+default CNI disabled, smoke-tested end to end). Because zebra-rs is the
+node's routing stack, pod reachability rides real BGP — including the
+direction Cilium doesn't support: **routes learned from BGP program the
+pod datapath** (Cilium's BGP control plane is advertise-only,
+cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
+✅ = implemented (BDD/e2e-proven), 🔶 = partial by design, ⬜ = not yet.
 
-Because zebra-rs is the node's routing stack, pod reachability rides real BGP
-— including the direction Cilium doesn't support: **routes learned from BGP
-program the pod datapath** (Cilium's BGP control plane is advertise-only,
-cilium/cilium#34841). `cradle_cni_bgp.feature` proves it end-to-end: two CNI
-nodes exchange their pod CIDRs over eBGP, each zebra-rs tees the learned
-route into its node's eBPF FIB, and pods on different nodes ping each other
-with kernel forwarding disabled on both nodes.
-
-Kubernetes Services ride the existing eBPF L4 load balancer: the
-`cradle-k8s` controller (kube-rs) watches Services/EndpointSlices and
-programs every IPv4 ClusterIP with Pod-backed endpoints (`AddService`
-replaces in place, `DelService` removes; a periodic resync converges a
-restarted daemon). Services with host-network backends (e.g.
-`default/kubernetes`) are intentionally left to kube-proxy — they miss the
-eBPF FIB and fall through to the kernel. `deploy/` has the DaemonSet
-(cradle + cradle-k8s, an init container installing `cradle-cni`, the CNI
-conflist rendered from the Node's podCIDR) and `kind-e2e.sh`, which brings
-up a kind cluster with the default CNI disabled and proves an nginx
-ClusterIP is served through the eBPF DNAT (`l4_dnat > 0`).
-
-| Milestone | Status | Notes |
+| Function | Status | Notes |
 |---|---|---|
-| M1 CNI plugin + endpoint plumbing | ✅ | `cradle-cni` + AllocIp/CreateEndpoint gRPC; `cradle_cni` |
-| M2 multi-node pod routing over BGP | ✅ | learned-route tee to the pod FIB; `cradle_cni_bgp` |
-| M3 lifecycle (CHECK/GC/restart reconcile) | ✅ | startup reconcile re-programs stored endpoints; `cradle_cni_restart` |
-| M4 Services (ClusterIP via eBPF L4 LB) + kind packaging | ✅ | `cradle-k8s` Service/EndpointSlice sync + DaemonSet; `cradle_cni_svc` BDD + `deploy/kind-e2e.sh` |
-| Cilium compat (agent REST subset, CRDs, chaining) | ⬜ | story 2 of `docs/design/cni-cilium.md` |
+| CNI 1.1 ADD / DEL | ✅ | veth + ptp gateway, pod /32 into the eBPF FIB via `AllocIp`/`CreateEndpoint`; idempotent DEL; `cradle_cni` |
+| CNI CHECK / STATUS / VERSION | ✅ | persisted endpoint store + daemon health; `cradle_cni_restart` |
+| CNI GC | ✅ | sweeps attachments absent from `cni.dev/valid-attachments`; `cradle_cni_restart` |
+| Node-local IPAM | ✅ | daemon-owned allocator persisted under `--state-dir`; idempotent per attachment; survives restarts |
+| Daemon-restart reconcile | ✅ | fresh maps re-programmed from the endpoint store; completes deletes for pods torn down while the daemon was dead |
+| Cross-node pod routing over BGP | ✅ | eBGP-exchanged pod CIDRs tee into each node's eBPF FIB — kernel forwarding off end to end; `cradle_cni_bgp` |
+| ClusterIP Services (eBPF L4 LB) | ✅ | `cradle-k8s` Service/EndpointSlice sync (`AddService` replaces, `DelService` removes, periodic resync); `cradle_cni_svc` |
+| DaemonSet packaging + kind e2e | ✅ | conflist rendered from Node podCIDR; nginx ClusterIP proven served by the eBPF DNAT (`l4_dnat > 0`) |
+| Host-network-backed services | 🔶 | intentionally left to kube-proxy: unprogrammed VIPs miss the eBPF FIB and fall through to the kernel (hybrid model) |
+| Dual-stack pods (IPv6 IPAM) | ⬜ | the datapath is fully dual-stack; the allocator/plumbing is v4-only today |
+| NodePort / hostPort / egress SNAT | ⬜ | ClusterIP only; no masquerade |
+| Full kube-proxy replacement | ⬜ | needs an egress reverse-NAT hook for node-local backends |
+
+## Cilium compatibility status
+
+Story 2 of `docs/design/cni-cilium.md`: expose Cilium-compatible surfaces so
+the Cilium ecosystem (the stock `cilium-cni` plugin, `kubectl get
+ciliumendpoints`, chaining deployments) works against a cradle node — while
+gaining the routing stack underneath. ⬜ = planned, in roadmap order.
+
+| Surface | Status | Notes |
+|---|---|---|
+| cilium-agent REST API subset (`cilium.sock`) | ⬜ | `/healthz`, `/config`, `/ipam`, `/endpoint/{id}` — the stock `cilium-cni` binary as a drop-in front end (M5) |
+| `CiliumEndpoint` / `CiliumNode` CRDs | ⬜ | kubectl-visible endpoints; cluster-pool IPAM via the stock cilium-operator (M6) |
+| Generic-veth CNI chaining | ⬜ | real Cilium chained on top for policy/observability while cradle owns routing and the FIB (M7) |
+| NetworkPolicy / identity enforcement | ⬜ | native `IDENTITY`/`POLICY` maps + verdict in `cradle_tc`; k8s NetworkPolicy semantics first (M8) |
+| Hubble API | ⬜ | out of scope for this arc |
