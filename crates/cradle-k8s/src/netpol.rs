@@ -279,7 +279,7 @@ pub fn endpoint_policy(
         port: 0,
     };
     // Kubelet probes come from the node — always allowed inbound.
-    let mut rules = vec![host_rule.clone()];
+    let mut rules = vec![host_rule];
     // Node-originated traffic never traverses the veth TC ingress hook, so an
     // admitted probe leaves no PCT entry — the pod's probe *replies* need an
     // explicit egress allow to the host (docs/design/policy.md).
