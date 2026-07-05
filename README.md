@@ -127,7 +127,7 @@ Function taxonomy after
 [Vinbero's roadmap](https://github.com/takehaya/Vinbero/blob/main/docs/loadmap.md),
 extended with the RFC 9800 compression flavors (uSID/NEXT-C-SID actions and
 REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
-🔶 = partial, ⬜ = not yet.
+🔶 = partial, ⬜ = not yet, 🚫 = no plan.
 
 ### Headend behaviors
 
@@ -154,7 +154,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | End.DT6 | ✅ | decap + per-VRF v6 lookup |
 | End.DT46 | ✅ | dual-family; the BGP L3VPN service SID |
 | End.B6.Encaps / .Red | ✅ | Binding SID: End walk + policy push in XDP (Reduced form on the wire) |
-| End.B6.Insert | ⬜ | deprecated insert form |
+| End.B6.Insert | 🚫 | deprecated insert form — no plan (End.B6.Encaps.Red supersedes it) |
 | End.BM | ⬜ | |
 | End.M (mirror) | ✅ | egress protection: repair-decap + mirror-context lookup + service decap |
 | End.Replicate | ⬜ | BUM replication uses per-remote slots instead |
@@ -186,14 +186,15 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 
 Producers that program the eBPF data plane: cradle's own gRPC/JSON API for
 static entries, and zebra-rs protocol machinery through the `FibHandle` tee
-for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet.
+for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet,
+🚫 = no plan.
 
 | Producer | Data plane | Status | Notes |
 |---|---|---|---|
 | Static ILM (gRPC/JSON) | MPLS | ✅ | `AddIlm`/`DelIlm` + labels on nexthops |
 | IS-IS SR (SR-MPLS) | MPLS | ✅ | prefix SIDs / SRGB → ILM + out-labels teed |
 | BGP L3VPN (VPNv4/v6 over MPLS) | MPLS | ✅ | per-VRF VPN label, `cradle_l3vpn_zebra` |
-| LDP | MPLS | ⬜ | no producer in zebra-rs |
+| LDP | MPLS | 🚫 | no plan — zebra-rs has no LDP producer and none is planned (SR-MPLS is the label-distribution path) |
 | SR-MPLS TI-LFA | MPLS | ✅ | protected-nexthop tee (repair label stack as backup) + link-down failover; `cradle_tilfa_mpls` |
 | Static SRv6 config (gRPC/JSON) | SRv6 | ✅ | every SRv6 function above |
 | IS-IS SRv6 (locators, uN/uA) | SRv6 | ✅ | locator routes + local SIDs teed |
