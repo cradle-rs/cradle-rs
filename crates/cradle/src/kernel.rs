@@ -22,7 +22,7 @@ use cradle_common::FIB_F_LOCAL;
 
 /// Connected nexthops get ids in high ranges keyed by ifindex, so they never
 /// collide with control-plane-assigned ids (zebra-rs tee starts at 1).
-const CONNECTED_NH_BASE_V4: u32 = 1_000_000;
+pub const CONNECTED_NH_BASE_V4: u32 = 1_000_000;
 const CONNECTED_NH_BASE_V6: u32 = 2_000_000;
 
 /// Install local + connected routes for `name` (ifindex `ifindex`) from its
@@ -110,6 +110,36 @@ pub fn add_local_route_v4(vip: Ipv4Addr) -> Result<()> {
     }
     info!("installed local route {dst} dev lo (L7 VIP delivery)");
     Ok(())
+}
+
+/// Install a kernel host route to a pod IP via its host-side veth
+/// (`ip route replace <ip>/32 dev <dev>`). `bpf_redirect_neigh` runs a kernel
+/// FIB + neighbor lookup, so the kernel needs this route to resolve the pod's
+/// MAC over the veth; it also lets node-originated traffic reach the pod.
+/// Idempotent (`replace`).
+pub fn replace_dev_route_v4(ip: Ipv4Addr, dev: &str) -> Result<()> {
+    let dst = format!("{ip}/32");
+    let out = Command::new("ip")
+        .args(["route", "replace", &dst, "dev", dev])
+        .output()
+        .with_context(|| format!("running `ip route replace {dst} dev {dev}`"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip route replace {dst} dev {dev}` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Remove the kernel host route installed by [`replace_dev_route_v4`].
+/// Best-effort: a missing route (or already-deleted device) is not an error,
+/// so endpoint deletion stays idempotent.
+pub fn del_dev_route_v4(ip: Ipv4Addr, dev: &str) {
+    let dst = format!("{ip}/32");
+    let _ = Command::new("ip")
+        .args(["route", "del", &dst, "dev", dev])
+        .output();
 }
 
 /// Create an up'd veth pair (EVPN BUM replication slots). Idempotent-ish:

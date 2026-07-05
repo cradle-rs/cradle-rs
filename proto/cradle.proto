@@ -259,6 +259,59 @@ message Service {
   repeated Backend backends = 5;
 }
 
+// Remove a service by its (vip, port, proto) key. Idempotent. Re-sending
+// AddService for an existing key replaces its backend set, so Add + Del is
+// the complete reconcile surface a Kubernetes Service controller needs.
+message ServiceDel {
+  string vip = 1;
+  uint32 port = 2;
+  string proto = 3;  // tcp | udp
+}
+
+// ---- Kubernetes CNI support ----
+//
+// The cradle-cni plugin (CNI ADD/DEL) drives these: AllocIp draws a pod
+// address from the node's pod CIDR (the daemon owns the allocator so state
+// survives plugin invocations), and CreateEndpoint programs the datapath for
+// a pod veth the plugin has already plumbed — SetPort on the host-side veth,
+// the pod /32 FIB route via a connected nexthop, and the kernel twin route
+// `bpf_redirect_neigh` resolves the pod's neighbor entry through. Endpoint
+// records persist under the daemon's state dir for CHECK/GC and restarts.
+
+message AllocIpRequest {
+  string pool = 1;   // pod CIDR, e.g. "10.244.0.0/24"
+  string owner = 2;  // "<container_id>/<ifname>" — alloc is idempotent per owner
+}
+
+message AllocIpReply {
+  string ip = 1;
+  uint32 prefix_len = 2;  // the pool's prefix length
+}
+
+message ReleaseIpRequest {
+  string owner = 1;  // release by owner…
+  string ip = 2;     // …or by address (either may be empty)
+}
+
+message CniEndpoint {
+  string container_id = 1;
+  string ifname = 2;        // pod-side interface name (usually eth0)
+  string netns = 3;         // pod netns path (bookkeeping for CHECK/GC)
+  string host_if = 4;       // host-side veth name
+  string ip = 5;            // pod IPv4 address
+  uint32 vrf_id = 6;        // VRF table (0 = global)
+  uint32 host_ifindex = 7;  // filled by the server on create; echoed on list
+}
+
+message CniEndpointKey {
+  string container_id = 1;
+  string ifname = 2;
+}
+
+message CniEndpointList {
+  repeated CniEndpoint endpoints = 1;
+}
+
 message StatsRequest {}
 
 // One datapath counter: a packet count at a forwarding decision point.
@@ -316,6 +369,12 @@ service Cradle {
   rpc AddMirrorRoute(MirrorRoute) returns (Empty);
   rpc DelMirrorRoute(MirrorRouteDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
+  rpc DelService(ServiceDel) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
+  rpc AllocIp(AllocIpRequest) returns (AllocIpReply);
+  rpc ReleaseIp(ReleaseIpRequest) returns (Empty);
+  rpc CreateEndpoint(CniEndpoint) returns (Empty);
+  rpc DeleteEndpoint(CniEndpointKey) returns (Empty);
+  rpc ListEndpoints(Empty) returns (CniEndpointList);
 }

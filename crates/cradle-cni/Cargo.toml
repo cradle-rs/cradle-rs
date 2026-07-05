@@ -1,0 +1,24 @@
+[package]
+name = "cradle-cni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kubernetes CNI plugin (spec 1.1) that attaches pods to the cradle-rs eBPF data plane"
+
+[[bin]]
+name = "cradle-cni"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+anyhow = { workspace = true }

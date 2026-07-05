@@ -191,7 +191,8 @@ impl Dataplane {
 
     /// Install an L4 service VIP and its backend set. `svc_id` namespaces the
     /// backend slots; the data plane picks a backend at random per new flow and
-    /// connection-tracks it.
+    /// connection-tracks it. Re-adding an existing service replaces its backend
+    /// set (stale higher slots from a previously larger set are removed).
     pub fn service_add(
         &mut self,
         svc_id: u32,
@@ -200,13 +201,15 @@ impl Dataplane {
         proto: u8,
         backends: &[(std::net::Ipv4Addr, u16)],
     ) -> Result<()> {
+        let key = ServiceKey {
+            vip: util::ipv4_to_map(vip),
+            port: util::port_to_map(port),
+            proto,
+            _pad: 0,
+        };
+        let old = self.services.get(&key, 0).ok();
         self.services.insert(
-            ServiceKey {
-                vip: util::ipv4_to_map(vip),
-                port: util::port_to_map(port),
-                proto,
-                _pad: 0,
-            },
+            key,
             ServiceInfo {
                 backend_count: backends.len() as u16,
                 lb_algo: LB_ALGO_RANDOM,
@@ -230,10 +233,43 @@ impl Dataplane {
                 0,
             )?;
         }
+        if let Some(old) = old {
+            for slot in backends.len() as u16..old.backend_count {
+                let _ = self.backends.remove(&BackendKey {
+                    svc_id: old.svc_id,
+                    slot,
+                    _pad: 0,
+                });
+            }
+        }
         Ok(())
     }
 
-    /// Install an IPv6 service VIP and its backend set.
+    /// Remove an L4 service VIP and its backend slots. Idempotent — an unknown
+    /// service is a no-op. Existing conntracked flows drain via the LRU.
+    pub fn service_del(&mut self, vip: std::net::Ipv4Addr, port: u16, proto: u8) -> Result<()> {
+        let key = ServiceKey {
+            vip: util::ipv4_to_map(vip),
+            port: util::port_to_map(port),
+            proto,
+            _pad: 0,
+        };
+        let Ok(info) = self.services.get(&key, 0) else {
+            return Ok(());
+        };
+        for slot in 0..info.backend_count {
+            let _ = self.backends.remove(&BackendKey {
+                svc_id: info.svc_id,
+                slot,
+                _pad: 0,
+            });
+        }
+        self.services.remove(&key)?;
+        Ok(())
+    }
+
+    /// Install an IPv6 service VIP and its backend set (same replace
+    /// semantics as [`Self::service_add`]).
     pub fn service6_add(
         &mut self,
         svc_id: u32,
@@ -242,13 +278,15 @@ impl Dataplane {
         proto: u8,
         backends: &[(Ipv6Addr, u16)],
     ) -> Result<()> {
+        let key = ServiceKey6 {
+            vip: vip.octets(),
+            port: util::port_to_map(port),
+            proto,
+            _pad: 0,
+        };
+        let old = self.services6.get(&key, 0).ok();
         self.services6.insert(
-            ServiceKey6 {
-                vip: vip.octets(),
-                port: util::port_to_map(port),
-                proto,
-                _pad: 0,
-            },
+            key,
             ServiceInfo {
                 backend_count: backends.len() as u16,
                 lb_algo: LB_ALGO_RANDOM,
@@ -272,6 +310,37 @@ impl Dataplane {
                 0,
             )?;
         }
+        if let Some(old) = old {
+            for slot in backends.len() as u16..old.backend_count {
+                let _ = self.backends6.remove(&BackendKey {
+                    svc_id: old.svc_id,
+                    slot,
+                    _pad: 0,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove an IPv6 service VIP and its backend slots (idempotent).
+    pub fn service6_del(&mut self, vip: Ipv6Addr, port: u16, proto: u8) -> Result<()> {
+        let key = ServiceKey6 {
+            vip: vip.octets(),
+            port: util::port_to_map(port),
+            proto,
+            _pad: 0,
+        };
+        let Ok(info) = self.services6.get(&key, 0) else {
+            return Ok(());
+        };
+        for slot in 0..info.backend_count {
+            let _ = self.backends6.remove(&BackendKey {
+                svc_id: info.svc_id,
+                slot,
+                _pad: 0,
+            });
+        }
+        self.services6.remove(&key)?;
         Ok(())
     }
 

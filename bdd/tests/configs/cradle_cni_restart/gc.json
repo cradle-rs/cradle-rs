@@ -1,0 +1,10 @@
+{
+  "cniVersion": "1.1.0",
+  "name": "cradle",
+  "type": "cradle-cni",
+  "grpcEndpoint": "unix:/tmp/cradle_cni_restart_ctl.sock",
+  "ipam": { "type": "cradle", "subnet": "10.244.0.0/24" },
+  "cni.dev/valid-attachments": [
+    { "containerID": "pod1", "ifname": "eth0" }
+  ]
+}

@@ -229,6 +229,16 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                 .await?;
             println!("deleted {prefix}");
         }
+        CtlOp::DelService { vip, port, proto } => {
+            client
+                .del_service(pb::ServiceDel {
+                    vip: vip.clone(),
+                    port: port as u32,
+                    proto,
+                })
+                .await?;
+            println!("deleted service {vip}:{port}");
+        }
         CtlOp::GenRoutes {
             count,
             seed,

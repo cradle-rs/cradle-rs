@@ -841,6 +841,30 @@ async fn cradle_gen_routes(
     println!("✓ {} in {}", out.trim(), scoped);
 }
 
+/// Delete one L4 service via `cradle ctl del-service`.
+#[when(
+    expr = "I delete cradle service {string} port {int} via gRPC as {string} in namespace {string}"
+)]
+async fn cradle_del_service(
+    world: &mut World,
+    vip: String,
+    port: u16,
+    sock: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    netns::exec_in_netns(
+        &scoped,
+        &cradle,
+        &["ctl", "--grpc", &ep, "del-service", &vip, &port.to_string()],
+    )
+    .await
+    .expect("del-service failed");
+    println!("✓ service {}:{} deleted in {}", vip, port, scoped);
+}
+
 /// Delete one IPv4 route via `cradle ctl del-route`.
 #[when(expr = "I delete cradle route {string} via gRPC as {string} in namespace {string}")]
 async fn cradle_del_route(world: &mut World, prefix: String, sock: String, namespace: String) {
@@ -1096,6 +1120,229 @@ async fn resume_zebra_tee(world: &mut World, namespace: String) {
     println!("✓ zebra-rs resumed in namespace {}", world.ns(&namespace));
 }
 
+// ------------------------------- CNI steps --------------------------------
+
+/// Resolve the cradle-cni plugin binary (overridable via $CRADLE_CNI).
+fn cradle_cni_bin() -> String {
+    std::env::var("CRADLE_CNI")
+        .unwrap_or_else(|_| format!("{}/../target/debug/cradle-cni", env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Per-feature CNI state dir for a cradle node (IPAM + endpoint records).
+fn cni_state_dir(world: &World, namespace: &str) -> String {
+    format!("/tmp/{}_state", world.ns(namespace))
+}
+
+/// Spawn cradle as a CNI node with a per-feature `--state-dir`. `wipe_state`
+/// clears it first (fresh IPAM — the deterministic pod addresses the features
+/// assert must not shift after a crashed prior run); the restart step keeps
+/// it so allocations and endpoint records survive.
+async fn spawn_cradle_cni_node(
+    world: &World,
+    namespace: &str,
+    config: &str,
+    sock: &str,
+    wipe_state: bool,
+) {
+    let scoped = world.ns(namespace);
+    let pid = world.pid_file(namespace);
+    let cfg = config_in(world, config);
+    let ep = grpc_sock(world, sock);
+    let state = cni_state_dir(world, namespace);
+    if wipe_state {
+        let _ = tokio::process::Command::new("sudo")
+            .args(["rm", "-rf", &state])
+            .status()
+            .await;
+    }
+    let log = format!("logs/{}.cradle.log", scoped);
+    let cmd = format!(
+        "exec {} serve --config {} --grpc {} --state-dir {} --pid-file {} >> {} 2>&1",
+        cradle_bin(),
+        cfg,
+        ep,
+        state,
+        pid,
+        log
+    );
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info,cradle=debug")],
+        "sh",
+        &["-c", &cmd],
+    )
+    .await
+    .expect("Failed to start cradle CNI node");
+    await_cradle(&scoped, &pid).await;
+    println!(
+        "✓ cradle CNI node started in {} (gRPC {}, state {}{})",
+        scoped,
+        ep,
+        state,
+        if wipe_state { ", wiped" } else { ", kept" }
+    );
+}
+
+#[when(
+    expr = "I start cradle CNI node in namespace {string} with config {string} serving gRPC as {string}"
+)]
+async fn start_cradle_cni_node(world: &mut World, namespace: String, config: String, sock: String) {
+    spawn_cradle_cni_node(world, &namespace, &config, &sock, true).await;
+}
+
+/// Restart after `I stop cradle in namespace …` (kill -9): the state dir is
+/// KEPT, so the daemon must reconcile its persisted endpoints into the fresh
+/// eBPF maps and keep allocating from where IPAM left off.
+#[when(
+    expr = "I restart cradle CNI node in namespace {string} with config {string} serving gRPC as {string}"
+)]
+async fn restart_cradle_cni_node(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    sock: String,
+) {
+    spawn_cradle_cni_node(world, &namespace, &config, &sock, false).await;
+}
+
+#[when(expr = "I stop cradle CNI node in namespace {string}")]
+async fn stop_cradle_cni_node(world: &mut World, namespace: String) {
+    if keep_topology() {
+        println!(
+            "⏭  BDD_KEEP set — leaving cradle CNI node running in namespace {}",
+            world.ns(&namespace)
+        );
+        return;
+    }
+    let pid = world.pid_file(&namespace);
+    let _ = netns::kill_pidfile(Path::new(&pid)).await;
+    let state = cni_state_dir(world, &namespace);
+    let _ = tokio::process::Command::new("sudo")
+        .args(["rm", "-rf", &state])
+        .status()
+        .await;
+    println!("✓ cradle CNI node stopped in {}", world.ns(&namespace));
+}
+
+/// Invoke the cradle-cni plugin the way the container runtime would: CNI_*
+/// environment + the network configuration on stdin, executed inside the
+/// node's namespace (the plugin creates the host-side veth there and reaches
+/// the daemon's unix socket; netns names are host-global, so the pod netns is
+/// addressable from within the node). Returns (success, stdout ⊕ stderr).
+async fn run_cni(
+    world: &World,
+    verb: &str,
+    node: &str,
+    pod: &str,
+    container: &str,
+    config: &str,
+) -> (bool, String) {
+    let node_ns = world.ns(node);
+    let pod_ns = world.ns(pod);
+    let cfg_path = config_in(world, config);
+    let conf = std::fs::read_to_string(&cfg_path)
+        .unwrap_or_else(|e| panic!("failed to read CNI netconf {cfg_path}: {e}"));
+    let mut child = tokio::process::Command::new("sudo")
+        .args(["ip", "netns", "exec", &node_ns, "env"])
+        .arg(format!("CNI_COMMAND={verb}"))
+        .arg(format!("CNI_CONTAINERID={container}"))
+        .arg(format!("CNI_NETNS=/var/run/netns/{pod_ns}"))
+        .arg("CNI_IFNAME=eth0")
+        .arg("CNI_PATH=/opt/cni/bin")
+        .arg(cradle_cni_bin())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn cradle-cni in {node_ns}: {e}"));
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stdin = child.stdin.take().expect("cni stdin");
+        stdin
+            .write_all(conf.as_bytes())
+            .await
+            .expect("write netconf");
+    }
+    let out = child.wait_with_output().await.expect("cradle-cni run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+#[when(
+    expr = "I run CNI ADD for container {string} in pod namespace {string} on node {string} with config {string} expecting {string}"
+)]
+async fn cni_add(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+    expected: String,
+) {
+    let (ok, out) = run_cni(world, "ADD", &node, &pod, &container, &config).await;
+    assert!(ok, "cradle-cni ADD for {container} failed: {out}");
+    assert!(
+        out.contains(&expected),
+        "cradle-cni ADD result for {container} does not contain {expected:?}: {out}"
+    );
+    println!("✓ CNI ADD {} -> {}", container, out.trim());
+}
+
+#[when(
+    expr = "I run CNI DEL for container {string} in pod namespace {string} on node {string} with config {string}"
+)]
+async fn cni_del(world: &mut World, container: String, pod: String, node: String, config: String) {
+    let (ok, out) = run_cni(world, "DEL", &node, &pod, &container, &config).await;
+    assert!(ok, "cradle-cni DEL for {container} failed: {out}");
+    println!("✓ CNI DEL {}", container);
+}
+
+#[when(
+    expr = "I run CNI CHECK for container {string} in pod namespace {string} on node {string} with config {string}"
+)]
+async fn cni_check_ok(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+) {
+    let (ok, out) = run_cni(world, "CHECK", &node, &pod, &container, &config).await;
+    assert!(ok, "cradle-cni CHECK for {container} failed: {out}");
+    println!("✓ CNI CHECK {} ok", container);
+}
+
+#[then(
+    expr = "CNI CHECK for container {string} in pod namespace {string} on node {string} with config {string} should fail"
+)]
+async fn cni_check_fail(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+) {
+    let (ok, out) = run_cni(world, "CHECK", &node, &pod, &container, &config).await;
+    assert!(
+        !ok,
+        "cradle-cni CHECK for {container} unexpectedly succeeded: {out}"
+    );
+    println!("✓ CNI CHECK {} failed (as expected)", container);
+}
+
+/// GC takes no attachment parameters — the netconf carries the runtime's
+/// `cni.dev/valid-attachments` list; everything else is swept.
+#[when(expr = "I run CNI GC on node {string} with config {string}")]
+async fn cni_gc(world: &mut World, node: String, config: String) {
+    let (ok, out) = run_cni(world, "GC", &node, "", "gc", &config).await;
+    assert!(ok, "cradle-cni GC failed: {out}");
+    println!("✓ CNI GC ran on {}", node);
+}
+
 // ------------------------------ HTTP service ------------------------------
 
 /// Serve a fixed HTTP body from a namespace (a backend behind an L4/L7 VIP).
@@ -1178,6 +1425,70 @@ async fn http_get_contains(world: &mut World, url: String, namespace: String, ne
         "HTTP GET {} from {} did not return {:?}",
         url, scoped, needle
     );
+}
+
+/// Poll until an HTTP GET stops succeeding (a deleted service VIP: new flows
+/// miss the DNAT and black-hole). Mirrors `ping … should fail`: the common
+/// case (already dead) breaks on the first probe.
+#[then(expr = "HTTP GET {string} from namespace {string} should fail")]
+async fn http_get_fails(world: &mut World, url: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 10;
+    for i in 0..ATTEMPTS {
+        let ok = matches!(
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await,
+            Ok(s) if !s.trim().is_empty()
+        );
+        if !ok {
+            println!("✓ HTTP GET {} from {} failed (as expected)", url, scoped);
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "HTTP GET {} from {} still succeeded after waiting for it to fail",
+        url, scoped
+    );
+}
+
+/// Every answered request must return exactly `needle` — asserts a service
+/// whose backend set shrank really stopped balancing to the removed backend.
+#[then(
+    expr = "HTTP GET {string} from namespace {string} returns only {string} over {int} requests"
+)]
+async fn http_get_only(
+    world: &mut World,
+    url: String,
+    namespace: String,
+    needle: String,
+    tries: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let mut ok = 0u64;
+    for _ in 0..tries {
+        if let Ok(s) =
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await
+        {
+            let body = s.trim().to_string();
+            if !body.is_empty() {
+                assert_eq!(
+                    body, needle,
+                    "expected only {needle:?} from {url}, got {body:?}"
+                );
+                ok += 1;
+            }
+        }
+    }
+    assert!(
+        ok * 10 >= tries * 8,
+        "too few HTTP responses from {}: {}/{}",
+        scoped,
+        ok,
+        tries
+    );
+    println!("✓ {}/{} responses, all {:?}", ok, tries, needle);
 }
 
 #[then(

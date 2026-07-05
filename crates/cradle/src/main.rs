@@ -6,6 +6,7 @@
 //! routing control plane will eventually drive.
 
 mod bench;
+mod cni;
 mod config;
 mod control;
 mod ctl;
@@ -72,6 +73,10 @@ struct ServeArgs {
     /// Write this process's PID to this file at startup (for test harnesses).
     #[arg(long)]
     pid_file: Option<PathBuf>,
+    /// Directory for persistent CNI state (IPAM allocations + endpoint
+    /// records) — survives daemon restarts.
+    #[arg(long, default_value = "/run/cradle")]
+    state_dir: PathBuf,
     /// IPv4 FIB engine: `lpm` (default) or `dir24` (DIR-24-8 direct-index —
     /// sizes TBL24/TBL8 at load; ~68 MiB, full-DFZ capacity). Load-time only;
     /// the JSON config's `fib4_mode` applies when this flag is not given.
@@ -110,6 +115,16 @@ pub enum CtlOp {
     DelRoute {
         /// Prefix, e.g. "10.0.9.16/28".
         prefix: String,
+    },
+    /// Delete one L4 service by its (vip, port, proto) key.
+    DelService {
+        /// Service VIP, e.g. "10.96.0.10".
+        vip: String,
+        /// Service port.
+        port: u16,
+        /// Protocol: tcp or udp.
+        #[arg(default_value = "tcp")]
+        proto: String,
     },
     /// Generate and bulk-install a synthetic route table with a DFZ-like
     /// prefix-length distribution (deterministic per seed).
@@ -205,11 +220,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
         dp.set_fib4_mode_dir24()?;
         info!("IPv4 FIB engine: dir24 (DIR-24-8 direct index)");
     }
-    let control = Control::new(bpf, dp);
+    let control = Control::new(bpf, dp, args.state_dir.clone());
 
     if let Some(cfg) = &cfg {
         cfg.apply_control(&control).await?;
     }
+
+    // Re-program persisted CNI endpoints into the fresh maps (restart
+    // survival); completes deletes for pods torn down while we were dead.
+    control.cni_reconcile().await;
 
     // Start the L7 transparent proxy (no-op for traffic until an L7 service is
     // configured; best-effort if the transparent bind is unavailable).

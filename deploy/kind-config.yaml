@@ -1,0 +1,9 @@
+# Single-node kind cluster for the cradle CNI e2e: the default CNI (kindnetd)
+# is disabled — cradle provides pod networking; kube-proxy stays enabled and
+# serves the host-network-backed services cradle-k8s intentionally skips.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+nodes:
+- role: control-plane
