@@ -49,12 +49,12 @@ use cradle_common::{
     STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
     STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP,
-    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
-    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
-    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
-    STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
-    XDP_META_MAGIC_L2,
+    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    STAT_NH_BACKUP, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2,
+    STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT,
+    STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE,
+    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC, XDP_META_MAGIC_DX,
+    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -190,6 +190,14 @@ static POLICY: HashMap<PolicyKey, u8> = HashMap::with_max_entries(65536, 0);
 /// Pod-initiated flows (pre-NAT 5-tuples): replies bypass ingress policy.
 #[map]
 static PCT: LruHashMap<CtKey, u8> = LruHashMap::with_max_entries(65536, 0);
+
+// --- egress masquerade (docs/design/kube-proxy-dualstack.md, K2) ---
+/// `[0]` = this node's uplink IPv4 (map-encoded); 0 = masquerade disabled.
+#[map]
+static MASQ_CFG: Array<u32> = Array::with_max_entries(1, 0);
+/// CIDRs never masqueraded (pod CIDR, service CIDR, connected fabric).
+#[map]
+static NON_MASQ: LpmTrie<[u8; 4], u8> = LpmTrie::with_max_entries(1024, 0);
 // L4 IPv6
 #[map]
 static SERVICES6: HashMap<ServiceKey6, ServiceInfo> = HashMap::with_max_entries(1024, 0);
@@ -398,13 +406,14 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
             return Ok(act);
         }
         // Pod egress: track the pre-NAT flow so replies pass ingress policy.
-        if port.flags & PORT_F_ENDPOINT != 0 {
+        let masq_src = port.flags & PORT_F_ENDPOINT != 0;
+        if masq_src {
             let _ = pct_track(ctx);
         }
         // L4 NAT is a best-effort pre-routing stage; it rewrites the packet in
-        // place (service DNAT / reverse SNAT) so routing then targets the real
-        // endpoint. Failures fall through to plain routing.
-        let _ = l4_nat(ctx);
+        // place (service DNAT / reverse SNAT / egress masquerade) so routing
+        // then targets the real endpoint. Failures fall through to routing.
+        let _ = l4_nat(ctx, masq_src);
         l3_forward(ctx, port.vrf_id)
     } else {
         Ok(TC_ACT_PIPE as i32)
@@ -491,11 +500,11 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool) -> i32 {
 // ================================ L4 NAT ===================================
 
 #[inline(always)]
-fn l4_nat(ctx: &TcContext) -> Result<(), ()> {
+fn l4_nat(ctx: &TcContext, masq_src: bool) -> Result<(), ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     match u16::from_be(ethertype) {
-        ETH_P_IP => l4_nat_v4(ctx),
-        ETH_P_IPV6 => l4_nat_v6(ctx),
+        ETH_P_IP => l4_nat_v4(ctx, masq_src),
+        ETH_P_IPV6 => l4_nat_v6(ctx), // v6 masquerade is a K-arc follow-on
         _ => Ok(()),
     }
 }
@@ -605,8 +614,77 @@ fn policy_denied(ctx: &TcContext, ep: u32) -> Result<bool, ()> {
     Ok(true)
 }
 
+/// Egress masquerade (docs/design/kube-proxy-dualstack.md, K2): a new pod
+/// flow (`masq_src`) to a destination outside the cluster is SNAT'd to the
+/// node's uplink IP (source port preserved). Two CT entries fold the reverse
+/// into the existing `l4_nat` established branch: the reply arriving on the
+/// uplink un-DNATs back to the pod, and a retransmit re-SNATs identically.
+/// `dst` in a `NON_MASQ` CIDR (pod/service/fabric) is left untouched.
 #[inline(always)]
-fn l4_nat_v4(ctx: &TcContext) -> Result<(), ()> {
+fn masq_v4(
+    ctx: &TcContext,
+    masq_src: bool,
+    src_ip: u32,
+    dst_ip: u32,
+    sport: u16,
+    dport: u16,
+    proto: u8,
+) -> Result<(), ()> {
+    if !masq_src {
+        return Ok(());
+    }
+    let node = match MASQ_CFG.get(0) {
+        Some(&n) if n != 0 => n,
+        _ => return Ok(()), // masquerade disabled
+    };
+    let dst_bytes: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
+    if NON_MASQ.get(&Key::new(32, dst_bytes)).is_some() {
+        return Ok(()); // in-cluster / fabric destination — no masquerade
+    }
+    let now = unsafe { bpf_ktime_get_ns() };
+    // Forward: retransmits re-SNAT pod → node (source port preserved).
+    let _ = CT.insert(
+        &CtKey {
+            src: src_ip,
+            dst: dst_ip,
+            src_port: sport,
+            dst_port: dport,
+            proto,
+            _pad: [0; 3],
+        },
+        &CtEntry {
+            rev_addr: node,
+            rev_port: sport,
+            flags: CT_F_SNAT,
+            last_seen: now,
+        },
+        0,
+    );
+    // Reverse: the reply (ext → node:sport) DNATs back to the pod.
+    let _ = CT.insert(
+        &CtKey {
+            src: dst_ip,
+            dst: node,
+            src_port: dport,
+            dst_port: sport,
+            proto,
+            _pad: [0; 3],
+        },
+        &CtEntry {
+            rev_addr: src_ip,
+            rev_port: sport,
+            flags: CT_F_DNAT,
+            last_seen: now,
+        },
+        0,
+    );
+    snat(ctx, proto, src_ip, sport, node, sport)?;
+    stat_inc(STAT_MASQ);
+    Ok(())
+}
+
+#[inline(always)]
+fn l4_nat_v4(ctx: &TcContext, masq_src: bool) -> Result<(), ()> {
     let ver_ihl: u8 = ctx.load(IP_VER_IHL_OFF).map_err(|_| ())?;
     if ver_ihl & 0x0f != 5 {
         return Ok(()); // IPv4 options present: skip NAT
@@ -649,7 +727,8 @@ fn l4_nat_v4(ctx: &TcContext) -> Result<(), ()> {
         _pad: 0,
     }) {
         Some(s) => unsafe { *s },
-        None => return Ok(()),
+        // Not a service — masquerade a pod egress to outside the cluster.
+        None => return masq_v4(ctx, masq_src, src_ip, dst_ip, sport, dport, proto),
     };
     if svc.backend_count == 0 {
         return Ok(());

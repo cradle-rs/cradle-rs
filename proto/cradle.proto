@@ -355,6 +355,17 @@ message EndpointPolicy {
   repeated PolicyRule rules = 5;
 }
 
+// ---- egress masquerade (docs/design/kube-proxy-dualstack.md) ----
+
+message MasqNode {
+  string node = 1;  // uplink IPv4 to SNAT to; empty = disable masquerade
+}
+
+message NonMasq {
+  string cidr = 1;  // "a.b.c.d/len" — never masqueraded (pod/service/fabric)
+  bool del = 2;
+}
+
 message StatsRequest {}
 
 // One datapath counter: a packet count at a forwarding decision point.
@@ -415,6 +426,8 @@ service Cradle {
   rpc DelService(ServiceDel) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
+  rpc SetMasqNode(MasqNode) returns (Empty);
+  rpc SetNonMasq(NonMasq) returns (Empty);
   rpc SetIdentity(Identity) returns (Empty);
   rpc DelIdentity(IdentityDel) returns (Empty);
   rpc SetEndpointPolicy(EndpointPolicy) returns (Empty);
