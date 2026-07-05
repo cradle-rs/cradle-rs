@@ -760,6 +760,7 @@ impl Control {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_service(
         &self,
         svc_id: u32,
@@ -767,11 +768,12 @@ impl Control {
         port: u16,
         proto: u8,
         backends: &[(Ipv4Addr, u16)],
+        affinity: bool,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .service_add(svc_id, vip, port, proto, backends)?;
+            .service_add(svc_id, vip, port, proto, backends, affinity)?;
         Ok(())
     }
 
@@ -785,6 +787,7 @@ impl Control {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_service6(
         &self,
         svc_id: u32,
@@ -792,11 +795,12 @@ impl Control {
         port: u16,
         proto: u8,
         backends: &[(Ipv6Addr, u16)],
+        affinity: bool,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .service6_add(svc_id, vip, port, proto, backends)?;
+            .service6_add(svc_id, vip, port, proto, backends, affinity)?;
         Ok(())
     }
 
@@ -1656,7 +1660,7 @@ impl Cradle for GrpcService {
                     .map(|b| Ok((b.ip.parse::<Ipv4Addr>().map_err(st)?, b.port as u16)))
                     .collect::<Result<Vec<_>, Status>>()?;
                 self.control
-                    .add_service(s.svc_id, v4, s.port as u16, proto, &backends)
+                    .add_service(s.svc_id, v4, s.port as u16, proto, &backends, s.affinity)
                     .await
                     .map_err(st)?;
             }
@@ -1667,7 +1671,7 @@ impl Cradle for GrpcService {
                     .map(|b| Ok((b.ip.parse::<Ipv6Addr>().map_err(st)?, b.port as u16)))
                     .collect::<Result<Vec<_>, Status>>()?;
                 self.control
-                    .add_service6(s.svc_id, v6, s.port as u16, proto, &backends)
+                    .add_service6(s.svc_id, v6, s.port as u16, proto, &backends, s.affinity)
                     .await
                     .map_err(st)?;
             }

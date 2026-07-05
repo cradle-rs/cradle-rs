@@ -1694,6 +1694,44 @@ async fn http_get_only(
     println!("✓ {}/{} responses, all {:?}", ok, tries, needle);
 }
 
+/// Assert every answered request returned the *same* body (session affinity:
+/// one client sticks to one backend). Complements the `at least N distinct`
+/// LB assertion.
+#[then(
+    expr = "HTTP GET {string} from namespace {string} returns a single backend over {int} requests"
+)]
+async fn http_get_single_backend(world: &mut World, url: String, namespace: String, tries: u64) {
+    let scoped = world.ns(&namespace);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ok = 0u64;
+    for _ in 0..tries {
+        if let Ok(s) =
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await
+        {
+            let body = s.trim().to_string();
+            if !body.is_empty() {
+                ok += 1;
+                seen.insert(body);
+            }
+        }
+    }
+    assert!(
+        ok * 10 >= tries * 8,
+        "too few HTTP responses from {}: {}/{}",
+        scoped,
+        ok,
+        tries
+    );
+    assert_eq!(
+        seen.len(),
+        1,
+        "session affinity: expected one backend, got {} ({:?})",
+        seen.len(),
+        seen
+    );
+    println!("✓ {}/{} responses, all one backend: {:?}", ok, tries, seen);
+}
+
 #[then(
     expr = "HTTP GET {string} from namespace {string} returns at least {int} distinct responses over {int} requests"
 )]

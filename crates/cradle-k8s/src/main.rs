@@ -362,8 +362,8 @@ async fn apply(
     }
     let cl = cradle.as_mut().unwrap();
 
-    for (key, backends) in &desired {
-        if programmed.get(key) == Some(backends) {
+    for (key, svc) in &desired {
+        if programmed.get(key) == Some(svc) {
             continue;
         }
         cl.add_service(pb::Service {
@@ -371,7 +371,9 @@ async fn apply(
             vip: key.0.to_string(),
             port: key.1 as u32,
             proto: sync::proto_str(key.2).to_string(),
-            backends: backends
+            affinity: svc.affinity,
+            backends: svc
+                .backends
                 .iter()
                 .map(|(ip, port)| pb::Backend {
                     ip: ip.to_string(),
@@ -382,13 +384,14 @@ async fn apply(
         .await
         .with_context(|| format!("AddService {key:?}"))?;
         info!(
-            "service {}:{}/{} -> {} backend(s)",
+            "service {}:{}/{} -> {} backend(s){}",
             key.0,
             key.1,
             sync::proto_str(key.2),
-            backends.len()
+            svc.backends.len(),
+            if svc.affinity { " (ClientIP)" } else { "" }
         );
-        programmed.insert(*key, backends.clone());
+        programmed.insert(*key, svc.clone());
     }
 
     let stale: Vec<sync::Key> = programmed

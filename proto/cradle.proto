@@ -257,6 +257,7 @@ message Service {
   uint32 port = 3;
   string proto = 4;  // tcp | udp
   repeated Backend backends = 5;
+  bool affinity = 6;  // sessionAffinity: ClientIP
 }
 
 // Remove a service by its (vip, port, proto) key. Idempotent. Re-sending

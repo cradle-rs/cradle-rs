@@ -24,7 +24,7 @@ use cradle_common::{
     NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
     Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM,
     MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED,
-    STAT_MAX,
+    STAT_MAX, SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -208,6 +208,7 @@ impl Dataplane {
     /// backend slots; the data plane picks a backend at random per new flow and
     /// connection-tracks it. Re-adding an existing service replaces its backend
     /// set (stale higher slots from a previously larger set are removed).
+    #[allow(clippy::too_many_arguments)]
     pub fn service_add(
         &mut self,
         svc_id: u32,
@@ -215,7 +216,9 @@ impl Dataplane {
         port: u16,
         proto: u8,
         backends: &[(std::net::Ipv4Addr, u16)],
+        affinity: bool,
     ) -> Result<()> {
+        let svc_flags = if affinity { SVC_F_AFFINITY } else { 0 };
         let key = ServiceKey {
             vip: util::ipv4_to_map(vip),
             port: util::port_to_map(port),
@@ -228,7 +231,7 @@ impl Dataplane {
             ServiceInfo {
                 backend_count: backends.len() as u16,
                 lb_algo: LB_ALGO_RANDOM,
-                flags: 0,
+                flags: svc_flags,
                 svc_id,
             },
             0,
@@ -285,6 +288,7 @@ impl Dataplane {
 
     /// Install an IPv6 service VIP and its backend set (same replace
     /// semantics as [`Self::service_add`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn service6_add(
         &mut self,
         svc_id: u32,
@@ -292,7 +296,9 @@ impl Dataplane {
         port: u16,
         proto: u8,
         backends: &[(Ipv6Addr, u16)],
+        affinity: bool,
     ) -> Result<()> {
+        let svc_flags = if affinity { SVC_F_AFFINITY } else { 0 };
         let key = ServiceKey6 {
             vip: vip.octets(),
             port: util::port_to_map(port),
@@ -305,7 +311,7 @@ impl Dataplane {
             ServiceInfo {
                 backend_count: backends.len() as u16,
                 lb_algo: LB_ALGO_RANDOM,
-                flags: 0,
+                flags: svc_flags,
                 svc_id,
             },
             0,
