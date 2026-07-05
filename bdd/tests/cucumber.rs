@@ -1275,17 +1275,8 @@ async fn hubble_should_show_flow(
 ) {
     let scoped = world.ns(&node);
     let server = format!("unix://{}", hubble_sock(world, &hsock));
-    let bin = hubble_bin();
     for _ in 0..15 {
-        let out = netns::exec_in_netns(
-            &scoped,
-            &bin,
-            &[
-                "observe", "--server", &server, "--last", "500", "-o", "json",
-            ],
-        )
-        .await
-        .unwrap_or_default();
+        let out = hubble_observe(&scoped, &server, &[]).await;
         let hit = out.lines().any(|l| {
             l.contains(&format!("\"{verdict}\""))
                 && l.contains(&format!("\"{src}\""))
@@ -1298,6 +1289,112 @@ async fn hubble_should_show_flow(
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
     panic!("hubble observe never showed a {verdict} flow from {src} to {dst}");
+}
+
+/// Run `hubble observe --last 500 -o json` (plus any extra flags) in the node's
+/// namespace and return its newline-delimited JSON output.
+async fn hubble_observe(scoped: &str, server: &str, extra: &[&str]) -> String {
+    let bin = hubble_bin();
+    let mut args = vec!["observe", "--server", server, "--last", "500", "-o", "json"];
+    args.extend_from_slice(extra);
+    netns::exec_in_netns(scoped, &bin, &args)
+        .await
+        .unwrap_or_default()
+}
+
+/// True if any JSON flow line matches all of `needles` (whitespace-normalized,
+/// so JSON spacing doesn't matter).
+fn json_line_has(out: &str, needles: &[&str]) -> bool {
+    out.lines().any(|l| {
+        let compact: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+        needles.iter().all(|n| compact.contains(*n))
+    })
+}
+
+/// Poll `hubble observe` with a filter (e.g. "--namespace default --verdict
+/// DROPPED") until a flow with the given verdict + src/dst appears — proving
+/// server-side FlowFilter matching lets the flow through.
+#[then(
+    expr = "hubble observe on node {string} via Hubble {string} with filter {string} should show a {string} flow from {string} to {string}"
+)]
+async fn hubble_filtered_show(
+    world: &mut World,
+    node: String,
+    hsock: String,
+    filter: String,
+    verdict: String,
+    src: String,
+    dst: String,
+) {
+    let scoped = world.ns(&node);
+    let server = format!("unix://{}", hubble_sock(world, &hsock));
+    let flags: Vec<&str> = filter.split_whitespace().collect();
+    for _ in 0..15 {
+        let out = hubble_observe(&scoped, &server, &flags).await;
+        if json_line_has(
+            &out,
+            &[
+                &format!("\"{verdict}\""),
+                &format!("\"{src}\""),
+                &format!("\"{dst}\""),
+            ],
+        ) {
+            println!("✓ hubble observe [{filter}] saw {verdict} {src} -> {dst}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    panic!("hubble observe [{filter}] never showed a {verdict} flow from {src} to {dst}");
+}
+
+/// Prove a verdict filter *excludes* other verdicts: the verdict must be
+/// present unfiltered (non-vacuous), then absent once `filter` is applied.
+#[then(
+    expr = "hubble observe on node {string} via Hubble {string} with filter {string} should show no {string} flow"
+)]
+async fn hubble_filtered_absent(
+    world: &mut World,
+    node: String,
+    hsock: String,
+    filter: String,
+    verdict: String,
+) {
+    let scoped = world.ns(&node);
+    let server = format!("unix://{}", hubble_sock(world, &hsock));
+    let flags: Vec<&str> = filter.split_whitespace().collect();
+    let needle = format!("\"{verdict}\"");
+
+    let unfiltered = hubble_observe(&scoped, &server, &[]).await;
+    assert!(
+        unfiltered.lines().any(|l| l.contains(&needle)),
+        "sanity: {verdict} flows should exist unfiltered before asserting the filter hides them"
+    );
+    let filtered = hubble_observe(&scoped, &server, &flags).await;
+    let leaked = filtered.lines().any(|l| l.contains(&needle));
+    assert!(
+        !leaked,
+        "hubble observe [{filter}] leaked a {verdict} flow the filter should exclude"
+    );
+    println!("✓ hubble observe [{filter}] excluded all {verdict} flows");
+}
+
+/// Assert enrichment: some flow carries the given security identity (on either
+/// endpoint), proving IP→identity enrichment reached the Observer output.
+#[then(
+    expr = "hubble observe on node {string} via Hubble {string} should show a flow with identity {string}"
+)]
+async fn hubble_show_identity(world: &mut World, node: String, hsock: String, identity: String) {
+    let scoped = world.ns(&node);
+    let server = format!("unix://{}", hubble_sock(world, &hsock));
+    for _ in 0..15 {
+        let out = hubble_observe(&scoped, &server, &[]).await;
+        if json_line_has(&out, &[&format!("\"identity\":{identity}")]) {
+            println!("✓ hubble observe saw a flow with identity {identity}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    panic!("hubble observe never showed a flow with identity {identity}");
 }
 
 /// Restart after `I stop cradle in namespace …` (kill -9): the state dir is
