@@ -1,0 +1,7 @@
+{
+  "ports": [
+    { "name": "lan0", "l3": true },
+    { "name": "s-n", "l3": true },
+    { "name": "s-r1", "l3": true }
+  ]
+}

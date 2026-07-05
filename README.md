@@ -70,7 +70,7 @@ reverse `WatchFdb` channel reporting data-plane MAC learning back up.
 | IS-IS SR (SR-MPLS) | ✅ | prefix SIDs / SRGB → ILM + out-labels teed |
 | BGP L3VPN (VPNv4/v6 over MPLS) | ✅ | per-VRF VPN label, `cradle_l3vpn_zebra` |
 | LDP | ⬜ | no producer in zebra-rs |
-| SR-MPLS TI-LFA | ⬜ | (SRv6 TI-LFA is supported) |
+| SR-MPLS TI-LFA | ✅ | protected-nexthop tee (repair label stack as backup) + link-down failover; `cradle_tilfa_mpls` |
 
 ## SRv6 support status
 
@@ -144,7 +144,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | BGP EVPN VPWS (RFC 8214) | ✅ | per-EVI Type-1 ⇄ End.DX2, `vpws` service config, one-RPC AC bind (xconnect + local decap); `cradle_vpws_zebra` |
 | BGP SR Policy Binding SID (SAFI 73) | ✅ | controller-originated candidate path → headend BSID + policy list via tee; `cradle_b6_zebra` |
 | BGP color steering to a BSID | ⬜ | steering imposes raw segment lists today |
-| TI-LFA uSID repair carriers | ✅ | protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
+| SRv6 TI-LFA | ✅ | uSID repair carriers: protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
 | Mirror SID egress protection (End.M) | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
 | Locator flavors (PSP/USP/USD) | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |
 | REPLACE-C-SID locators | ✅ | `behavior: replace` → End(REP)/End.X(REP) at /(LB+LN+Fun), REP codepoints + Arg-length advertisement; eBPF-only (no kernel op); `cradle_replace_zebra` |

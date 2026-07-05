@@ -339,6 +339,25 @@ async fn ping_eventually_succeeds(world: &mut World, namespace: String, target: 
     );
 }
 
+/// Launch a detached background ping inside a namespace: 20 probes/s for
+/// up to 5 s (`-c 100`), fire-and-forget. Keeps traffic in flight across a
+/// failure event whose repair window (link-down detection to control-plane
+/// reconvergence) is shorter than a scenario step — the TI-LFA fast-reroute
+/// features assert `nh_backup` counted the in-window packets. The `-c`
+/// bound ends the process before teardown.
+#[when(expr = "I start a background ping from {string} to {string}")]
+async fn start_background_ping(world: &mut World, namespace: String, target: String) {
+    let scoped = world.ns(&namespace);
+    tokio::process::Command::new("sudo")
+        .args(["ip", "netns", "exec", &scoped])
+        .args(["ping", "-i", "0.05", "-c", "100", "-W", "1", &target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to start background ping in {}: {}", scoped, e));
+    println!("✓ background ping {} -> {} started", scoped, target);
+}
+
 #[then(expr = "ping from {string} to {string} should fail")]
 async fn ping_should_fail(world: &mut World, namespace: String, target: String) {
     let scoped = world.ns(&namespace);
@@ -1038,6 +1057,43 @@ async fn stop_zebra_tee(world: &mut World, namespace: String) {
         "✓ zebra-rs tee stopped in namespace {}",
         world.ns(&namespace)
     );
+}
+
+/// SIGSTOP the teeing zebra-rs in a namespace — freeze the control plane
+/// without tearing anything down (adjacencies survive on hold time, the
+/// gRPC tee socket stays open). Models a PLR whose IGP lags the failure:
+/// the fast-reroute features use it so reconvergence cannot race the
+/// data-plane failover they're asserting. Pair with `I resume zebra-rs`.
+#[when(expr = "I pause zebra-rs in namespace {string}")]
+async fn pause_zebra_tee(world: &mut World, namespace: String) {
+    let pid_path = format!("/tmp/{}_zebra.pid", world.ns(&namespace));
+    let pid = tokio::fs::read_to_string(&pid_path)
+        .await
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", pid_path, e));
+    let status = tokio::process::Command::new("sudo")
+        .args(["kill", "-STOP", pid.trim()])
+        .status()
+        .await
+        .expect("failed to run kill -STOP");
+    assert!(status.success(), "kill -STOP {} failed", pid.trim());
+    println!("✓ zebra-rs paused in namespace {}", world.ns(&namespace));
+}
+
+/// SIGCONT the zebra-rs paused by `I pause zebra-rs` — the daemon catches
+/// up on the queued netlink/adjacency events and reconverges.
+#[when(expr = "I resume zebra-rs in namespace {string}")]
+async fn resume_zebra_tee(world: &mut World, namespace: String) {
+    let pid_path = format!("/tmp/{}_zebra.pid", world.ns(&namespace));
+    let pid = tokio::fs::read_to_string(&pid_path)
+        .await
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", pid_path, e));
+    let status = tokio::process::Command::new("sudo")
+        .args(["kill", "-CONT", pid.trim()])
+        .status()
+        .await
+        .expect("failed to run kill -CONT");
+    assert!(status.success(), "kill -CONT {} failed", pid.trim());
+    println!("✓ zebra-rs resumed in namespace {}", world.ns(&namespace));
 }
 
 // ------------------------------ HTTP service ------------------------------
