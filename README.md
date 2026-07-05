@@ -77,7 +77,7 @@ cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
 | Cross-node pod routing over BGP | ✅ | eBGP-exchanged pod CIDRs tee into each node's eBPF FIB — kernel forwarding off end to end; `cradle_cni_bgp` |
 | ClusterIP Services (eBPF L4 LB) | ✅ | `cradle-k8s` Service/EndpointSlice sync (`AddService` replaces, `DelService` removes, periodic resync); `cradle_cni_svc` |
 | DaemonSet packaging + kind e2e | ✅ | conflist rendered from Node podCIDR; nginx ClusterIP proven served by the eBPF DNAT (`l4_dnat > 0`) |
-| Host-network-backed services | 🔶 | intentionally left to kube-proxy: unprogrammed VIPs miss the eBPF FIB and fall through to the kernel (hybrid model) |
+| Host-network-backed services | ✅ | served by cradle: DNAT to the node-local backend + a clsact-**egress** reverse-NAT that rewrites the local-stack reply back to the VIP; `cradle-k8s` programs them (no longer skipped); `cradle_hostnet` BDD ([design](docs/design/kube-proxy-dualstack.md)) |
 | Dual-stack pods (IPv6 IPAM) | ✅ | node-local v6 allocator + ptp v6 gateway (`fe80::1`); pod `/128` into FIB6; `cradle_cni_v6` BDD ([design](docs/design/kube-proxy-dualstack.md)). Policy engine is still v4-ingress-only |
 | NodePort / hostPort / egress SNAT | ✅ | egress masquerade (`cradle_masq`); NodePort as a node-IP `SERVICES` frontend from `cradle-k8s` (kind e2e) + hostPort via the CNI portMappings capability; `cradle_nodeport` BDD ([design](docs/design/kube-proxy-dualstack.md)) |
 | Full kube-proxy replacement | ⬜ | no NodePort/hostPort/LoadBalancer frontends; host-network-backed services and egress masquerade unhandled ([plan](docs/design/kube-proxy-dualstack.md)) |

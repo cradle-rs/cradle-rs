@@ -216,6 +216,18 @@ impl Control {
         prog.attach(name, TcAttachType::Ingress)
             .with_context(|| format!("attaching to {name}"))?;
         info!("attached cradle datapath to {name} (clsact ingress)");
+        // Egress reverse-NAT: rewrite a host-network/node-local service
+        // reply's source back to the VIP as it leaves toward the client
+        // (its 5-tuple hits a reverse CT entry; a pod-backed reply already
+        // un-NATed at ingress won't match — no double-NAT).
+        {
+            let eg: &mut SchedClassifier = bpf
+                .program_mut("cradle_egress")
+                .context("program cradle_egress not found")?
+                .try_into()?;
+            eg.attach(name, TcAttachType::Egress)
+                .with_context(|| format!("attaching egress reverse-NAT to {name}"))?;
+        }
         {
             let xdp: &mut Xdp = bpf
                 .program_mut("cradle_xdp")

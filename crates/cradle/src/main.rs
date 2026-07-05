@@ -214,6 +214,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
         prog.load().context("loading cradle_tc")?;
     }
     {
+        // Egress reverse-NAT stage (host-network service replies).
+        let prog: &mut SchedClassifier = bpf
+            .program_mut("cradle_egress")
+            .context("program cradle_egress not found")?
+            .try_into()?;
+        prog.load().context("loading cradle_egress")?;
+    }
+    {
         // XDP stage — XDP, because a TC program cannot shrink an MPLS
         // frame (bpf_skb_adjust_room is IP-only). Attached per L3 port.
         let prog: &mut aya::programs::Xdp = bpf
