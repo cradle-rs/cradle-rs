@@ -6,6 +6,7 @@
 //! routing control plane will eventually drive.
 
 mod bench;
+mod cilium;
 mod cni;
 mod config;
 mod control;
@@ -77,6 +78,14 @@ struct ServeArgs {
     /// records) — survives daemon restarts.
     #[arg(long, default_value = "/run/cradle")]
     state_dir: PathBuf,
+    /// Serve the Cilium-agent-compatible REST API on this unix socket, so
+    /// the stock cilium-cni plugin can drive this node (requires
+    /// `--pod-cidr`). Typically /var/run/cilium/cilium.sock.
+    #[arg(long)]
+    cilium_sock: Option<PathBuf>,
+    /// Pod CIDR the Cilium-compat IPAM allocates from.
+    #[arg(long)]
+    pod_cidr: Option<String>,
     /// IPv4 FIB engine: `lpm` (default) or `dir24` (DIR-24-8 direct-index —
     /// sizes TBL24/TBL8 at load; ~68 MiB, full-DFZ capacity). Load-time only;
     /// the JSON config's `fib4_mode` applies when this flag is not given.
@@ -229,6 +238,21 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // Re-program persisted CNI endpoints into the fresh maps (restart
     // survival); completes deletes for pods torn down while we were dead.
     control.cni_reconcile().await;
+
+    // Cilium-agent API compatibility shim: the stock cilium-cni plugin as a
+    // drop-in front end for this node.
+    if let Some(sock) = args.cilium_sock.clone() {
+        let cidr = args
+            .pod_cidr
+            .clone()
+            .context("--cilium-sock requires --pod-cidr")?;
+        let c = control.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cilium::serve(c, sock, cidr).await {
+                tracing::warn!("cilium compat API stopped: {e:#}");
+            }
+        });
+    }
 
     // Start the L7 transparent proxy (no-op for traffic until an L7 service is
     // configured; best-effort if the transparent bind is unavailable).
