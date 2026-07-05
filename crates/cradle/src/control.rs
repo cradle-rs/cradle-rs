@@ -813,9 +813,18 @@ impl Control {
         vrf: u32,
         pod_name: &str,
         pod_namespace: &str,
+        chained: bool,
     ) -> Result<()> {
         let ifindex = util::ifindex_of(host_if)?;
-        self.set_port(host_if, None, true, 0, vrf).await?;
+        // Chained deployments (Cilium generic-veth on top): the chained
+        // plugin owns the veth TC hook — attaching cradle_tc there would
+        // forward pod egress before the policy program runs. The pod /32
+        // stays in the eBPF FIB either way, so fabric-ingress traffic still
+        // forwards in eBPF (the chained plugin's ingress policy applies at
+        // the veth egress hook, which redirects traverse).
+        if !chained {
+            self.set_port(host_if, None, true, 0, vrf).await?;
+        }
         {
             let mut dp = self.dp.lock().await;
             let nh = crate::kernel::CONNECTED_NH_BASE_V4 + ifindex;
@@ -833,8 +842,12 @@ impl Control {
             vrf_id: vrf,
             pod_name: pod_name.to_string(),
             pod_namespace: pod_namespace.to_string(),
+            chained,
         })?;
-        info!("cni endpoint {container_id}/{ifname}: {ip} via {host_if} (vrf {vrf})");
+        info!(
+            "cni endpoint {container_id}/{ifname}: {ip} via {host_if} (vrf {vrf}{})",
+            if chained { ", chained" } else { "" }
+        );
         Ok(())
     }
 
@@ -892,6 +905,7 @@ impl Control {
                         ep.vrf_id,
                         &ep.pod_name,
                         &ep.pod_namespace,
+                        ep.chained,
                     )
                     .await
                 {
@@ -1619,6 +1633,7 @@ impl Cradle for GrpcService {
                 e.vrf_id,
                 &e.pod_name,
                 &e.pod_namespace,
+                e.chained,
             )
             .await
             .map_err(st)?;
@@ -1654,6 +1669,7 @@ impl Cradle for GrpcService {
                 host_if: ep.host_if,
                 pod_name: ep.pod_name,
                 pod_namespace: ep.pod_namespace,
+                chained: ep.chained,
                 host_ifindex: ep.host_ifindex,
                 ip: ep.ip.to_string(),
                 vrf_id: ep.vrf_id,
