@@ -407,6 +407,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cradle-cni"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "cradle-common"
 version = "0.1.0"
 dependencies = [

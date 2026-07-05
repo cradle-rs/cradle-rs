@@ -108,10 +108,12 @@ pub struct Control {
     repl_slots: Arc<Mutex<std::collections::HashMap<(u16, Ipv6Addr), ReplSlot>>>,
     /// Monotonic name counter for slot veth pairs (`crs<N>a`/`crs<N>b`).
     repl_next: Arc<std::sync::atomic::AtomicU32>,
+    /// CNI state (IPAM allocations + endpoint records) under the state dir.
+    cni: Arc<Mutex<crate::cni::Store>>,
 }
 
 impl Control {
-    pub fn new(bpf: Ebpf, dp: Dataplane) -> Self {
+    pub fn new(bpf: Ebpf, dp: Dataplane, state_dir: std::path::PathBuf) -> Self {
         Self {
             bpf: Arc::new(Mutex::new(bpf)),
             dp: Arc::new(Mutex::new(dp)),
@@ -119,6 +121,7 @@ impl Control {
             routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
         }
     }
 
@@ -755,6 +758,80 @@ impl Control {
             .await
             .service6_add(svc_id, vip, port, proto, backends)?;
         Ok(())
+    }
+
+    /// Allocate a pod address from `pool` (idempotent per `owner`).
+    pub async fn cni_alloc_ip(&self, pool: &str, owner: &str) -> Result<(Ipv4Addr, u8)> {
+        self.cni.lock().await.alloc_ip(pool, owner)
+    }
+
+    /// Release a pod address by owner and/or address (idempotent).
+    pub async fn cni_release_ip(&self, owner: &str, ip: Option<Ipv4Addr>) -> Result<()> {
+        self.cni.lock().await.release_ip(owner, ip)
+    }
+
+    /// Program the datapath for a pod endpoint whose veth the CNI plugin has
+    /// already plumbed: register the host-side veth as a routed port (attaches
+    /// TC+XDP; the veth carries no address, so nothing derives from it), point
+    /// the pod /32 at a connected nexthop on that veth, install the kernel
+    /// twin route `bpf_redirect_neigh` resolves the pod's neighbor through,
+    /// and persist the endpoint record. Idempotent per (container, ifname).
+    pub async fn cni_create_endpoint(
+        &self,
+        container_id: &str,
+        ifname: &str,
+        netns: &str,
+        host_if: &str,
+        ip: Ipv4Addr,
+        vrf: u32,
+    ) -> Result<()> {
+        let ifindex = util::ifindex_of(host_if)?;
+        self.set_port(host_if, None, true, 0, vrf).await?;
+        {
+            let mut dp = self.dp.lock().await;
+            let nh = crate::kernel::CONNECTED_NH_BASE_V4 + ifindex;
+            dp.nexthop_set(nh, None, ifindex, &[], 0)?;
+            dp.route4_add(vrf, ip, 32, nh, 0)?;
+        }
+        crate::kernel::replace_dev_route_v4(ip, host_if)?;
+        self.cni.lock().await.put_endpoint(&crate::cni::Endpoint {
+            container_id: container_id.to_string(),
+            ifname: ifname.to_string(),
+            netns: netns.to_string(),
+            host_if: host_if.to_string(),
+            host_ifindex: ifindex,
+            ip,
+            vrf_id: vrf,
+        })?;
+        info!("cni endpoint {container_id}/{ifname}: {ip} via {host_if} (vrf {vrf})");
+        Ok(())
+    }
+
+    /// Tear down a pod endpoint: FIB route, kernel twin route, IP allocation,
+    /// and the record. Idempotent — an unknown endpoint is a no-op (CNI DEL
+    /// may be repeated). The veth itself is the plugin's to delete.
+    pub async fn cni_delete_endpoint(&self, container_id: &str, ifname: &str) -> Result<()> {
+        let cni = self.cni.lock().await;
+        let Some(ep) = cni.get_endpoint(container_id, ifname)? else {
+            return Ok(());
+        };
+        {
+            let mut dp = self.dp.lock().await;
+            let _ = dp.route4_del(ep.vrf_id, ep.ip, 32);
+        }
+        crate::kernel::del_dev_route_v4(ep.ip, &ep.host_if);
+        // Forget the attach so a reused ifindex re-attaches cleanly once the
+        // plugin deletes the veth pair.
+        self.attached.lock().await.remove(&ep.host_ifindex);
+        cni.release_ip(&crate::cni::owner_key(container_id, ifname), Some(ep.ip))?;
+        cni.remove_endpoint(container_id, ifname)?;
+        info!("cni endpoint {container_id}/{ifname} removed ({})", ep.ip);
+        Ok(())
+    }
+
+    /// Snapshot the persisted pod endpoints (CHECK/GC).
+    pub async fn cni_list_endpoints(&self) -> Result<Vec<crate::cni::Endpoint>> {
+        self.cni.lock().await.list_endpoints()
     }
 
     /// Snapshot the datapath packet counters as `(name, packets)` pairs.
@@ -1395,6 +1472,84 @@ impl Cradle for GrpcService {
             .map(|(name, packets)| pb::StatEntry { name, packets })
             .collect();
         Ok(Response::new(pb::StatsReply { entries }))
+    }
+
+    async fn alloc_ip(
+        &self,
+        req: Request<pb::AllocIpRequest>,
+    ) -> Result<Response<pb::AllocIpReply>, Status> {
+        let r = req.into_inner();
+        let (ip, prefix_len) = self
+            .control
+            .cni_alloc_ip(&r.pool, &r.owner)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::AllocIpReply {
+            ip: ip.to_string(),
+            prefix_len: prefix_len as u32,
+        }))
+    }
+
+    async fn release_ip(
+        &self,
+        req: Request<pb::ReleaseIpRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let ip = if r.ip.is_empty() {
+            None
+        } else {
+            Some(r.ip.parse::<Ipv4Addr>().map_err(st)?)
+        };
+        self.control.cni_release_ip(&r.owner, ip).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn create_endpoint(
+        &self,
+        req: Request<pb::CniEndpoint>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let e = req.into_inner();
+        let ip = e.ip.parse::<Ipv4Addr>().map_err(st)?;
+        self.control
+            .cni_create_endpoint(&e.container_id, &e.ifname, &e.netns, &e.host_if, ip, e.vrf_id)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn delete_endpoint(
+        &self,
+        req: Request<pb::CniEndpointKey>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let k = req.into_inner();
+        self.control
+            .cni_delete_endpoint(&k.container_id, &k.ifname)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn list_endpoints(
+        &self,
+        _req: Request<pb::Empty>,
+    ) -> Result<Response<pb::CniEndpointList>, Status> {
+        let endpoints = self
+            .control
+            .cni_list_endpoints()
+            .await
+            .map_err(st)?
+            .into_iter()
+            .map(|ep| pb::CniEndpoint {
+                container_id: ep.container_id,
+                ifname: ep.ifname,
+                netns: ep.netns,
+                host_if: ep.host_if,
+                host_ifindex: ep.host_ifindex,
+                ip: ep.ip.to_string(),
+                vrf_id: ep.vrf_id,
+            })
+            .collect();
+        Ok(Response::new(pb::CniEndpointList { endpoints }))
     }
 
     async fn add_l7_service(
