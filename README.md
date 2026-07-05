@@ -93,9 +93,9 @@ Story 2 of `docs/design/cni-cilium.md`: expose Cilium-compatible surfaces so
 the Cilium ecosystem (the stock `cilium-cni` plugin, `kubectl get
 ciliumendpoints`, chaining deployments) works against a cradle node — while
 gaining the routing stack underneath. All surfaces below are implemented and
-proven against the stock Cilium binary/agent; Hubble observability is landing
-incrementally (`docs/design/hubble.md`, H1–H2 delivered). ✅ = implemented,
-🔶 = partial, ⬜ = planned/not yet.
+proven against the stock Cilium binary/agent, including Hubble observability
+(`docs/design/hubble.md`, H1–H3 delivered). ✅ = implemented, 🔶 = partial,
+⬜ = planned/not yet.
 
 | Surface | Status | Notes |
 |---|---|---|
@@ -103,7 +103,7 @@ incrementally (`docs/design/hubble.md`, H1–H2 delivered). ✅ = implemented,
 | `CiliumEndpoint` / `CiliumNode` CRDs | ✅ | `cradle-k8s --publish-crds` mirrors the daemon's endpoint store into CEPs (`kubectl get cep` shows cradle pods) + a CiliumNode with the podCIDR; vendored CRDs in `deploy/crds/`; kind e2e |
 | Generic-veth CNI chaining | ✅ | the stock Cilium agent chained on cradle-plumbed veths (`chained` netconf mode leaves the veth TC hook to Cilium; the pod /32 stays in the eBPF FIB for fabric-ingress forwarding); a CiliumNetworkPolicy blocks/restores pod traffic in `deploy/kind-cilium-e2e.sh` |
 | NetworkPolicy / identity enforcement | ✅ | native `IDENTITY`/`POLICY`/`PCT` maps + ingress verdict in `cradle_tc` (stateful, default-allow); `cradle-k8s --enforce-policy` translates k8s NetworkPolicies; `cradle_policy` BDD + kind e2e ([design](docs/design/policy.md)) |
-| Hubble API | 🔶 | H1–H2: `FLOWS` eBPF ringbuf (FORWARDED / DROPPED / TRANSLATED verdicts) drained into a per-node flow ring, served as the Observer gRPC API (`GetFlows`/`ServerStatus`/`GetNodes`/`GetNamespaces`) on `serve --hubble-sock`; flows enriched with pod namespace/name/identity + labels, with server-side `FlowFilter` (verdict/namespace/pod/ip/protocol/identity/label) and `since`/`until`; the UNMODIFIED `hubble` v1.19.5 CLI observes *and filters* cradle flows (`hubble observe --namespace … --verdict …`); `cradle_hubble` BDD. Planned: Hubble Relay + UI, IPv6/L7 flows (H3) ([design](docs/design/hubble.md)) |
+| Hubble API | ✅ | `FLOWS` eBPF ringbuf (FORWARDED / DROPPED / TRANSLATED verdicts) drained into a per-node flow ring, served as the Observer + Peer gRPC API on `serve --hubble-sock` (unix) / `--hubble-listen` (TCP); flows enriched with pod namespace/name/identity + labels, with server-side `FlowFilter` (verdict/namespace/pod/ip/protocol/identity/label) and `since`/`until`. The UNMODIFIED `hubble` v1.19.5 CLI observes *and filters* cradle flows, and the stock `hubble-relay` + `hubble-ui` aggregate a cradle node (`deploy/hubble.yaml`, `deploy/kind-hubble-e2e.sh`); `cradle_hubble` BDD. Follow-ons: multi-node peer federation, IPv6/L7 flows ([design](docs/design/hubble.md)) |
 
 ## MPLS support status
 

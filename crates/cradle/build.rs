@@ -11,12 +11,16 @@ fn main() -> anyhow::Result<()> {
         "/../../proto/cradle.proto"
     ))?;
 
-    // Hubble Observer API (docs/design/hubble.md). `proto/hubble` is the
+    // Hubble Observer + Peer API (docs/design/hubble.md). `proto/hubble` is the
     // include root so `import "flow/flow.proto"` resolves; observer.proto
-    // pulls in flow.proto + relay.proto.
+    // pulls in flow.proto + relay.proto. peer.proto (H3, Relay discovery) is
+    // standalone.
     let hubble = concat!(env!("CARGO_MANIFEST_DIR"), "/../../proto/hubble");
     tonic_prost_build::configure().compile_protos(
-        &[format!("{hubble}/observer/observer.proto")],
+        &[
+            format!("{hubble}/observer/observer.proto"),
+            format!("{hubble}/peer/peer.proto"),
+        ],
         &[hubble.to_string()],
     )?;
 

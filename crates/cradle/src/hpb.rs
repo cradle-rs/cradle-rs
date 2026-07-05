@@ -17,3 +17,6 @@ pub mod relay {
 pub mod observer {
     include!(concat!(env!("OUT_DIR"), "/observer.rs"));
 }
+pub mod peer {
+    include!(concat!(env!("OUT_DIR"), "/peer.rs"));
+}

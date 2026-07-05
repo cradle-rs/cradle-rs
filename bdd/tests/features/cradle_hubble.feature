@@ -55,9 +55,21 @@ Feature: The stock hubble CLI observes cradle datapath flows
     Then HTTP GET "http://10.1.1.2:8080/" from namespace "pod1" should contain "10.1.1.1"
     And hubble observe on node "node" via Hubble "hub" should show a "TRANSLATED" flow from "10.244.0.2" to "10.1.1.2"
 
+  # H3: the UNMODIFIED hubble-relay (pinned v1.19.5, extracted by
+  # deploy/fetch-hubble-relay.sh) discovers this node through its Peer service
+  # on hubble.sock, dials the advertised TCP Observer, and aggregates the
+  # node's flows — so `hubble observe` against the RELAY (not the node) shows
+  # them. This is the single-node core of Relay aggregation; DaemonSet wiring
+  # for relay + hubble-ui lives in deploy/kind-hubble-e2e.sh.
+  Scenario: the stock hubble-relay aggregates this node's flows
+    Given the test topology exists
+    When I start hubble-relay in namespace "node" peering Hubble "hub"
+    Then hubble observe via relay in namespace "node" should show a "FORWARDED" flow from "10.244.0.2" to "10.244.0.3"
+
   Scenario: Teardown topology
     Given the test topology exists
-    When I stop HTTP in namespace "host1"
+    When I stop hubble-relay in namespace "node"
+    And I stop HTTP in namespace "host1"
     And I stop cradle CNI node in namespace "node"
     And I delete namespace "pod1"
     And I delete namespace "pod2"

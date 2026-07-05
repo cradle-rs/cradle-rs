@@ -1,0 +1,25 @@
+# Strategic-merge patch that enables the Hubble Observer + Peer API on the
+# cradle DaemonSet (deploy/cradle.yaml). Apply with:
+#
+#   kubectl -n cradle-system patch ds cradle --patch-file deploy/hubble-cradle-patch.yaml
+#
+# The daemon is hostNetwork, so --hubble-listen binds the node IP; the Peer
+# service advertises that address to hubble-relay. The unix socket lives under
+# the already-mounted /run/cradle hostPath (used for local `hubble observe`).
+spec:
+  template:
+    spec:
+      containers:
+      - name: cradle
+        env:
+        - name: NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        command:
+        - cradle
+        - serve
+        - --grpc=unix:/run/cradle/cradle.sock
+        - --state-dir=/run/cradle
+        - --hubble-sock=/run/cradle/hubble.sock
+        - --hubble-listen=$(NODE_IP):4244
