@@ -178,7 +178,10 @@ Two observations cut against simply copying Cilium:
   incremental updates (see
   [`forwarding-table-updates.md`](forwarding-table-updates.md)). cradle
   would adopt tail calls only for the *verifier budget*, not for the
-  update model.
+  update model. (If cradle grows per-endpoint policy —
+  [`policy-multitenant.md`](policy-multitenant.md) — the plan gets the
+  atomic swap from map-in-map inner-map replacement, still without
+  per-endpoint programs.)
 
 - **cradle already has a two-stage pipeline for free.** The XDP→TC split
   with the `META_COOKIE` metadata hand-off is functionally a tail call

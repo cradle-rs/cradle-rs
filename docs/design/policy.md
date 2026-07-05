@@ -2,7 +2,8 @@
 
 Status: first cut — Kubernetes `NetworkPolicy` **ingress** semantics, IPv4,
 native (non-chained) CNI mode. Egress policies, `ipBlock` CIDR peers, IPv6,
-L7 rules, and `CiliumNetworkPolicy` extensions are follow-ups.
+L7 rules, and `CiliumNetworkPolicy` extensions are follow-ups — planned in
+[`policy-multitenant.md`](policy-multitenant.md).
 
 ## Model
 
