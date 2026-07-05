@@ -4,13 +4,13 @@
 //! a Service contributes one entry per TCP/UDP port when it has a parseable
 //! IPv4 ClusterIP (headless and ExternalName services are skipped — nothing
 //! to DNAT); backends come from the Service's IPv4 EndpointSlices, keeping
-//! only ready, **Pod-backed** endpoints — host-network endpoints such as the
-//! `default/kubernetes` API service are skipped, because a node-local backend's
-//! reply never crosses a cradle TC hook to be un-NATed (those services fall
-//! through the datapath untouched and can be served by kube-proxy).
-//! Backend target ports resolve the EndpointSlice way: match the slice port
-//! whose *name* equals the service port's name (Kubernetes has already
-//! resolved named/int targetPorts into the slice's port numbers).
+//! every ready endpoint. Both pod-backed and host-network / node-local
+//! backends (e.g. the `default/kubernetes` API server) are programmed: the
+//! clsact-egress reverse-NAT (K4) rewrites a node-local backend's reply back
+//! to the VIP as it leaves toward the client, so those services no longer
+//! need kube-proxy. Backend target ports resolve the EndpointSlice way: match
+//! the slice port whose *name* equals the service port's name (Kubernetes has
+//! already resolved named/int targetPorts into the slice's port numbers).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
@@ -123,10 +123,12 @@ pub fn build_desired(
                     if ep.conditions.as_ref().and_then(|c| c.ready) == Some(false) {
                         continue;
                     }
-                    // Pod-backed endpoints only (see module docs).
-                    if ep.target_ref.as_ref().and_then(|r| r.kind.as_deref()) != Some("Pod") {
-                        continue;
-                    }
+                    // Both pod-backed and host-network / node-local backends
+                    // are programmed: the latter's replies come from the
+                    // node's own stack, and the clsact-egress reverse-NAT
+                    // (K4) rewrites them back to the VIP as they leave toward
+                    // the client. This is what lets `default/kubernetes` (the
+                    // API server) be served with kube-proxy off.
                     for addr in &ep.addresses {
                         if let Ok(ip) = addr.parse::<Ipv4Addr>() {
                             backends.insert((ip, target));
@@ -302,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_not_ready_and_non_pod_backends() {
+    fn programs_host_network_backend_skips_not_ready() {
         let svcs = vec![service(
             "default",
             "kubernetes",
@@ -314,14 +316,18 @@ mod tests {
             "default",
             "kubernetes",
             vec![
-                endpoint("172.18.0.2", Some(true), None), // API server: no Pod targetRef
-                endpoint("10.244.0.9", Some(false), Some("Pod")), // not ready
+                endpoint("172.18.0.2", Some(true), None), // API server: host-network, no Pod ref
+                endpoint("172.18.0.3", Some(false), None), // not ready — dropped
             ],
             vec![(Some("https"), 6443)],
         )];
         let desired = build_desired(&svcs, &slices, None);
-        // No usable backends ⇒ the service is not programmed at all.
-        assert!(desired.is_empty());
+        // The host-network backend IS programmed now (K4: the egress
+        // reverse-NAT makes its reply return through cradle).
+        let key = ("10.96.0.1".parse().unwrap(), 443u16, TCP);
+        let backends = desired.get(&key).unwrap();
+        assert_eq!(backends.len(), 1);
+        assert!(backends.contains(&("172.18.0.2".parse().unwrap(), 6443)));
     }
 
     #[test]
