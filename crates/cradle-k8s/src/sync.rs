@@ -59,7 +59,11 @@ fn name_eq(a: Option<&str>, b: Option<&str>) -> bool {
     a.unwrap_or("") == b.unwrap_or("")
 }
 
-pub fn build_desired(services: &[Service], slices: &[EndpointSlice]) -> Desired {
+pub fn build_desired(
+    services: &[Service],
+    slices: &[EndpointSlice],
+    node_ip: Option<Ipv4Addr>,
+) -> Desired {
     let mut out = Desired::new();
     for svc in services {
         let Some(spec) = &svc.spec else { continue };
@@ -134,9 +138,22 @@ pub fn build_desired(services: &[Service], slices: &[EndpointSlice]) -> Desired 
             // rollout) ⇒ don't program the VIP at all: traffic falls through
             // the datapath untouched (kube-proxy can serve it), and a
             // previously-programmed service gets a DelService.
-            if !backends.is_empty() {
-                out.insert((vip, port, proto), backends);
+            if backends.is_empty() {
+                continue;
             }
+            // NodePort/LoadBalancer: also expose the service on the node's
+            // own IP at `nodePort`. The node IP is a local address, but
+            // l4_nat's SERVICES lookup runs before the local-punt, so the
+            // same backend set is reachable at <nodeIP>:<nodePort> with no
+            // datapath change (the reverse-SNAT rewrites replies back to
+            // nodeIP:nodePort — externalTrafficPolicy Local / source-
+            // preserving; cross-node Cluster policy is a follow-on).
+            if let (Some(node), Ok(np)) = (node_ip, u16::try_from(sp.node_port.unwrap_or(0))) {
+                if np != 0 {
+                    out.insert((node, np, proto), backends.clone());
+                }
+            }
+            out.insert((vip, port, proto), backends);
         }
     }
     out
@@ -247,11 +264,41 @@ mod tests {
             ],
             vec![(None, 8080)],
         )];
-        let desired = build_desired(&svcs, &slices);
+        let desired = build_desired(&svcs, &slices, None);
         let key = ("10.96.0.10".parse().unwrap(), 80u16, TCP);
         let backends = desired.get(&key).unwrap();
         assert_eq!(backends.len(), 2);
         assert!(backends.contains(&("10.244.0.2".parse().unwrap(), 8080)));
+    }
+
+    #[test]
+    fn nodeport_adds_a_node_ip_frontend() {
+        let mut sp = sport(None, 80, "TCP");
+        sp.node_port = Some(31000);
+        let svcs = vec![service(
+            "default",
+            "web",
+            "10.96.0.10",
+            vec![sp],
+            Some("NodePort"),
+        )];
+        let slices = vec![slice(
+            "default",
+            "web",
+            vec![endpoint("10.244.0.2", Some(true), Some("Pod"))],
+            vec![(None, 8080)],
+        )];
+        let node: Ipv4Addr = "172.18.0.2".parse().unwrap();
+        let desired = build_desired(&svcs, &slices, Some(node));
+        // ClusterIP frontend + node-IP:nodePort frontend, same backend.
+        let cluster = desired
+            .get(&("10.96.0.10".parse().unwrap(), 80, TCP))
+            .unwrap();
+        let np = desired.get(&(node, 31000, TCP)).unwrap();
+        assert_eq!(cluster, np);
+        assert!(np.contains(&("10.244.0.2".parse().unwrap(), 8080)));
+        // Without a known node IP, only the ClusterIP frontend is emitted.
+        assert_eq!(build_desired(&svcs, &slices, None).len(), 1);
     }
 
     #[test]
@@ -272,7 +319,7 @@ mod tests {
             ],
             vec![(Some("https"), 6443)],
         )];
-        let desired = build_desired(&svcs, &slices);
+        let desired = build_desired(&svcs, &slices, None);
         // No usable backends ⇒ the service is not programmed at all.
         assert!(desired.is_empty());
     }
@@ -295,7 +342,7 @@ mod tests {
             vec![endpoint("10.244.1.5", Some(true), Some("Pod"))],
             vec![(Some("http"), 8080), (Some("metrics"), 19100)],
         )];
-        let desired = build_desired(&svcs, &slices);
+        let desired = build_desired(&svcs, &slices, None);
         let http = desired
             .get(&("10.96.1.1".parse().unwrap(), 80, TCP))
             .unwrap();
@@ -318,7 +365,7 @@ mod tests {
                 Some("ExternalName"),
             ),
         ];
-        assert!(build_desired(&svcs, &[]).is_empty());
+        assert!(build_desired(&svcs, &[], None).is_empty());
     }
 
     #[test]
