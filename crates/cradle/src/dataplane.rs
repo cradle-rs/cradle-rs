@@ -68,6 +68,7 @@ pub struct Dataplane {
     /// `End.DT2M` SID, both ends of each slot's veth pair.
     repl_sid: HashMap<MapData, u32, [u8; 16]>,
     xconnect: HashMap<MapData, u32, [u8; 16]>,
+    xconnect_vlan: HashMap<MapData, Dx2vKey, [u8; 16]>,
     dx2v: HashMap<MapData, Dx2vKey, u32>,
     /// Egress-protection mirror contexts (`End.M`): protected SID space →
     /// local DT-style reproduction.
@@ -139,6 +140,10 @@ impl Dataplane {
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
             xconnect: HashMap::try_from(bpf.take_map("XCONNECT").context("map XCONNECT missing")?)?,
+            xconnect_vlan: HashMap::try_from(
+                bpf.take_map("XCONNECT_VLAN")
+                    .context("map XCONNECT_VLAN missing")?,
+            )?,
             dx2v: HashMap::try_from(bpf.take_map("DX2V").context("map DX2V missing")?)?,
             mirror: LpmTrie::try_from(bpf.take_map("MIRROR").context("map MIRROR missing")?)?,
             services: HashMap::try_from(bpf.take_map("SERVICES").context("map SERVICES missing")?)?,
@@ -451,7 +456,6 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Remove a replication-slot SID binding.
     /// Bind an attachment circuit to a remote End.DX2/DX2V SID (VPWS):
     /// every frame arriving on `ifindex` encapsulates toward `remote_sid`.
     pub fn xconnect_add(&mut self, ifindex: u32, remote_sid: Ipv6Addr) -> Result<()> {
@@ -461,6 +465,34 @@ impl Dataplane {
 
     pub fn xconnect_del(&mut self, ifindex: u32) -> Result<()> {
         self.xconnect.remove(&ifindex)?;
+        Ok(())
+    }
+
+    /// Bind a VLAN-scoped attachment circuit (RFC 8214 VLAN-based E-Line)
+    /// to a remote End.DX2V SID: only 802.1Q frames with `vid` arriving on
+    /// `ifindex` encapsulate toward `remote_sid` (tag kept).
+    pub fn xconnect_vlan_add(
+        &mut self,
+        ifindex: u32,
+        vid: u16,
+        remote_sid: Ipv6Addr,
+    ) -> Result<()> {
+        let key = Dx2vKey {
+            table: ifindex,
+            vid,
+            _pad: [0; 2],
+        };
+        self.xconnect_vlan.insert(key, remote_sid.octets(), 0)?;
+        Ok(())
+    }
+
+    pub fn xconnect_vlan_del(&mut self, ifindex: u32, vid: u16) -> Result<()> {
+        let key = Dx2vKey {
+            table: ifindex,
+            vid,
+            _pad: [0; 2],
+        };
+        self.xconnect_vlan.remove(&key)?;
         Ok(())
     }
 
@@ -475,6 +507,17 @@ impl Dataplane {
         Ok(())
     }
 
+    pub fn dx2v_del(&mut self, table: u32, vid: u16) -> Result<()> {
+        let key = Dx2vKey {
+            table,
+            vid,
+            _pad: [0; 2],
+        };
+        self.dx2v.remove(&key)?;
+        Ok(())
+    }
+
+    /// Remove a replication-slot SID binding.
     pub fn repl_sid_del(&mut self, ifindex: u32) -> Result<()> {
         self.repl_sid.remove(&ifindex)?;
         Ok(())

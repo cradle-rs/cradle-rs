@@ -10,15 +10,15 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 1
     - if-name: r1a
       ipv4:
-        enable: true
+        enabled: true
       metric: 10
     - if-name: r1b
       network-type: point-to-point
       ipv4:
-        enable: true
+        enabled: true
       metric: 10

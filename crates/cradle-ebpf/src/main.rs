@@ -148,6 +148,12 @@ static REPL_SID: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
 /// MAC-in-SRv6 encapsulated toward the SID — no FDB, no learning.
 #[map]
 static XCONNECT: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
+/// VLAN-scoped VPWS cross-connect (RFC 8214 VLAN-based E-Line): (AC ingress
+/// ifindex as `table`, 802.1Q VID) → the remote End.DX2V service SID. Only
+/// tagged frames with that VID enter the cross-connect; the tag rides
+/// inside the encapsulation and the remote End.DX2V demuxes on it.
+#[map]
+static XCONNECT_VLAN: HashMap<Dx2vKey, [u8; 16]> = HashMap::with_max_entries(1024, 0);
 /// End.DX2V VLAN table: (SID's table id, inner 802.1Q VID) → AC ifindex.
 #[map]
 static DX2V: HashMap<Dx2vKey, u32> = HashMap::with_max_entries(1024, 0);
@@ -350,7 +356,12 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     // bridge domain: switch the inner Ethernet frame in that domain, whatever
     // the (underlay) port's own type is.
     // VPWS egress (End.DX2/DX2V): XDP decapped and pinned the AC — emit
-    // the Ethernet frame raw, no bridge, no MAC rewrite.
+    // the Ethernet frame raw, no bridge, no MAC rewrite. An inner 802.1Q
+    // tag needs no help here: the kernel RX path pops it into skb vlan
+    // metadata (acceleration) between the XDP decap and this hook, and
+    // the metadata tag rides the redirect onto the AC intact — do NOT
+    // bpf_skb_vlan_push it (the helper re-inlines the metadata tag AND
+    // re-sets the metadata: the CE would receive a double tag).
     let dx2_oif = tc_meta_dx2(ctx);
     if dx2_oif != 0 {
         return Ok(unsafe { bpf_redirect(dx2_oif, 0) } as i32);
@@ -1695,6 +1706,28 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             last_seen: 0,
         };
         return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
+    }
+    // VLAN-scoped VPWS AC (RFC 8214 VLAN-based E-Line, End.DX2V): an
+    // 802.1Q-tagged frame picks its E-Line by (AC ifindex, VID) — the tag
+    // stays on the frame through the encapsulation and the remote
+    // End.DX2V demuxes on it. Untagged frames and unknown VIDs fall
+    // through to the port-based XCONNECT, then the L2 bridge dispatch.
+    if u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? }) == ETH_P_8021Q {
+        let tci = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, EthHdr::LEN)? });
+        let key = Dx2vKey {
+            table: iif,
+            vid: tci & 0x0fff,
+            _pad: [0; 2],
+        };
+        if let Some(sid) = XCONNECT_VLAN.get_ptr(&key) {
+            let ent = FdbEntry {
+                oif: 0, // resolve the underlay adjacency by FIB6 lookup
+                flags: FDB_F_REMOTE,
+                remote_sid: unsafe { *sid },
+                last_seen: 0,
+            };
+            return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_ENCAP);
+        }
     }
     // VPWS attachment circuit (RFC 8214 E-Line): every frame from a bound
     // AC — any EtherType, any MAC — encapsulates toward the remote

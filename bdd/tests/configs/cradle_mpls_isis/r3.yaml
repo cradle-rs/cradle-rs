@@ -10,11 +10,11 @@ router:
     interface:
     - if-name: lo
       ipv4:
-        enable: true
+        enabled: true
         prefix-sid:
           index: 3
     - if-name: r3a
       network-type: point-to-point
       ipv4:
-        enable: true
+        enabled: true
       metric: 10

@@ -52,6 +52,29 @@ Feature: BGP EVPN VPWS over SRv6 programs the eBPF E-Line
     And the cradle stat "srv6_dx2" in namespace "pe1" via gRPC as "ctl1" should be nonzero
     And the cradle stat "srv6_dx2" in namespace "pe2" via gRPC as "ctl2" should be nonzero
 
+  Scenario: A VLAN-scoped E-Line multiplexes the same ACs by 802.1Q VID
+    Given the test topology exists
+    # eline2 (evi 200, VID 30) shares pe1c/pe2c with the untagged eline1:
+    # the AC demuxes by tag — VID-30 frames ride the End.DX2V service (the
+    # tag crossing transparently); untagged traffic still rides eline1.
+    #
+    # VLAN offloads must be OFF on the CE side of the AC: with them on,
+    # the CE transmits the 802.1Q tag as skb *metadata* (never in the
+    # packet bytes), and XDP — which sees only bytes — cannot demux the
+    # VID. The standard operational requirement for any XDP VLAN path.
+    When I execute "ethtool -K eth0 txvlan off rxvlan off" in namespace "c1"
+    And I execute "ethtool -K eth0 txvlan off rxvlan off" in namespace "c2"
+    And I execute "ip link add link eth0 name eth0.30 type vlan id 30" in namespace "c1"
+    And I execute "ip addr add 10.0.30.1/24 dev eth0.30" in namespace "c1"
+    And I execute "ip link set dev eth0.30 up" in namespace "c1"
+    And I execute "ip link add link eth0 name eth0.30 type vlan id 30" in namespace "c2"
+    And I execute "ip addr add 10.0.30.2/24 dev eth0.30" in namespace "c2"
+    And I execute "ip link set dev eth0.30 up" in namespace "c2"
+    Then ping from "c1" to "10.0.30.2" should eventually succeed
+    And ping from "c2" to "10.0.30.1" should eventually succeed
+    # The untagged E-Line still works alongside its VLAN-scoped twin.
+    And ping from "c1" to "10.0.0.2" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop the zebra-rs tee in namespace "pe1"
