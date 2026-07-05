@@ -132,17 +132,17 @@ for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet.
 | Producer | Data plane | Status | Notes |
 |---|---|---|---|
 | Static ILM (gRPC/JSON) | MPLS | ✅ | `AddIlm`/`DelIlm` + labels on nexthops |
-| Static SRv6 config (gRPC/JSON) | SRv6 | ✅ | every SRv6 function above |
 | IS-IS SR (SR-MPLS) | MPLS | ✅ | prefix SIDs / SRGB → ILM + out-labels teed |
-| IS-IS SRv6 (locators, uN/uA) | SRv6 | ✅ | locator routes + local SIDs teed |
 | BGP L3VPN (VPNv4/v6 over MPLS) | MPLS | ✅ | per-VRF VPN label, `cradle_l3vpn_zebra` |
+| LDP | MPLS | ⬜ | no producer in zebra-rs |
+| SR-MPLS TI-LFA | MPLS | ✅ | protected-nexthop tee (repair label stack as backup) + link-down failover; `cradle_tilfa_mpls` |
+| Static SRv6 config (gRPC/JSON) | SRv6 | ✅ | every SRv6 function above |
+| IS-IS SRv6 (locators, uN/uA) | SRv6 | ✅ | locator routes + local SIDs teed |
 | BGP L3VPN over SRv6 (VPNv4/v6) | SRv6 | ✅ | per-VRF End.DT46, `encapsulation srv6` |
 | BGP EVPN over SRv6 (RFC 9252) | SRv6 | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
 | BGP EVPN VPWS (RFC 8214) | SRv6 | ✅ | per-EVI Type-1 ⇄ End.DX2, `vpws` service config, one-RPC AC bind (xconnect + local decap); `cradle_vpws_zebra` |
 | BGP SR Policy Binding SID (SAFI 73) | SRv6 | ✅ | controller-originated candidate path → headend BSID + policy list via tee; `cradle_b6_zebra` |
 | BGP color steering to a BSID | SRv6 | ⬜ | steering imposes raw segment lists today |
-| LDP | MPLS | ⬜ | no producer in zebra-rs |
-| SR-MPLS TI-LFA | MPLS | ✅ | protected-nexthop tee (repair label stack as backup) + link-down failover; `cradle_tilfa_mpls` |
 | SRv6 TI-LFA | SRv6 | ✅ | uSID repair carriers: protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
 | Mirror SID egress protection (End.M) | SRv6 | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
 | Locator flavors (PSP/USP/USD) | SRv6 | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |
