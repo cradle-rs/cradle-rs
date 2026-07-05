@@ -1,0 +1,27 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_tilfa_mpls_ctl2.sock"
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: n
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.2
+    fast-reroute:
+      ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 2
+    - if-name: n-s
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 1
+    - if-name: n-d
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 1
