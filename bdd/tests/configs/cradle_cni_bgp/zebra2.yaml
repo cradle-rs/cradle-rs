@@ -1,0 +1,24 @@
+# passive-mode on this side avoids the simultaneous-open collision two
+# rapidly-started eBGP speakers otherwise race into (see cradle_bgp).
+system:
+  cradle-grpc: "unix:/tmp/cradle_cni_bgp_ctl2.sock"
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.12.2
+    neighbor:
+    - remote-address: 10.0.12.1
+      transport:
+        passive-mode: true
+      timers:
+        connect-retry-time: 5
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.244.2.0/24

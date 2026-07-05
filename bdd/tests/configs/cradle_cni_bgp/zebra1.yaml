@@ -1,0 +1,20 @@
+system:
+  cradle-grpc: "unix:/tmp/cradle_cni_bgp_ctl1.sock"
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.12.1
+    neighbor:
+    - remote-address: 10.0.12.2
+      timers:
+        connect-retry-time: 5
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.244.1.0/24

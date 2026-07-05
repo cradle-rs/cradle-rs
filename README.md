@@ -149,3 +149,28 @@ for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet.
 | REPLACE-C-SID locators | SRv6 | ✅ | `behavior: replace` → End(REP)/End.X(REP) at /(LB+LN+Fun), REP codepoints + Arg-length advertisement; eBPF-only (no kernel op); `cradle_replace_zebra` |
 | VRF-bound locators (End.T / uT) | SRv6 | ✅ | locator `vrf` leaf → RIB table resolution → End.T/uT codepoints + kernel End.T + tee; `cradle_endt_zebra` |
 | Static seg6local SIDs (config-static `action`) | SRv6 | ✅ | route-embedded actions now tee as local SIDs; DX adjacency via `nh6`/`nh4`; `cradle_dx_zebra` |
+
+## Kubernetes CNI
+
+`cradle-cni` is a CNI spec 1.1 plugin (ADD/DEL/CHECK/STATUS/GC/VERSION) that
+attaches pods to the cradle data plane: the daemon allocates the pod address
+(`AllocIp`, node-local IPAM persisted under `--state-dir`), the plugin plumbs
+the veth pair and the pod's ptp default route (169.254.1.1 + permanent
+neighbor entry), and `CreateEndpoint` programs the pod /32 into the eBPF FIB
+on the host-side veth. Plan and roadmap: `docs/design/cni-cilium.md`.
+
+Because zebra-rs is the node's routing stack, pod reachability rides real BGP
+— including the direction Cilium doesn't support: **routes learned from BGP
+program the pod datapath** (Cilium's BGP control plane is advertise-only,
+cilium/cilium#34841). `cradle_cni_bgp.feature` proves it end-to-end: two CNI
+nodes exchange their pod CIDRs over eBGP, each zebra-rs tees the learned
+route into its node's eBPF FIB, and pods on different nodes ping each other
+with kernel forwarding disabled on both nodes.
+
+| Milestone | Status | Notes |
+|---|---|---|
+| M1 CNI plugin + endpoint plumbing | ✅ | `cradle-cni` + AllocIp/CreateEndpoint gRPC; `cradle_cni` |
+| M2 multi-node pod routing over BGP | ✅ | learned-route tee to the pod FIB; `cradle_cni_bgp` |
+| M3 lifecycle (CHECK/GC/restart reconcile) | ⬜ | verbs implemented; reconcile + BDD pending |
+| M4 Services (ClusterIP via eBPF L4 LB) + kind packaging | ⬜ | |
+| Cilium compat (agent REST subset, CRDs, chaining) | ⬜ | story 2 of `docs/design/cni-cilium.md` |
