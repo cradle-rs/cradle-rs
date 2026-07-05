@@ -792,9 +792,20 @@ impl Control {
         self.cni.lock().await.alloc_ip(pool, owner)
     }
 
-    /// Release a pod address by owner and/or address (idempotent).
-    pub async fn cni_release_ip(&self, owner: &str, ip: Option<Ipv4Addr>) -> Result<()> {
-        self.cni.lock().await.release_ip(owner, ip)
+    /// Allocate a pod IPv6 address from `pool6` (idempotent per `owner`).
+    pub async fn cni_alloc_ip6(&self, pool6: &str, owner: &str) -> Result<(Ipv6Addr, u8)> {
+        self.cni.lock().await.alloc_ip6(pool6, owner)
+    }
+
+    /// Release a pod's addresses by owner and/or specific v4/v6 address
+    /// (idempotent).
+    pub async fn cni_release_ip(
+        &self,
+        owner: &str,
+        ip: Option<Ipv4Addr>,
+        ip6: Option<Ipv6Addr>,
+    ) -> Result<()> {
+        self.cni.lock().await.release_ip(owner, ip, ip6)
     }
 
     /// Program the datapath for a pod endpoint whose veth the CNI plugin has
@@ -811,6 +822,7 @@ impl Control {
         netns: &str,
         host_if: &str,
         ip: Ipv4Addr,
+        ip6: Option<Ipv6Addr>,
         vrf: u32,
         pod_name: &str,
         pod_namespace: &str,
@@ -842,8 +854,18 @@ impl Control {
             let nh = crate::kernel::CONNECTED_NH_BASE_V4 + ifindex;
             dp.nexthop_set(nh, None, ifindex, &[], 0)?;
             dp.route4_add(vrf, ip, 32, nh, 0)?;
+            // Dual-stack: point the pod /128 at a v6 connected nexthop on
+            // the same veth (FIB6), mirroring the v4 path.
+            if let Some(ip6) = ip6 {
+                let nh6 = crate::kernel::CONNECTED_NH_BASE_V6 + ifindex;
+                dp.nexthop_set_v6(nh6, None, ifindex, &[], 0)?;
+                dp.route6_add(vrf, ip6, 128, nh6, 0)?;
+            }
         }
         crate::kernel::replace_dev_route_v4(ip, host_if)?;
+        if let Some(ip6) = ip6 {
+            crate::kernel::replace_dev_route_v6(ip6, host_if)?;
+        }
         self.cni.lock().await.put_endpoint(&crate::cni::Endpoint {
             container_id: container_id.to_string(),
             ifname: ifname.to_string(),
@@ -851,13 +873,15 @@ impl Control {
             host_if: host_if.to_string(),
             host_ifindex: ifindex,
             ip,
+            ip6,
             vrf_id: vrf,
             pod_name: pod_name.to_string(),
             pod_namespace: pod_namespace.to_string(),
             chained,
         })?;
         info!(
-            "cni endpoint {container_id}/{ifname}: {ip} via {host_if} (vrf {vrf}{})",
+            "cni endpoint {container_id}/{ifname}: {ip}{} via {host_if} (vrf {vrf}{})",
+            ip6.map(|v| format!(" + {v}")).unwrap_or_default(),
             if chained { ", chained" } else { "" }
         );
         Ok(())
@@ -874,12 +898,22 @@ impl Control {
         {
             let mut dp = self.dp.lock().await;
             let _ = dp.route4_del(ep.vrf_id, ep.ip, 32);
+            if let Some(ip6) = ep.ip6 {
+                let _ = dp.route6_del(ep.vrf_id, ip6, 128);
+            }
         }
         crate::kernel::del_dev_route_v4(ep.ip, &ep.host_if);
+        if let Some(ip6) = ep.ip6 {
+            crate::kernel::del_dev_route_v6(ip6, &ep.host_if);
+        }
         // Forget the attach so a reused ifindex re-attaches cleanly once the
         // plugin deletes the veth pair.
         self.attached.lock().await.remove(&ep.host_ifindex);
-        cni.release_ip(&crate::cni::owner_key(container_id, ifname), Some(ep.ip))?;
+        cni.release_ip(
+            &crate::cni::owner_key(container_id, ifname),
+            Some(ep.ip),
+            ep.ip6,
+        )?;
         cni.remove_endpoint(container_id, ifname)?;
         info!("cni endpoint {container_id}/{ifname} removed ({})", ep.ip);
         Ok(())
@@ -960,6 +994,7 @@ impl Control {
                         &ep.netns,
                         &ep.host_if,
                         ep.ip,
+                        ep.ip6,
                         ep.vrf_id,
                         &ep.pod_name,
                         &ep.pod_namespace,
@@ -978,6 +1013,7 @@ impl Control {
                 let _ = cni.release_ip(
                     &crate::cni::owner_key(&ep.container_id, &ep.ifname),
                     Some(ep.ip),
+                    ep.ip6,
                 );
                 let _ = cni.remove_endpoint(&ep.container_id, &ep.ifname);
             }
@@ -1697,9 +1733,22 @@ impl Cradle for GrpcService {
             .cni_alloc_ip(&r.pool, &r.owner)
             .await
             .map_err(st)?;
+        // Dual-stack: allocate a v6 too when the request carries a v6 pool.
+        let (ip6, prefix_len6) = if r.pool6.is_empty() {
+            (String::new(), 0)
+        } else {
+            let (a, p) = self
+                .control
+                .cni_alloc_ip6(&r.pool6, &r.owner)
+                .await
+                .map_err(st)?;
+            (a.to_string(), p as u32)
+        };
         Ok(Response::new(pb::AllocIpReply {
             ip: ip.to_string(),
             prefix_len: prefix_len as u32,
+            ip6,
+            prefix_len6,
         }))
     }
 
@@ -1714,7 +1763,7 @@ impl Cradle for GrpcService {
             Some(r.ip.parse::<Ipv4Addr>().map_err(st)?)
         };
         self.control
-            .cni_release_ip(&r.owner, ip)
+            .cni_release_ip(&r.owner, ip, None)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -1726,6 +1775,11 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let e = req.into_inner();
         let ip = e.ip.parse::<Ipv4Addr>().map_err(st)?;
+        let ip6 = if e.ip6.is_empty() {
+            None
+        } else {
+            Some(e.ip6.parse::<Ipv6Addr>().map_err(st)?)
+        };
         self.control
             .cni_create_endpoint(
                 &e.container_id,
@@ -1733,6 +1787,7 @@ impl Cradle for GrpcService {
                 &e.netns,
                 &e.host_if,
                 ip,
+                ip6,
                 e.vrf_id,
                 &e.pod_name,
                 &e.pod_namespace,
@@ -1775,6 +1830,7 @@ impl Cradle for GrpcService {
                 chained: ep.chained,
                 host_ifindex: ep.host_ifindex,
                 ip: ep.ip.to_string(),
+                ip6: ep.ip6.map(|v| v.to_string()).unwrap_or_default(),
                 vrf_id: ep.vrf_id,
             })
             .collect();

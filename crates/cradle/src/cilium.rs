@@ -261,7 +261,7 @@ impl Api {
 
     async fn ipam_release(&self, ip: &str) -> Result<Response<Full<Bytes>>> {
         let ip: Ipv4Addr = ip.parse().with_context(|| format!("bad ip {ip:?}"))?;
-        self.control.cni_release_ip("", Some(ip)).await?;
+        self.control.cni_release_ip("", Some(ip), None).await?;
         info!("cilium API: released {ip}");
         Ok(respond(StatusCode::OK, json!({})))
     }
@@ -291,6 +291,7 @@ impl Api {
                 &ecr.netns_path,
                 &ecr.interface_name,
                 ip,
+                None, // the v1.19.5 shim path is v4-only (dual-stack: K-arc follow-on)
                 0,
                 &ecr.k8s_pod_name,
                 &ecr.k8s_namespace,

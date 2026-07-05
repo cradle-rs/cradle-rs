@@ -18,7 +18,7 @@ mod pb;
 
 use std::fmt;
 use std::io::Read as _;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 
 use anyhow::{Context as _, Result};
@@ -31,6 +31,10 @@ use pb::cradle_client::CradleClient;
 /// interface, resolved by a permanent neighbor entry to the host veth MAC —
 /// no shared L2, no real address consumed (the Cilium/Calico ptp trick).
 const POD_GW: &str = "169.254.1.1";
+
+/// The pods' IPv6 ptp gateway: a link-local address on the host veth,
+/// resolved by a permanent ND entry — the v6 analogue of `POD_GW`.
+const POD_GW6: &str = "fe80::1";
 
 /// CNI error result codes (spec-reserved values).
 const ERR_UNSUPPORTED_FIELD: u32 = 2;
@@ -107,6 +111,9 @@ struct IpamConf {
     plugin_type: String,
     #[serde(default)]
     subnet: String,
+    /// Optional pod IPv6 CIDR — set for a dual-stack pod.
+    #[serde(default)]
+    subnet6: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +289,7 @@ async fn cmd_add(env: &CniEnv, conf: &NetConf) -> Result<Value> {
         .alloc_ip(pb::AllocIpRequest {
             pool: conf.ipam.subnet.clone(),
             owner: owner.clone(),
+            pool6: conf.ipam.subnet6.clone(),
         })
         .await
         .map_err(|e| coded(ERR_INTERNAL, format!("AllocIp failed: {}", e.message())))?
@@ -292,8 +300,18 @@ async fn cmd_add(env: &CniEnv, conf: &NetConf) -> Result<Value> {
             format!("bad allocated ip {:?}: {e}", reply.ip),
         )
     })?;
+    let pod_ip6: Option<Ipv6Addr> = if reply.ip6.is_empty() {
+        None
+    } else {
+        Some(reply.ip6.parse().map_err(|e| {
+            coded(
+                ERR_INTERNAL,
+                format!("bad allocated ip6 {:?}: {e}", reply.ip6),
+            )
+        })?)
+    };
 
-    match plumb(env, conf, &ns, pod_ip, &mut cl).await {
+    match plumb(env, conf, &ns, pod_ip, pod_ip6, &mut cl).await {
         Ok(result) => Ok(result),
         Err(e) => {
             // Roll back so a failed ADD leaves nothing behind: the runtime is
@@ -319,6 +337,7 @@ async fn plumb(
     conf: &NetConf,
     ns: &str,
     pod_ip: Ipv4Addr,
+    pod_ip6: Option<Ipv6Addr>,
     cl: &mut CradleClient<tonic::transport::Channel>,
 ) -> Result<Value> {
     let host_if = host_ifname(&env.container_id, &env.ifname);
@@ -376,6 +395,41 @@ async fn plumb(
         "permanent",
     ])?;
 
+    // Dual-stack: mirror the ptp setup for v6. `fe80::1` is link-local, so
+    // the pod's default v6 route is via the gateway on-link, resolved by a
+    // permanent ND entry to the host veth MAC.
+    let pod_addr6 = pod_ip6.map(|ip6| format!("{ip6}/128"));
+    if let Some(addr6) = &pod_addr6 {
+        // `nodad` avoids DAD delay on the /128; the host veth needs a
+        // link-local so the pod can resolve the gateway.
+        ip(&["-n", ns, "addr", "add", addr6, "dev", &env.ifname, "nodad"])?;
+        ip(&["-n", ns, "route", "add", POD_GW6, "dev", &env.ifname])?;
+        ip(&[
+            "-n",
+            ns,
+            "route",
+            "add",
+            "default",
+            "via",
+            POD_GW6,
+            "dev",
+            &env.ifname,
+        ])?;
+        ip(&[
+            "-n",
+            ns,
+            "neigh",
+            "replace",
+            POD_GW6,
+            "lladdr",
+            &hmac,
+            "dev",
+            &env.ifname,
+            "nud",
+            "permanent",
+        ])?;
+    }
+
     cl.create_endpoint(pb::CniEndpoint {
         container_id: env.container_id.clone(),
         ifname: env.ifname.clone(),
@@ -383,6 +437,7 @@ async fn plumb(
         host_if: host_if.clone(),
         host_ifindex: 0,
         ip: pod_ip.to_string(),
+        ip6: pod_ip6.map(|v| v.to_string()).unwrap_or_default(),
         vrf_id: conf.vrf,
         pod_name: env.pod_name.clone(),
         pod_namespace: env.pod_namespace.clone(),
@@ -397,18 +452,20 @@ async fn plumb(
     })?;
 
     let pod_mac = mac_in_ns(ns, &env.ifname)?;
+    let mut ips = vec![json!({ "address": pod_addr, "gateway": POD_GW, "interface": 1 })];
+    let mut routes = vec![json!({ "dst": "0.0.0.0/0", "gw": POD_GW })];
+    if let Some(addr6) = pod_addr6 {
+        ips.push(json!({ "address": addr6, "gateway": POD_GW6, "interface": 1 }));
+        routes.push(json!({ "dst": "::/0", "gw": POD_GW6 }));
+    }
     Ok(json!({
         "cniVersion": conf.cni_version,
         "interfaces": [
             { "name": host_if, "mac": hmac },
             { "name": env.ifname, "mac": pod_mac, "sandbox": env.netns },
         ],
-        "ips": [
-            { "address": pod_addr, "gateway": POD_GW, "interface": 1 },
-        ],
-        "routes": [
-            { "dst": "0.0.0.0/0", "gw": POD_GW },
-        ],
+        "ips": ips,
+        "routes": routes,
         "dns": {},
     }))
 }

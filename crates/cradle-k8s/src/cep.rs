@@ -156,6 +156,7 @@ mod tests {
             host_if: "lxc1".into(),
             host_ifindex: ifindex,
             ip: ip.into(),
+            ip6: String::new(),
             vrf_id: 0,
             pod_name: pod.into(),
             pod_namespace: ns.into(),
