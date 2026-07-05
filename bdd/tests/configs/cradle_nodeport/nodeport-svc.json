@@ -1,0 +1,1 @@
+{ "services": [ {"vip":"203.0.113.1","port":31000,"proto":"tcp","backends":[{"ip":"10.244.0.2","port":8080}]} ] }

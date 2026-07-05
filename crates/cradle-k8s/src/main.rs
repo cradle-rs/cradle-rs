@@ -114,7 +114,19 @@ async fn main() -> Result<()> {
         tokio::spawn(policy_task(client.clone(), args.grpc.clone()));
     }
 
-    service_sync(client, &args.grpc, args.resync_secs).await
+    service_sync(client, &args.grpc, args.resync_secs, args.node_name.clone()).await
+}
+
+/// This node's InternalIP (for NodePort frontends), or None if unknown.
+async fn node_internal_ip(client: &Client, node: &Option<String>) -> Option<std::net::Ipv4Addr> {
+    let name = node.as_ref()?;
+    let nodes: Api<Node> = Api::all(client.clone());
+    let n = nodes.get(name).await.ok()?;
+    n.status?
+        .addresses?
+        .iter()
+        .find(|a| a.type_ == "InternalIP")
+        .and_then(|a| a.address.parse().ok())
 }
 
 /// NetworkPolicy enforcement loop: watch Pods/Namespaces/NetworkPolicies and,
@@ -278,7 +290,12 @@ where
     }
 }
 
-async fn service_sync(client: Client, grpc: &str, resync_secs: u64) -> Result<()> {
+async fn service_sync(
+    client: Client,
+    grpc: &str,
+    resync_secs: u64,
+    node_name: Option<String>,
+) -> Result<()> {
     let services: Api<Service> = Api::all(client.clone());
     let slices: Api<EndpointSlice> = Api::all(client.clone());
 
@@ -320,7 +337,8 @@ async fn service_sync(client: Client, grpc: &str, resync_secs: u64) -> Result<()
                 continue;
             }
         };
-        let desired = sync::build_desired(&svcs, &sls);
+        let node_ip = node_internal_ip(&client, &node_name).await;
+        let desired = sync::build_desired(&svcs, &sls, node_ip);
         if let Err(e) = apply(grpc, &mut cradle, &mut programmed, desired).await {
             warn!("programming cradle: {e:#} (will retry on next event/resync)");
             cradle = None; // reconnect next round
@@ -414,6 +432,14 @@ async fn render_cni_conf(client: Client, node: String, path: PathBuf, grpc: Stri
                     .cloned()
                     .or(spec.pod_cidr.clone().filter(|c| c.contains('.')));
                 let cidr6 = cidrs.iter().find(|c| c.contains(':')).cloned();
+                // The node InternalIP is the hostPort frontend address.
+                let node_ip = n
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.addresses.as_ref())
+                    .and_then(|a| a.iter().find(|x| x.type_ == "InternalIP"))
+                    .map(|x| x.address.clone())
+                    .unwrap_or_default();
                 if let Some(cidr) = cidr {
                     let mut ipam = serde_json::json!({ "type": "cradle", "subnet": cidr });
                     if let Some(c6) = &cidr6 {
@@ -425,6 +451,8 @@ async fn render_cni_conf(client: Client, node: String, path: PathBuf, grpc: Stri
                         "plugins": [{
                             "type": "cradle-cni",
                             "grpcEndpoint": grpc,
+                            "nodeIP": node_ip,
+                            "capabilities": { "portMappings": true },
                             "ipam": ipam
                         }]
                     });

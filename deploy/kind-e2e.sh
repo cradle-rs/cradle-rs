@@ -59,6 +59,26 @@ check_crds() {
     exit 1
 }
 
+# NodePort: expose web as a NodePort service and reach it at the node's
+# InternalIP:<nodePort> — the frontend cradle-k8s programs on the node IP,
+# DNAT'd by the eBPF datapath (no kube-proxy involvement asserted separately).
+check_nodeport() {
+    echo "==> checking NodePort (node IP frontend)"
+    kubectl expose deployment web --name web-np --type NodePort --port 80 >/dev/null
+    local node_ip np
+    node_ip=$(kubectl get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+    for i in $(seq 1 30); do
+        np=$(kubectl get svc web-np -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+        if [ -n "$np" ] && kubectl exec client -- curl -s --max-time 3 "http://$node_ip:$np/" 2>/dev/null | grep -q "Welcome to nginx"; then
+            echo "✓ NodePort $node_ip:$np served through the cradle datapath"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "✗ NodePort $node_ip:$np did not answer" >&2
+    exit 1
+}
+
 # NetworkPolicy: a default-deny-ingress on web must block the client, and
 # deleting it must restore connectivity — enforced by cradle's eBPF datapath
 # (no Cilium in this cluster). Uses a direct pod IP so kube-proxy DNAT can't
@@ -108,6 +128,7 @@ for i in $(seq 1 30); do
         if [ "${DNAT:-0}" -gt 0 ]; then
             echo "✓ ClusterIP $VIP served through the cradle eBPF datapath (l4_dnat=$DNAT)"
             check_crds
+            check_nodeport
             check_policy
             exit 0
         fi

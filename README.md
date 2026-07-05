@@ -79,7 +79,7 @@ cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
 | DaemonSet packaging + kind e2e | ✅ | conflist rendered from Node podCIDR; nginx ClusterIP proven served by the eBPF DNAT (`l4_dnat > 0`) |
 | Host-network-backed services | 🔶 | intentionally left to kube-proxy: unprogrammed VIPs miss the eBPF FIB and fall through to the kernel (hybrid model) |
 | Dual-stack pods (IPv6 IPAM) | ✅ | node-local v6 allocator + ptp v6 gateway (`fe80::1`); pod `/128` into FIB6; `cradle_cni_v6` BDD ([design](docs/design/kube-proxy-dualstack.md)). Policy engine is still v4-ingress-only |
-| NodePort / hostPort / egress SNAT | 🔶 | egress masquerade done (pod→outside-cluster SNAT to the node IP, `NON_MASQ` CIDR set, reply folded into conntrack; `cradle_masq` BDD); NodePort/hostPort next (K3) |
+| NodePort / hostPort / egress SNAT | ✅ | egress masquerade (`cradle_masq`); NodePort as a node-IP `SERVICES` frontend from `cradle-k8s` (kind e2e) + hostPort via the CNI portMappings capability; `cradle_nodeport` BDD ([design](docs/design/kube-proxy-dualstack.md)) |
 | Full kube-proxy replacement | ⬜ | no NodePort/hostPort/LoadBalancer frontends; host-network-backed services and egress masquerade unhandled ([plan](docs/design/kube-proxy-dualstack.md)) |
 
 ## Cilium compatibility status

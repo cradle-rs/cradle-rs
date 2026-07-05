@@ -1,0 +1,9 @@
+{
+  "cniVersion": "1.1.0",
+  "name": "cradle",
+  "type": "cradle-cni",
+  "grpcEndpoint": "unix:/tmp/cradle_nodeport_ctl.sock",
+  "nodeIP": "203.0.113.1",
+  "runtimeConfig": { "portMappings": [ {"hostPort":30080,"containerPort":8080,"protocol":"TCP"} ] },
+  "ipam": { "type": "cradle", "subnet": "10.244.0.0/24" }
+}

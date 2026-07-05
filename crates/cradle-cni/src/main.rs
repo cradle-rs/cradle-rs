@@ -91,9 +91,38 @@ struct NetConf {
     /// to the chained plugin.
     #[serde(default)]
     chained: bool,
+    /// The node's uplink IP — the frontend for hostPort mappings. Rendered
+    /// into the conflist by cradle-k8s; empty ⇒ hostPort is skipped.
+    #[serde(rename = "nodeIP", default)]
+    node_ip: String,
+    /// CNI `portMappings` capability (kubelet passes it under
+    /// `runtimeConfig` when the conflist advertises the capability).
+    #[serde(rename = "runtimeConfig", default)]
+    runtime_config: RuntimeConfig,
     /// GC input: attachments the runtime still considers valid.
     #[serde(rename = "cni.dev/valid-attachments", default)]
     valid_attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeConfig {
+    #[serde(rename = "portMappings", default)]
+    port_mappings: Vec<PortMapping>,
+}
+
+/// A hostPort mapping: `<nodeIP>:hostPort` → this pod's `containerPort`.
+#[derive(Debug, Clone, Deserialize)]
+struct PortMapping {
+    #[serde(rename = "hostPort")]
+    host_port: u32,
+    #[serde(rename = "containerPort")]
+    container_port: u32,
+    #[serde(default = "default_proto")]
+    protocol: String,
+}
+
+fn default_proto() -> String {
+    "tcp".to_string()
 }
 
 fn default_cni_version() -> String {
@@ -451,6 +480,10 @@ async fn plumb(
         )
     })?;
 
+    // hostPort: program each mapping as a single-backend service on the node
+    // IP (<nodeIP>:hostPort → this pod:containerPort) via the eBPF L4 LB.
+    program_host_ports(conf, pod_ip, cl).await?;
+
     let pod_mac = mac_in_ns(ns, &env.ifname)?;
     let mut ips = vec![json!({ "address": pod_addr, "gateway": POD_GW, "interface": 1 })];
     let mut routes = vec![json!({ "dst": "0.0.0.0/0", "gw": POD_GW })];
@@ -470,6 +503,58 @@ async fn plumb(
     }))
 }
 
+/// Stable nonzero service id for a hostPort frontend.
+fn hostport_svc_id(node_ip: &str, host_port: u32, proto: &str) -> u32 {
+    (fnv1a64(&format!("{node_ip}:{host_port}/{proto}")) as u32).max(1)
+}
+
+/// Install the pod's hostPort mappings as node-IP L4 services (ADD).
+async fn program_host_ports(
+    conf: &NetConf,
+    pod_ip: Ipv4Addr,
+    cl: &mut CradleClient<tonic::transport::Channel>,
+) -> Result<()> {
+    if conf.node_ip.is_empty() {
+        return Ok(());
+    }
+    for pm in &conf.runtime_config.port_mappings {
+        cl.add_service(pb::Service {
+            svc_id: hostport_svc_id(&conf.node_ip, pm.host_port, &pm.protocol),
+            vip: conf.node_ip.clone(),
+            port: pm.host_port,
+            proto: pm.protocol.to_lowercase(),
+            backends: vec![pb::Backend {
+                ip: pod_ip.to_string(),
+                port: pm.container_port,
+            }],
+        })
+        .await
+        .map_err(|e| {
+            coded(
+                ERR_INTERNAL,
+                format!("hostPort AddService failed: {}", e.message()),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Remove the pod's hostPort services (DEL). Best-effort.
+async fn remove_host_ports(conf: &NetConf, cl: &mut CradleClient<tonic::transport::Channel>) {
+    if conf.node_ip.is_empty() {
+        return;
+    }
+    for pm in &conf.runtime_config.port_mappings {
+        let _ = cl
+            .del_service(pb::ServiceDel {
+                vip: conf.node_ip.clone(),
+                port: pm.host_port,
+                proto: pm.protocol.to_lowercase(),
+            })
+            .await;
+    }
+}
+
 async fn cmd_del(env: &CniEnv, conf: &NetConf) -> Result<()> {
     // Unprogram the datapath first (the daemon is normally still up during
     // pod teardown); an unreachable daemon must not fail the DEL — the veth
@@ -481,6 +566,7 @@ async fn cmd_del(env: &CniEnv, conf: &NetConf) -> Result<()> {
                 ifname: env.ifname.clone(),
             })
             .await;
+        remove_host_ports(conf, &mut cl).await;
     }
     // Deleting the host end removes the pair wherever the peer lives.
     let _ = Command::new("ip")
