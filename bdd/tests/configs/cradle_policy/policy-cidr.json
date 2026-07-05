@@ -1,0 +1,14 @@
+{
+  "identities": [
+    { "ip": "10.244.0.2", "id": 100 },
+    { "ip": "10.244.0.3", "id": 200 }
+  ],
+  "cidr_identities": [
+    { "cidr": "10.1.1.0/24", "id": 300 }
+  ],
+  "policies": [
+    { "namespace": "default", "pod": "pod1", "enforce": false },
+    { "namespace": "default", "pod": "pod2", "enforce": true,
+      "rules": [ { "identity": 300 } ] }
+  ]
+}

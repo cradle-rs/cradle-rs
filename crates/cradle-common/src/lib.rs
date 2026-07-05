@@ -531,22 +531,41 @@ pub const IDENTITY_HOST: u32 = 1;
 /// Reserved identity: any source with no `IDENTITY` entry.
 pub const IDENTITY_WORLD: u32 = 2;
 
-/// Ingress-policy allow-rule key: `(endpoint oif, source identity, proto,
-/// dport)`. `identity`, `proto`, and `port` may each be 0 = wildcard; the
-/// datapath probes most-specific-first (docs/design/policy.md). Present in
-/// `POLICY` ⇒ allow.
+/// Policy rule direction: traffic delivered *to* the endpoint.
+pub const POLICY_DIR_INGRESS: u8 = 0;
+/// Policy rule direction: traffic initiated *by* the endpoint.
+pub const POLICY_DIR_EGRESS: u8 = 1;
+
+/// `EP_POLICY` value bit: enforce ingress rules for this endpoint.
+pub const EP_F_INGRESS: u8 = 1 << 0;
+/// `EP_POLICY` value bit: enforce egress rules for this endpoint.
+pub const EP_F_EGRESS: u8 = 1 << 1;
+
+/// `PCT` value: flow initiated by the local pod (recorded at pod egress,
+/// pre-NAT) — its replies bypass the pod's ingress policy.
+pub const PCT_POD_INITIATED: u8 = 1;
+/// `PCT` value: admitted flow initiated from outside the pod (recorded at
+/// ingress delivery, post-NAT) — its replies bypass the pod's egress policy.
+pub const PCT_INBOUND: u8 = 2;
+
+/// Policy allow-rule key: `(endpoint oif, peer identity, proto, dport,
+/// direction)`. The peer is the source for ingress rules and the destination
+/// for egress rules. `identity`, `proto`, and `port` may each be 0 =
+/// wildcard; the datapath probes most-specific-first (docs/design/policy.md).
+/// Present in `POLICY` ⇒ allow.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PolicyKey {
-    /// Destination endpoint: the pod's host-side veth ifindex.
+    /// The enforced endpoint: the pod's host-side veth ifindex.
     pub ep: u32,
-    /// Source identity (label-set hash; 1 = host, 2 = world, 0 = any).
+    /// Peer identity (label-set hash; 1 = host, 2 = world, 0 = any).
     pub identity: u32,
     /// Destination L4 port, network byte order (0 = any).
     pub port: u16,
     /// IP protocol (0 = any).
     pub proto: u8,
-    pub _pad: u8,
+    /// `POLICY_DIR_*`.
+    pub dir: u8,
 }
 
 // ======================= L4: load balancing / conntrack ====================

@@ -1,0 +1,8 @@
+{
+  "identities": [
+    { "ip": "2001:db8:1::1", "id": 100 }
+  ],
+  "policies": [
+    { "host_if": "fwd2", "enforce": true, "rules": [ { "identity": 100 } ] }
+  ]
+}

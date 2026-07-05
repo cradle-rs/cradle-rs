@@ -147,6 +147,8 @@ async fn policy_task(client: Client, grpc: String) {
     notify.notify_one();
 
     let mut cradle: Option<CradleClient<tonic::transport::Channel>> = None;
+    // CIDR bindings pushed last reconcile — removed ones are deleted.
+    let mut last_cidrs: Vec<(String, u32)> = Vec::new();
     let mut resync = tokio::time::interval(Duration::from_secs(30));
     resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     resync.tick().await;
@@ -187,7 +189,7 @@ async fn policy_task(client: Client, grpc: String) {
                 continue;
             }
         };
-        if let Err(e) = push_policy(cl, &pl, &nl, &npl, &endpoints).await {
+        if let Err(e) = push_policy(cl, &pl, &nl, &npl, &endpoints, &mut last_cidrs).await {
             warn!("enforce-policy: {e:#}");
             cradle = None;
         }
@@ -200,10 +202,32 @@ async fn push_policy(
     namespaces: &[k8s_openapi::api::core::v1::Namespace],
     policies: &[k8s_openapi::api::networking::v1::NetworkPolicy],
     endpoints: &[pb::CniEndpoint],
+    last_cidrs: &mut Vec<(String, u32)>,
 ) -> Result<()> {
     for (ip, id) in netpol::identities(pods) {
         cl.set_identity(pb::Identity { ip, identity: id }).await?;
     }
+    // ipBlock CIDR bindings: set the current ones, delete the vanished ones.
+    let cidrs = netpol::cidr_bindings(policies);
+    for (cidr, id) in &cidrs {
+        cl.set_cidr_identity(pb::CidrIdentity {
+            cidr: cidr.clone(),
+            identity: *id,
+            del: false,
+        })
+        .await?;
+    }
+    for (cidr, id) in last_cidrs.iter() {
+        if !cidrs.iter().any(|(c, _)| c == cidr) {
+            cl.set_cidr_identity(pb::CidrIdentity {
+                cidr: cidr.clone(),
+                identity: *id,
+                del: true,
+            })
+            .await?;
+        }
+    }
+    *last_cidrs = cidrs;
     for ep in endpoints {
         if ep.pod_name.is_empty() {
             continue;

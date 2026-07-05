@@ -1012,6 +1012,43 @@ impl Control {
         Ok(())
     }
 
+    /// v6 sibling of `set_identity` / `del_identity`. (No Hubble identity
+    /// mirror: flow export is v4-only.)
+    pub async fn set_identity6(&self, ip: Ipv6Addr, identity: u32, del: bool) -> Result<()> {
+        self.dp.lock().await.identity6_set(ip, identity, del)?;
+        Ok(())
+    }
+
+    /// Bind (or remove, `del`) a peer-CIDR identity (ipBlock peers).
+    pub async fn set_cidr_identity(
+        &self,
+        net: Ipv4Addr,
+        prefix_len: u8,
+        identity: u32,
+        del: bool,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .cidr_identity_set(net, prefix_len, identity, del)?;
+        Ok(())
+    }
+
+    /// v6 sibling of `set_cidr_identity`.
+    pub async fn set_cidr6_identity(
+        &self,
+        net: Ipv6Addr,
+        prefix_len: u8,
+        identity: u32,
+        del: bool,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .cidr6_identity_set(net, prefix_len, identity, del)?;
+        Ok(())
+    }
+
     /// Resolve a policy target to its endpoint ifindex: by host veth name,
     /// or by pod identity through the endpoint store.
     pub async fn resolve_endpoint(
@@ -1030,20 +1067,27 @@ impl Control {
             .with_context(|| format!("no endpoint for pod {pod_namespace}/{pod_name}"))
     }
 
-    /// Replace an endpoint's ingress policy (see `Dataplane::endpoint_policy_set`).
+    /// Replace an endpoint's policy (see `Dataplane::endpoint_policy_set`).
     pub async fn set_endpoint_policy(
         &self,
         ep: u32,
         enforce: bool,
+        enforce_egress: bool,
         rules: &[(u32, u8, u16)],
+        egress_rules: &[(u32, u8, u16)],
     ) -> Result<()> {
-        self.dp
-            .lock()
-            .await
-            .endpoint_policy_set(ep, enforce, rules)?;
+        self.dp.lock().await.endpoint_policy_set(
+            ep,
+            enforce,
+            enforce_egress,
+            rules,
+            egress_rules,
+        )?;
         info!(
-            "endpoint policy ifindex {ep}: enforce={enforce}, {} rule(s)",
-            rules.len()
+            "endpoint policy ifindex {ep}: ingress={enforce} ({} rule(s)), \
+             egress={enforce_egress} ({} rule(s))",
+            rules.len(),
+            egress_rules.len()
         );
         Ok(())
     }
@@ -1791,11 +1835,11 @@ impl Cradle for GrpcService {
         req: Request<pb::Identity>,
     ) -> Result<Response<pb::Empty>, Status> {
         let i = req.into_inner();
-        let ip = i.ip.parse::<Ipv4Addr>().map_err(st)?;
-        self.control
-            .set_identity(ip, i.identity)
-            .await
-            .map_err(st)?;
+        match i.ip.parse::<IpAddr>().map_err(st)? {
+            IpAddr::V4(ip) => self.control.set_identity(ip, i.identity).await,
+            IpAddr::V6(ip) => self.control.set_identity6(ip, i.identity, false).await,
+        }
+        .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 
@@ -1804,8 +1848,32 @@ impl Cradle for GrpcService {
         req: Request<pb::IdentityDel>,
     ) -> Result<Response<pb::Empty>, Status> {
         let i = req.into_inner();
-        let ip = i.ip.parse::<Ipv4Addr>().map_err(st)?;
-        self.control.del_identity(ip).await.map_err(st)?;
+        match i.ip.parse::<IpAddr>().map_err(st)? {
+            IpAddr::V4(ip) => self.control.del_identity(ip).await,
+            IpAddr::V6(ip) => self.control.set_identity6(ip, 0, true).await,
+        }
+        .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_cidr_identity(
+        &self,
+        req: Request<pb::CidrIdentity>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let c = req.into_inner();
+        if c.cidr.contains(':') {
+            let (net, len) = util::parse_ipv6_prefix(&c.cidr).map_err(st)?;
+            self.control
+                .set_cidr6_identity(net, len, c.identity, c.del)
+                .await
+                .map_err(st)?;
+        } else {
+            let (net, len) = util::parse_ipv4_prefix(&c.cidr).map_err(st)?;
+            self.control
+                .set_cidr_identity(net, len, c.identity, c.del)
+                .await
+                .map_err(st)?;
+        }
         Ok(Response::new(pb::Empty {}))
     }
 
@@ -1819,13 +1887,15 @@ impl Cradle for GrpcService {
             .resolve_endpoint(&p.host_if, &p.pod_namespace, &p.pod_name)
             .await
             .map_err(st)?;
-        let rules: Vec<(u32, u8, u16)> = p
-            .rules
-            .iter()
-            .map(|r| (r.identity, r.proto as u8, r.port as u16))
-            .collect();
+        let as_tuples = |rs: &[pb::PolicyRule]| -> Vec<(u32, u8, u16)> {
+            rs.iter()
+                .map(|r| (r.identity, r.proto as u8, r.port as u16))
+                .collect()
+        };
+        let rules = as_tuples(&p.rules);
+        let egress_rules = as_tuples(&p.egress_rules);
         self.control
-            .set_endpoint_policy(ep, p.enforce, &rules)
+            .set_endpoint_policy(ep, p.enforce, p.enforce_egress, &rules, &egress_rules)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

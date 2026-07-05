@@ -200,24 +200,36 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            for c in &cfg.cidr_identities {
+                client
+                    .set_cidr_identity(pb::CidrIdentity {
+                        cidr: c.cidr.clone(),
+                        identity: c.id,
+                        del: false,
+                    })
+                    .await?;
+            }
             for pol in &cfg.policies {
+                let as_rules = |rs: &[config::PolicyRuleCfg]| -> Result<Vec<pb::PolicyRule>> {
+                    rs.iter()
+                        .map(|r| {
+                            Ok(pb::PolicyRule {
+                                identity: r.identity,
+                                proto: config::rule_proto(&r.proto)? as u32,
+                                port: r.port as u32,
+                            })
+                        })
+                        .collect()
+                };
                 client
                     .set_endpoint_policy(pb::EndpointPolicy {
                         host_if: pol.host_if.clone(),
                         pod_namespace: pol.namespace.clone(),
                         pod_name: pol.pod.clone(),
                         enforce: pol.enforce,
-                        rules: pol
-                            .rules
-                            .iter()
-                            .map(|r| {
-                                Ok(pb::PolicyRule {
-                                    identity: r.identity,
-                                    proto: config::rule_proto(&r.proto)? as u32,
-                                    port: r.port as u32,
-                                })
-                            })
-                            .collect::<Result<Vec<_>>>()?,
+                        rules: as_rules(&pol.rules)?,
+                        enforce_egress: pol.enforce_egress,
+                        egress_rules: as_rules(&pol.egress_rules)?,
                     })
                     .await?;
             }

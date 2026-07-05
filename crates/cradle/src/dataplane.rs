@@ -22,9 +22,10 @@ use cradle_common::{
     Backend, Backend6, BackendKey, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
     GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM,
-    MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED,
-    STAT_MAX, SVC_F_AFFINITY,
+    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, EP_F_EGRESS, EP_F_INGRESS,
+    FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS,
+    NH_F_SRV6, NH_F_V6, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, STAT_FDB_AGED, STAT_MAX,
+    SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -80,6 +81,9 @@ pub struct Dataplane {
     backends6: HashMap<MapData, BackendKey, Backend6>,
     /// Ingress network policy (docs/design/policy.md).
     identity: HashMap<MapData, u32, u32>,
+    identity6: HashMap<MapData, [u8; 16], u32>,
+    cidr_id: LpmTrie<MapData, [u8; 4], u32>,
+    cidr_id6: LpmTrie<MapData, [u8; 16], u32>,
     ep_policy: HashMap<MapData, u32, u8>,
     policy: HashMap<MapData, PolicyKey, u8>,
     /// Egress masquerade (docs/design/kube-proxy-dualstack.md).
@@ -160,6 +164,11 @@ impl Dataplane {
                 bpf.take_map("SERVICES6").context("map SERVICES6 missing")?,
             )?,
             identity: HashMap::try_from(bpf.take_map("IDENTITY").context("map IDENTITY missing")?)?,
+            identity6: HashMap::try_from(
+                bpf.take_map("IDENTITY6").context("map IDENTITY6 missing")?,
+            )?,
+            cidr_id: LpmTrie::try_from(bpf.take_map("CIDR_ID").context("map CIDR_ID missing")?)?,
+            cidr_id6: LpmTrie::try_from(bpf.take_map("CIDR_ID6").context("map CIDR_ID6 missing")?)?,
             ep_policy: HashMap::try_from(
                 bpf.take_map("EP_POLICY").context("map EP_POLICY missing")?,
             )?,
@@ -377,15 +386,63 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Replace endpoint `ep`'s ingress policy: clear its old allow rules,
-    /// install `rules` (`(identity, proto, port)`, 0 = wildcard), and mark it
-    /// enforcing. `enforce = false` removes enforcement and all rules —
-    /// back to default-allow.
+    /// Bind a peer CIDR to an identity (ipBlock peers), or remove the
+    /// binding (`del`, idempotent).
+    pub fn cidr_identity_set(
+        &mut self,
+        net: std::net::Ipv4Addr,
+        prefix_len: u8,
+        identity: u32,
+        del: bool,
+    ) -> Result<()> {
+        let key = Key::new(prefix_len as u32, net.octets());
+        if del {
+            let _ = self.cidr_id.remove(&key);
+        } else {
+            self.cidr_id.insert(&key, identity, 0)?;
+        }
+        Ok(())
+    }
+
+    /// v6 sibling of `identity_set` / `identity_del`.
+    pub fn identity6_set(&mut self, ip: Ipv6Addr, identity: u32, del: bool) -> Result<()> {
+        if del {
+            let _ = self.identity6.remove(&ip.octets());
+        } else {
+            self.identity6.insert(ip.octets(), identity, 0)?;
+        }
+        Ok(())
+    }
+
+    /// v6 sibling of `cidr_identity_set`.
+    pub fn cidr6_identity_set(
+        &mut self,
+        net: Ipv6Addr,
+        prefix_len: u8,
+        identity: u32,
+        del: bool,
+    ) -> Result<()> {
+        let key = Key::new(prefix_len as u32, net.octets());
+        if del {
+            let _ = self.cidr_id6.remove(&key);
+        } else {
+            self.cidr_id6.insert(&key, identity, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Replace endpoint `ep`'s policy: clear its old allow rules, install
+    /// `rules` (ingress) and `egress_rules` (`(identity, proto, port)`, 0 =
+    /// wildcard), and mark the enforced directions in `EP_POLICY`. Neither
+    /// direction enforcing removes the endpoint entirely — back to
+    /// default-allow.
     pub fn endpoint_policy_set(
         &mut self,
         ep: u32,
         enforce: bool,
+        enforce_egress: bool,
         rules: &[(u32, u8, u16)],
+        egress_rules: &[(u32, u8, u16)],
     ) -> Result<()> {
         let stale: Vec<PolicyKey> = self
             .policy
@@ -396,24 +453,35 @@ impl Dataplane {
         for key in stale {
             let _ = self.policy.remove(&key);
         }
-        if !enforce {
+        if !enforce && !enforce_egress {
             let _ = self.ep_policy.remove(&ep);
             return Ok(());
         }
-        for &(identity, proto, port) in rules {
-            self.policy.insert(
-                PolicyKey {
-                    ep,
-                    identity,
-                    port: util::port_to_map(port),
-                    proto,
-                    _pad: 0,
-                },
-                1u8,
-                0,
-            )?;
+        let dirs = [
+            (enforce, POLICY_DIR_INGRESS, rules),
+            (enforce_egress, POLICY_DIR_EGRESS, egress_rules),
+        ];
+        for (on, dir, dir_rules) in dirs {
+            if !on {
+                continue;
+            }
+            for &(identity, proto, port) in dir_rules {
+                self.policy.insert(
+                    PolicyKey {
+                        ep,
+                        identity,
+                        port: util::port_to_map(port),
+                        proto,
+                        dir,
+                    },
+                    1u8,
+                    0,
+                )?;
+            }
         }
-        self.ep_policy.insert(ep, 1u8, 0)?;
+        let flags =
+            if enforce { EP_F_INGRESS } else { 0 } | if enforce_egress { EP_F_EGRESS } else { 0 };
+        self.ep_policy.insert(ep, flags, 0)?;
         Ok(())
     }
 

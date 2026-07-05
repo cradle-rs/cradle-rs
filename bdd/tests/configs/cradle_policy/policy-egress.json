@@ -1,0 +1,12 @@
+{
+  "identities": [
+    { "ip": "10.244.0.2", "id": 100 },
+    { "ip": "10.244.0.3", "id": 200 }
+  ],
+  "policies": [
+    { "namespace": "default", "pod": "pod1", "enforce": false,
+      "enforce_egress": true,
+      "egress_rules": [ { "identity": 200 } ] },
+    { "namespace": "default", "pod": "pod2", "enforce": false }
+  ]
+}

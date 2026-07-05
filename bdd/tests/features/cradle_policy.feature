@@ -1,13 +1,16 @@
 @serial
 @cradle_policy
-Feature: Ingress network policy in the eBPF datapath
-  cradle enforces Kubernetes-style ingress NetworkPolicy natively: pod IPs map
-  to label-set identities, and an enforced pod endpoint drops ingress that is
-  neither a reply to a pod-initiated flow (stateful, via PCT) nor matched by
-  an allow rule. Policy is checked in `cradle_tc` where the destination
-  resolves to the pod's veth — so same-node and fabric-ingress traffic
-  enforce at the same point. Kernel forwarding is off, so the datapath is the
-  only thing that could carry or drop the packets. Design: docs/design/policy.md.
+Feature: Network policy in the eBPF datapath
+  cradle enforces Kubernetes-style NetworkPolicy natively: pod IPs map to
+  label-set identities, and an enforced pod endpoint drops traffic — ingress
+  or egress — that is neither a reply to a flow recorded in the opposite
+  direction (stateful, via PCT) nor matched by an allow rule. Ingress is
+  checked in `cradle_tc` where the destination resolves to the pod's veth;
+  egress at the pod's veth ingress hook, post-NAT. Peers without an exact
+  identity fall back to the CIDR LPM (ipBlock; an `except` prefix is a
+  more-specific entry back to world). Kernel forwarding is off, so the
+  datapath is the only thing that could carry or drop the packets.
+  Design: docs/design/policy.md.
 
   Topology (single node, cradle-cni pods):
   ```
@@ -44,9 +47,30 @@ Feature: Ingress network policy in the eBPF datapath
     Then ping from "host1" to "10.244.0.2" should fail
     And HTTP GET "http://10.244.0.3:8080/" from namespace "pod1" should eventually succeed
 
+  Scenario: Egress allow by identity, deny world, inbound replies pass
+    Given the test topology exists
+    When I serve HTTP "p1" in namespace "pod1" bound to "10.244.0.2"
+    And I apply cradle config "policy-egress.json" to namespace "node" via gRPC as "ctl"
+    # pod1 egress: pod2's identity allowed, world (host1) is not.
+    Then ping from "pod1" to "10.244.0.3" should succeed
+    And ping from "pod1" to "10.1.1.2" should fail
+    # Egress statefulness: host1-initiated flow admitted inbound (pod1 has no
+    # ingress enforcement) — pod1's replies bypass its egress rules.
+    And HTTP GET "http://10.244.0.2:8080/" from namespace "host1" should eventually succeed
+
+  Scenario: ipBlock CIDR identity with except-prefix override
+    Given the test topology exists
+    When I apply cradle config "policy-cidr.json" to namespace "node" via gRPC as "ctl"
+    # host1 (10.1.1.2) matches the 10.1.1.0/24 binding → identity 300, allowed.
+    Then ping from "host1" to "10.244.0.3" should eventually succeed
+    When I apply cradle config "policy-cidr-except.json" to namespace "node" via gRPC as "ctl"
+    # The /32 except entry is more specific → host1 is world again, denied.
+    Then ping from "host1" to "10.244.0.3" should fail
+
   Scenario: Teardown topology
     Given the test topology exists
-    When I stop HTTP in namespace "pod2"
+    When I stop HTTP in namespace "pod1"
+    And I stop HTTP in namespace "pod2"
     And I stop cradle CNI node in namespace "node"
     And I delete namespace "pod1"
     And I delete namespace "pod2"

@@ -73,7 +73,10 @@ pub struct Config {
     /// Policy identities: pod/node IP → identity (docs/design/policy.md).
     #[serde(default)]
     pub identities: Vec<IdentityCfg>,
-    /// Endpoint ingress policies (replace semantics per endpoint).
+    /// Peer-CIDR → identity bindings (ipBlock peers).
+    #[serde(default)]
+    pub cidr_identities: Vec<CidrIdentityCfg>,
+    /// Endpoint policies (replace semantics per endpoint).
     #[serde(default)]
     pub policies: Vec<PolicyCfg>,
     #[serde(default)]
@@ -277,7 +280,8 @@ pub struct IdentityCfg {
     pub id: u32,
 }
 
-/// An endpoint ingress policy: target by `host_if` or `namespace`/`pod`.
+/// An endpoint policy: target by `host_if` or `namespace`/`pod`. `enforce`
+/// gates the ingress `rules`, `enforce_egress` the `egress_rules`.
 #[derive(Debug, Deserialize)]
 pub struct PolicyCfg {
     #[serde(default)]
@@ -290,10 +294,21 @@ pub struct PolicyCfg {
     pub enforce: bool,
     #[serde(default)]
     pub rules: Vec<PolicyRuleCfg>,
+    #[serde(default)]
+    pub enforce_egress: bool,
+    #[serde(default)]
+    pub egress_rules: Vec<PolicyRuleCfg>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// A peer-CIDR → identity binding (ipBlock peers; v4 or v6).
+#[derive(Debug, Deserialize)]
+pub struct CidrIdentityCfg {
+    pub cidr: String,
+    pub id: u32,
 }
 
 /// An allow rule: 0 / empty = wildcard.
@@ -641,21 +656,37 @@ impl Config {
             ctl.add_non_masq(net, len).await?;
         }
         for i in &self.identities {
-            let ip =
-                i.ip.parse()
-                    .with_context(|| format!("bad identity ip {:?}", i.ip))?;
-            ctl.set_identity(ip, i.id).await?;
+            match i
+                .ip
+                .parse::<IpAddr>()
+                .with_context(|| format!("bad identity ip {:?}", i.ip))?
+            {
+                IpAddr::V4(ip) => ctl.set_identity(ip, i.id).await?,
+                IpAddr::V6(ip) => ctl.set_identity6(ip, i.id, false).await?,
+            }
+        }
+        for c in &self.cidr_identities {
+            if c.cidr.contains(':') {
+                let (net, len) = util::parse_ipv6_prefix(&c.cidr)?;
+                ctl.set_cidr6_identity(net, len, c.id, false).await?;
+            } else {
+                let (net, len) = util::parse_ipv4_prefix(&c.cidr)?;
+                ctl.set_cidr_identity(net, len, c.id, false).await?;
+            }
         }
         for pol in &self.policies {
             let ep = ctl
                 .resolve_endpoint(&pol.host_if, &pol.namespace, &pol.pod)
                 .await?;
-            let rules = pol
-                .rules
-                .iter()
-                .map(|r| Ok((r.identity, rule_proto(&r.proto)?, r.port)))
-                .collect::<Result<Vec<_>>>()?;
-            ctl.set_endpoint_policy(ep, pol.enforce, &rules).await?;
+            let as_tuples = |rs: &[PolicyRuleCfg]| -> Result<Vec<(u32, u8, u16)>> {
+                rs.iter()
+                    .map(|r| Ok((r.identity, rule_proto(&r.proto)?, r.port)))
+                    .collect()
+            };
+            let rules = as_tuples(&pol.rules)?;
+            let egress_rules = as_tuples(&pol.egress_rules)?;
+            ctl.set_endpoint_policy(ep, pol.enforce, pol.enforce_egress, &rules, &egress_rules)
+                .await?;
         }
 
         for svc in &self.l7_services {
