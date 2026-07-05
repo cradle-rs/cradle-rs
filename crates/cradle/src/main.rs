@@ -116,6 +116,16 @@ pub enum CtlOp {
         /// Prefix, e.g. "10.0.9.16/28".
         prefix: String,
     },
+    /// Delete one L4 service by its (vip, port, proto) key.
+    DelService {
+        /// Service VIP, e.g. "10.96.0.10".
+        vip: String,
+        /// Service port.
+        port: u16,
+        /// Protocol: tcp or udp.
+        #[arg(default_value = "tcp")]
+        proto: String,
+    },
     /// Generate and bulk-install a synthetic route table with a DFZ-like
     /// prefix-length distribution (deterministic per seed).
     GenRoutes {

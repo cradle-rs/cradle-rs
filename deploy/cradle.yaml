@@ -1,0 +1,118 @@
+# cradle as a Kubernetes CNI provider: per-node DaemonSet running the cradle
+# daemon (eBPF datapath + gRPC control API on a host socket) and cradle-k8s
+# (Service→eBPF-LB sync + CNI conflist render). The init container installs
+# the cradle-cni plugin binary onto the node.
+#
+# Scope (M4): pod networking + ClusterIP services with Pod-backed endpoints
+# via the eBPF L4 LB. Services with host-network backends (e.g. the
+# default/kubernetes API service) are intentionally skipped — such traffic
+# misses the eBPF FIB, falls through to the kernel, and is served by
+# kube-proxy; run this alongside kube-proxy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cradle-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cradle
+  namespace: cradle-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cradle
+rules:
+- apiGroups: [""]
+  resources: ["services", "nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cradle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cradle
+subjects:
+- kind: ServiceAccount
+  name: cradle
+  namespace: cradle-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cradle
+  namespace: cradle-system
+spec:
+  selector:
+    matchLabels:
+      app: cradle
+  template:
+    metadata:
+      labels:
+        app: cradle
+    spec:
+      serviceAccountName: cradle
+      hostNetwork: true
+      dnsPolicy: Default
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      initContainers:
+      - name: install-cni
+        image: cradle:dev
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c", "cp /usr/local/bin/cradle-cni /host/opt/cni/bin/cradle-cni"]
+        volumeMounts:
+        - name: cni-bin
+          mountPath: /host/opt/cni/bin
+      containers:
+      - name: cradle
+        image: cradle:dev
+        imagePullPolicy: IfNotPresent
+        command:
+        - cradle
+        - serve
+        - --grpc=unix:/run/cradle/cradle.sock
+        - --state-dir=/run/cradle
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: run-cradle
+          mountPath: /run/cradle
+      - name: cradle-k8s
+        image: cradle:dev
+        imagePullPolicy: IfNotPresent
+        command:
+        - cradle-k8s
+        - --grpc=unix:/run/cradle/cradle.sock
+        - --write-cni-conf=/host/etc/cni/net.d/05-cradle.conflist
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: run-cradle
+          mountPath: /run/cradle
+        - name: cni-conf
+          mountPath: /host/etc/cni/net.d
+      volumes:
+      - name: cni-bin
+        hostPath:
+          path: /opt/cni/bin
+          type: DirectoryOrCreate
+      - name: cni-conf
+        hostPath:
+          path: /etc/cni/net.d
+          type: DirectoryOrCreate
+      - name: run-cradle
+        hostPath:
+          path: /run/cradle
+          type: DirectoryOrCreate

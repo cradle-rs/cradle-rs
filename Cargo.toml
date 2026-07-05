@@ -5,6 +5,7 @@ members = [
     "crates/cradle-ebpf",
     "crates/cradle",
     "crates/cradle-cni",
+    "crates/cradle-k8s",
     "bdd",
 ]
 # The eBPF crate is built for `bpfel-unknown-none` by `cradle`'s build script
@@ -13,6 +14,7 @@ default-members = [
     "crates/cradle-common",
     "crates/cradle",
     "crates/cradle-cni",
+    "crates/cradle-k8s",
 ]
 
 [workspace.package]

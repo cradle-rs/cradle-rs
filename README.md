@@ -167,10 +167,22 @@ nodes exchange their pod CIDRs over eBGP, each zebra-rs tees the learned
 route into its node's eBPF FIB, and pods on different nodes ping each other
 with kernel forwarding disabled on both nodes.
 
+Kubernetes Services ride the existing eBPF L4 load balancer: the
+`cradle-k8s` controller (kube-rs) watches Services/EndpointSlices and
+programs every IPv4 ClusterIP with Pod-backed endpoints (`AddService`
+replaces in place, `DelService` removes; a periodic resync converges a
+restarted daemon). Services with host-network backends (e.g.
+`default/kubernetes`) are intentionally left to kube-proxy — they miss the
+eBPF FIB and fall through to the kernel. `deploy/` has the DaemonSet
+(cradle + cradle-k8s, an init container installing `cradle-cni`, the CNI
+conflist rendered from the Node's podCIDR) and `kind-e2e.sh`, which brings
+up a kind cluster with the default CNI disabled and proves an nginx
+ClusterIP is served through the eBPF DNAT (`l4_dnat > 0`).
+
 | Milestone | Status | Notes |
 |---|---|---|
 | M1 CNI plugin + endpoint plumbing | ✅ | `cradle-cni` + AllocIp/CreateEndpoint gRPC; `cradle_cni` |
 | M2 multi-node pod routing over BGP | ✅ | learned-route tee to the pod FIB; `cradle_cni_bgp` |
 | M3 lifecycle (CHECK/GC/restart reconcile) | ✅ | startup reconcile re-programs stored endpoints; `cradle_cni_restart` |
-| M4 Services (ClusterIP via eBPF L4 LB) + kind packaging | ⬜ | |
+| M4 Services (ClusterIP via eBPF L4 LB) + kind packaging | ✅ | `cradle-k8s` Service/EndpointSlice sync + DaemonSet; `cradle_cni_svc` BDD + `deploy/kind-e2e.sh` |
 | Cilium compat (agent REST subset, CRDs, chaining) | ⬜ | story 2 of `docs/design/cni-cilium.md` |

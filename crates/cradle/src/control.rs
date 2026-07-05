@@ -761,6 +761,16 @@ impl Control {
         Ok(())
     }
 
+    /// Remove a service by its (vip, port, proto) key — either family.
+    pub async fn del_service(&self, vip: IpAddr, port: u16, proto: u8) -> Result<()> {
+        let mut dp = self.dp.lock().await;
+        match vip {
+            IpAddr::V4(v4) => dp.service_del(v4, port, proto)?,
+            IpAddr::V6(v6) => dp.service6_del(v6, port, proto)?,
+        }
+        Ok(())
+    }
+
     pub async fn add_service6(
         &self,
         svc_id: u32,
@@ -1520,6 +1530,24 @@ impl Cradle for GrpcService {
                     .map_err(st)?;
             }
         }
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_service(
+        &self,
+        req: Request<pb::ServiceDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let s = req.into_inner();
+        let proto = match s.proto.as_str() {
+            "tcp" => 6u8,
+            "udp" => 17u8,
+            other => return Err(Status::invalid_argument(format!("bad proto {other:?}"))),
+        };
+        let vip: IpAddr = s.vip.parse().map_err(st)?;
+        self.control
+            .del_service(vip, s.port as u16, proto)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

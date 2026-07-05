@@ -259,6 +259,15 @@ message Service {
   repeated Backend backends = 5;
 }
 
+// Remove a service by its (vip, port, proto) key. Idempotent. Re-sending
+// AddService for an existing key replaces its backend set, so Add + Del is
+// the complete reconcile surface a Kubernetes Service controller needs.
+message ServiceDel {
+  string vip = 1;
+  uint32 port = 2;
+  string proto = 3;  // tcp | udp
+}
+
 // ---- Kubernetes CNI support ----
 //
 // The cradle-cni plugin (CNI ADD/DEL) drives these: AllocIp draws a pod
@@ -360,6 +369,7 @@ service Cradle {
   rpc AddMirrorRoute(MirrorRoute) returns (Empty);
   rpc DelMirrorRoute(MirrorRouteDel) returns (Empty);
   rpc AddService(Service) returns (Empty);
+  rpc DelService(ServiceDel) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
   rpc AllocIp(AllocIpRequest) returns (AllocIpReply);

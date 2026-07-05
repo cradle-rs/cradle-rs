@@ -841,6 +841,30 @@ async fn cradle_gen_routes(
     println!("✓ {} in {}", out.trim(), scoped);
 }
 
+/// Delete one L4 service via `cradle ctl del-service`.
+#[when(
+    expr = "I delete cradle service {string} port {int} via gRPC as {string} in namespace {string}"
+)]
+async fn cradle_del_service(
+    world: &mut World,
+    vip: String,
+    port: u16,
+    sock: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    netns::exec_in_netns(
+        &scoped,
+        &cradle,
+        &["ctl", "--grpc", &ep, "del-service", &vip, &port.to_string()],
+    )
+    .await
+    .expect("del-service failed");
+    println!("✓ service {}:{} deleted in {}", vip, port, scoped);
+}
+
 /// Delete one IPv4 route via `cradle ctl del-route`.
 #[when(expr = "I delete cradle route {string} via gRPC as {string} in namespace {string}")]
 async fn cradle_del_route(world: &mut World, prefix: String, sock: String, namespace: String) {
@@ -1383,6 +1407,67 @@ async fn http_get_contains(world: &mut World, url: String, namespace: String, ne
         "HTTP GET {} from {} did not return {:?}",
         url, scoped, needle
     );
+}
+
+/// Poll until an HTTP GET stops succeeding (a deleted service VIP: new flows
+/// miss the DNAT and black-hole). Mirrors `ping … should fail`: the common
+/// case (already dead) breaks on the first probe.
+#[then(expr = "HTTP GET {string} from namespace {string} should fail")]
+async fn http_get_fails(world: &mut World, url: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 10;
+    for i in 0..ATTEMPTS {
+        let ok = matches!(
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await,
+            Ok(s) if !s.trim().is_empty()
+        );
+        if !ok {
+            println!("✓ HTTP GET {} from {} failed (as expected)", url, scoped);
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!("HTTP GET {} from {} still succeeded after waiting for it to fail", url, scoped);
+}
+
+/// Every answered request must return exactly `needle` — asserts a service
+/// whose backend set shrank really stopped balancing to the removed backend.
+#[then(
+    expr = "HTTP GET {string} from namespace {string} returns only {string} over {int} requests"
+)]
+async fn http_get_only(
+    world: &mut World,
+    url: String,
+    namespace: String,
+    needle: String,
+    tries: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let mut ok = 0u64;
+    for _ in 0..tries {
+        if let Ok(s) =
+            netns::exec_in_netns(&scoped, "curl", &["-s", "-g", "--max-time", "2", &url]).await
+        {
+            let body = s.trim().to_string();
+            if !body.is_empty() {
+                assert_eq!(
+                    body, needle,
+                    "expected only {needle:?} from {url}, got {body:?}"
+                );
+                ok += 1;
+            }
+        }
+    }
+    assert!(
+        ok * 10 >= tries * 8,
+        "too few HTTP responses from {}: {}/{}",
+        scoped,
+        ok,
+        tries
+    );
+    println!("✓ {}/{} responses, all {:?}", ok, tries, needle);
 }
 
 #[then(
