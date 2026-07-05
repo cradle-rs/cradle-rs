@@ -20,7 +20,7 @@ design and roadmap.
 | `cradle-ebpf`   | `bpfel-unknown-none` | eBPF programs (XDP + TC). |
 | `cradle`        | host | User-space control plane: loads/attaches programs, programs maps, serves the gRPC API. |
 | `cradle-cni`    | host | Kubernetes CNI plugin (spec 1.1): attaches pods to the data plane. |
-| `cradle-k8s`    | host | Kubernetes controller: Services → eBPF L4 LB, CNI conflist render. |
+| `cradle-k8s`    | host | Kubernetes controller: Services/NodePort → eBPF L4 LB, NetworkPolicy, CiliumEndpoint CRDs, masquerade, CNI conflist render. |
 | `bdd`           | host | Cucumber BDD suite over network namespaces. |
 
 ## Build & run
@@ -47,9 +47,11 @@ drivable over gRPC, and [zebra-rs](https://github.com/zebra-rs/zebra-rs)
 drives it as a real control plane: IS-IS SR/SRv6, BGP L3VPN (MPLS and SRv6),
 and BGP EVPN program the eBPF FIBs through the `FibHandle` tee, with a
 reverse `WatchFdb` channel reporting data-plane MAC learning back up.
-cradle also runs as a **Kubernetes CNI** (plugin + node controller +
-DaemonSet packaging, proven in kind — see below), with Cilium API
-compatibility as the next arc.
+cradle also runs as a **full Kubernetes CNI + service mesh** (see below,
+proven in kind): pod networking with dual-stack IPAM, ClusterIP/NodePort/
+hostPort services, NetworkPolicy, and a complete **kube-proxy replacement**
+— plus **Cilium API compatibility** (the stock `cilium-cni` and
+`CiliumNetworkPolicy` work against a cradle node).
 
 ## Kubernetes CNI support status
 
@@ -59,13 +61,16 @@ permanent neighbor entry) and hands the host end to the daemon, which
 allocates the pod address from node-local IPAM and programs the pod /32
 into the eBPF FIB; `cradle-k8s` maps Services onto the eBPF L4 load
 balancer and renders the kubelet CNI conflist from the Node's podCIDR.
-`deploy/` carries the DaemonSet and `kind-e2e.sh` (a kind cluster with the
-default CNI disabled, smoke-tested end to end). Because zebra-rs is the
-node's routing stack, pod reachability rides real BGP — including the
-direction Cilium doesn't support: **routes learned from BGP program the
-pod datapath** (Cilium's BGP control plane is advertise-only,
-cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
-✅ = implemented (BDD/e2e-proven), 🔶 = partial by design, ⬜ = not yet.
+It is a **full kube-proxy replacement**: `deploy/kind-noproxy-e2e.sh` brings
+up a cluster with `kubeProxyMode: none` and the default CNI disabled, where
+ClusterIP, NodePort, and cluster DNS are all served by cradle's eBPF
+datapath. Because zebra-rs is the node's routing stack, pod reachability
+also rides real BGP — including the direction Cilium doesn't support:
+**routes learned from BGP program the pod datapath** (Cilium's BGP control
+plane is advertise-only, cilium/cilium#34841). Plans: the CNI arc in
+`docs/design/cni-cilium.md`, dual-stack + kube-proxy replacement in
+`docs/design/kube-proxy-dualstack.md`. ✅ = implemented (BDD/e2e-proven),
+🔶 = partial by design, ⬜ = not yet.
 
 | Function | Status | Notes |
 |---|---|---|
@@ -87,8 +92,9 @@ cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
 Story 2 of `docs/design/cni-cilium.md`: expose Cilium-compatible surfaces so
 the Cilium ecosystem (the stock `cilium-cni` plugin, `kubectl get
 ciliumendpoints`, chaining deployments) works against a cradle node — while
-gaining the routing stack underneath. ✅ = implemented (proven against the
-stock binary), ⬜ = planned, in roadmap order.
+gaining the routing stack underneath. All surfaces below are implemented and
+proven against the stock Cilium binary/agent; only Hubble is out of scope.
+✅ = implemented, ⬜ = not planned for this arc.
 
 | Surface | Status | Notes |
 |---|---|---|
