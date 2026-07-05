@@ -178,6 +178,19 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            if let Some(node) = &cfg.masq_node {
+                client
+                    .set_masq_node(pb::MasqNode { node: node.clone() })
+                    .await?;
+            }
+            for cidr in &cfg.non_masq {
+                client
+                    .set_non_masq(pb::NonMasq {
+                        cidr: cidr.clone(),
+                        del: false,
+                    })
+                    .await?;
+            }
             for i in &cfg.identities {
                 client
                     .set_identity(pb::Identity {

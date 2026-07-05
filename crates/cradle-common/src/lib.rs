@@ -739,8 +739,10 @@ pub const STAT_GTP_DECAP: u32 = 36;
 pub const STAT_SRV6_DX2: u32 = 37;
 /// Ingress network-policy drops (enforced endpoint, no PCT/POLICY match).
 pub const STAT_POLICY_DROP: u32 = 38;
+/// Egress masquerade: a pod→outside-the-cluster flow SNAT'd to the node IP.
+pub const STAT_MASQ: u32 = 39;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 39;
+pub const STAT_MAX: u32 = 40;
 
 // ============================== L7 proxy ===================================
 

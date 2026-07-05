@@ -64,6 +64,12 @@ pub struct Config {
     pub fdb_age_secs: u64,
     #[serde(default)]
     pub services: Vec<Service>,
+    /// Egress masquerade: SNAT pod→outside-the-cluster to this node IP.
+    #[serde(default)]
+    pub masq_node: Option<String>,
+    /// CIDRs never masqueraded (pod CIDR, service CIDR, fabric subnets).
+    #[serde(default)]
+    pub non_masq: Vec<String>,
     /// Policy identities: pod/node IP → identity (docs/design/policy.md).
     #[serde(default)]
     pub identities: Vec<IdentityCfg>,
@@ -622,6 +628,16 @@ impl Config {
             }
         }
 
+        if let Some(node) = &self.masq_node {
+            let ip = node
+                .parse()
+                .with_context(|| format!("bad masq_node {node:?}"))?;
+            ctl.set_masq_node(Some(ip)).await?;
+        }
+        for cidr in &self.non_masq {
+            let (net, len) = util::parse_ipv4_prefix(cidr)?;
+            ctl.add_non_masq(net, len).await?;
+        }
         for i in &self.identities {
             let ip =
                 i.ip.parse()

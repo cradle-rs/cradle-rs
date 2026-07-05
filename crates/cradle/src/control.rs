@@ -90,6 +90,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "gtp_decap",
     "srv6_dx2",
     "policy_drop",
+    "masq",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -919,6 +920,23 @@ impl Control {
         Ok(())
     }
 
+    /// Set the node's uplink IPv4 for egress masquerade (None = disable).
+    pub async fn set_masq_node(&self, node: Option<Ipv4Addr>) -> Result<()> {
+        self.dp.lock().await.masq_node_set(node)?;
+        Ok(())
+    }
+
+    /// Add / remove a non-masquerade CIDR.
+    pub async fn add_non_masq(&self, net: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.non_masq_add(net, prefix_len)?;
+        Ok(())
+    }
+
+    pub async fn del_non_masq(&self, net: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        self.dp.lock().await.non_masq_del(net, prefix_len)?;
+        Ok(())
+    }
+
     /// Bind a pod/node address to a policy identity.
     pub async fn set_identity(&self, ip: Ipv4Addr, identity: u32) -> Result<()> {
         self.dp.lock().await.identity_set(ip, identity)
@@ -1676,6 +1694,31 @@ impl Cradle for GrpcService {
             .map(|(name, packets)| pb::StatEntry { name, packets })
             .collect();
         Ok(Response::new(pb::StatsReply { entries }))
+    }
+
+    async fn set_masq_node(
+        &self,
+        req: Request<pb::MasqNode>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let m = req.into_inner();
+        let node = if m.node.is_empty() {
+            None
+        } else {
+            Some(m.node.parse::<Ipv4Addr>().map_err(st)?)
+        };
+        self.control.set_masq_node(node).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_non_masq(&self, req: Request<pb::NonMasq>) -> Result<Response<pb::Empty>, Status> {
+        let n = req.into_inner();
+        let (net, len) = util::parse_ipv4_prefix(&n.cidr).map_err(st)?;
+        if n.del {
+            self.control.del_non_masq(net, len).await.map_err(st)?;
+        } else {
+            self.control.add_non_masq(net, len).await.map_err(st)?;
+        }
+        Ok(Response::new(pb::Empty {}))
     }
 
     async fn set_identity(

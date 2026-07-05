@@ -1547,6 +1547,43 @@ S((bind, port), H).serve_forever()
     );
 }
 
+/// Serve an HTTP responder that echoes the client's observed source IP —
+/// used to prove masquerade (the pod's egress source, as seen by the far
+/// end, becomes the node IP). Port 8080, bound to `bind`.
+#[when(expr = "I serve source-echo HTTP in namespace {string} bound to {string}")]
+async fn serve_echo_http(world: &mut World, namespace: String, bind: String) {
+    let scoped = world.ns(&namespace);
+    let pid = format!("/tmp/{}_http.pid", scoped);
+    let script = format!("/tmp/{}_echo.py", scoped);
+    let prog = r#"import sys, socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+bind, port = sys.argv[1], int(sys.argv[2])
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = self.client_address[0].encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+class S(HTTPServer):
+    allow_reuse_address = True
+    address_family = socket.AF_INET6 if ":" in bind else socket.AF_INET
+S((bind, port), H).serve_forever()
+"#;
+    std::fs::write(&script, prog).expect("write echo.py");
+    let cmd = format!("echo $$ > {pid}; exec python3 {script} {bind} 8080");
+    netns::spawn_in_netns(&scoped, "sh", &["-c", &cmd])
+        .await
+        .expect("Failed to start source-echo HTTP server");
+    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+    println!(
+        "✓ source-echo HTTP serving in namespace {} on {}",
+        scoped, bind
+    );
+}
+
 #[when(expr = "I stop HTTP in namespace {string}")]
 async fn stop_http(world: &mut World, namespace: String) {
     if keep_topology() {

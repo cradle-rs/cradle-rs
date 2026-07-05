@@ -82,6 +82,9 @@ pub struct Dataplane {
     identity: HashMap<MapData, u32, u32>,
     ep_policy: HashMap<MapData, u32, u8>,
     policy: HashMap<MapData, PolicyKey, u8>,
+    /// Egress masquerade (docs/design/kube-proxy-dualstack.md).
+    masq_cfg: Array<MapData, u32>,
+    non_masq: LpmTrie<MapData, [u8; 4], u8>,
     stats: PerCpuArray<MapData, u64>,
     l7_services: HashMap<MapData, ServiceKey, u8>,
 }
@@ -161,6 +164,8 @@ impl Dataplane {
                 bpf.take_map("EP_POLICY").context("map EP_POLICY missing")?,
             )?,
             policy: HashMap::try_from(bpf.take_map("POLICY").context("map POLICY missing")?)?,
+            masq_cfg: Array::try_from(bpf.take_map("MASQ_CFG").context("map MASQ_CFG missing")?)?,
+            non_masq: LpmTrie::try_from(bpf.take_map("NON_MASQ").context("map NON_MASQ missing")?)?,
             backends6: HashMap::try_from(
                 bpf.take_map("BACKENDS6").context("map BACKENDS6 missing")?,
             )?,
@@ -403,6 +408,28 @@ impl Dataplane {
             )?;
         }
         self.ep_policy.insert(ep, 1u8, 0)?;
+        Ok(())
+    }
+
+    /// Set the node's uplink IPv4 for egress masquerade (0 = disable).
+    pub fn masq_node_set(&mut self, node: Option<Ipv4Addr>) -> Result<()> {
+        let v = node.map(util::ipv4_to_map).unwrap_or(0);
+        self.masq_cfg.set(0, v, 0)?;
+        Ok(())
+    }
+
+    /// Add a CIDR that is never masqueraded (pod CIDR, service CIDR, fabric).
+    pub fn non_masq_add(&mut self, net: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        self.non_masq
+            .insert(&Key::new(prefix_len as u32, net.octets()), 1, 0)?;
+        Ok(())
+    }
+
+    /// Remove a non-masquerade CIDR (idempotent).
+    pub fn non_masq_del(&mut self, net: Ipv4Addr, prefix_len: u8) -> Result<()> {
+        let _ = self
+            .non_masq
+            .remove(&Key::new(prefix_len as u32, net.octets()));
         Ok(())
     }
 
