@@ -19,6 +19,12 @@
 
 - [Driving cradle from zebra-rs](ch-02-00-zebra-integration.md)
 
+## Kubernetes
+
+- [Kubernetes](ch-05-00-kubernetes.md)
+  - [CNI Support](ch-05-01-cni.md)
+  - [Cilium API Compatibility](ch-05-02-cilium.md)
+
 ## Operations
 
 - [The gRPC Control API](ch-03-00-grpc-control-api.md)
