@@ -322,6 +322,8 @@ pub struct Service {
     pub port: u16,
     #[serde(default = "default_proto")]
     pub proto: String,
+    #[serde(default)]
+    pub affinity: bool,
     pub backends: Vec<BackendCfg>,
 }
 
@@ -608,7 +610,7 @@ impl Config {
                             Ok((ip, b.port))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    ctl.add_service(svc_id, v4, svc.port, proto, &backends)
+                    ctl.add_service(svc_id, v4, svc.port, proto, &backends, svc.affinity)
                         .await?;
                 }
                 IpAddr::V6(v6) => {
@@ -622,7 +624,7 @@ impl Config {
                             Ok((ip, b.port))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    ctl.add_service6(svc_id, v6, svc.port, proto, &backends)
+                    ctl.add_service6(svc_id, v6, svc.port, proto, &backends, svc.affinity)
                         .await?;
                 }
             }

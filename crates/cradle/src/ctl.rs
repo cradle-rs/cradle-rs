@@ -167,6 +167,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         vip: s.vip.clone(),
                         port: s.port as u32,
                         proto: s.proto.clone(),
+                        affinity: s.affinity,
                         backends: s
                             .backends
                             .iter()

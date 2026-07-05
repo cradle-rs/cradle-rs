@@ -578,6 +578,31 @@ pub struct ServiceInfo {
 pub const LB_ALGO_RANDOM: u8 = 0;
 pub const LB_ALGO_MAGLEV: u8 = 1;
 
+/// `ServiceInfo.flags`: `sessionAffinity: ClientIP` — a client sticks to one
+/// backend (see `AFFINITY`).
+pub const SVC_F_AFFINITY: u8 = 1 << 0;
+
+/// Session-affinity map key: (service, client IPv4).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AffinityKey {
+    pub svc_id: u32,
+    /// Client IPv4, map-encoded.
+    pub client: u32,
+}
+
+/// Session-affinity value: the sticky backend slot + last-use timestamp.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AffinityVal {
+    pub slot: u16,
+    pub _pad: u16,
+    pub last_ns: u64,
+}
+
+/// ClientIP affinity idle timeout (Kubernetes default 10800s = 3h), in ns.
+pub const AFFINITY_TIMEOUT_NS: u64 = 10_800 * 1_000_000_000;
+
 /// Backend slot key: (svc_id, slot).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -792,6 +817,8 @@ mod user {
         CtKey,
         CtEntry,
         PolicyKey,
+        AffinityKey,
+        AffinityVal,
         ServiceKey6,
         Backend6,
         CtKey6,

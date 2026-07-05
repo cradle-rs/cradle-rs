@@ -523,6 +523,7 @@ async fn program_host_ports(
             vip: conf.node_ip.clone(),
             port: pm.host_port,
             proto: pm.protocol.to_lowercase(),
+            affinity: false,
             backends: vec![pb::Backend {
                 ip: pod_ip.to_string(),
                 port: pm.container_port,

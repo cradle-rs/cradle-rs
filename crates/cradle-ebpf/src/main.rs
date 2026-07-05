@@ -34,27 +34,28 @@ use aya_ebpf::{
     programs::{TcContext, XdpContext},
 };
 use cradle_common::{
-    fibw_unpack, mpls_lse, mpls_lse_unpack, Backend, Backend6, BackendKey, CradleXdpMeta, CtEntry,
-    CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
-    GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, Vrf4Key, Vrf6Key, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK,
-    FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, IDENTITY_WORLD, L7_PROXY_PORT,
-    MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS,
-    NH_F_SRV6, NH_F_V6, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    fibw_unpack, mpls_lse, mpls_lse_unpack, AffinityKey, AffinityVal, Backend, Backend6,
+    BackendKey, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey,
+    FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey,
+    MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig,
+    ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, AFFINITY_TIMEOUT_NS,
+    CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID,
+    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
+    PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M,
+    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX2,
+    SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
+    SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
     STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
     STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
     STAT_NH_BACKUP, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2,
     STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT,
     STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE,
-    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, XDP_META_MAGIC, XDP_META_MAGIC_DX,
-    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
+    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY, XDP_META_MAGIC,
+    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -176,6 +177,11 @@ static SERVICES: HashMap<ServiceKey, ServiceInfo> = HashMap::with_max_entries(10
 static BACKENDS: HashMap<BackendKey, Backend> = HashMap::with_max_entries(8192, 0);
 #[map]
 static CT: LruHashMap<CtKey, CtEntry> = LruHashMap::with_max_entries(65536, 0);
+
+/// Session affinity (`sessionAffinity: ClientIP`): a client's chosen backend
+/// slot per service, so new flows from the same client stick to it.
+#[map]
+static AFFINITY: LruHashMap<AffinityKey, AffinityVal> = LruHashMap::with_max_entries(65536, 0);
 
 // --- ingress network policy (docs/design/policy.md) ---
 /// Source IPv4 (map-encoded) → identity. Miss = `IDENTITY_WORLD`.
@@ -782,7 +788,42 @@ fn l4_nat_v4(ctx: &TcContext, masq_src: bool) -> Result<(), ()> {
     if svc.backend_count == 0 {
         return Ok(());
     }
-    let slot = (unsafe { bpf_get_prandom_u32() } % svc.backend_count as u32) as u16;
+    let now = unsafe { bpf_ktime_get_ns() };
+    // Backend pick: random, unless the service has ClientIP affinity — then
+    // reuse this client's sticky slot (refreshing its timestamp) if it's live
+    // and still in range, else pick fresh and record it.
+    let slot = if svc.flags & SVC_F_AFFINITY != 0 {
+        let akey = AffinityKey {
+            svc_id: svc.svc_id,
+            client: src_ip,
+        };
+        let sticky = match AFFINITY.get_ptr(&akey) {
+            Some(a) => {
+                let a = unsafe { *a };
+                if now.wrapping_sub(a.last_ns) < AFFINITY_TIMEOUT_NS && a.slot < svc.backend_count {
+                    Some(a.slot)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let s = sticky.unwrap_or_else(|| {
+            (unsafe { bpf_get_prandom_u32() } % svc.backend_count as u32) as u16
+        });
+        let _ = AFFINITY.insert(
+            &akey,
+            &AffinityVal {
+                slot: s,
+                _pad: 0,
+                last_ns: now,
+            },
+            0,
+        );
+        s
+    } else {
+        (unsafe { bpf_get_prandom_u32() } % svc.backend_count as u32) as u16
+    };
     let be = match BACKENDS.get_ptr(&BackendKey {
         svc_id: svc.svc_id,
         slot,
@@ -792,7 +833,6 @@ fn l4_nat_v4(ctx: &TcContext, masq_src: bool) -> Result<(), ()> {
         None => return Ok(()),
     };
 
-    let now = unsafe { bpf_ktime_get_ns() };
     // Forward: client->VIP rewrites the destination to the chosen backend.
     let _ = CT.insert(
         &key,

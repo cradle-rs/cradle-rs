@@ -20,7 +20,7 @@ design and roadmap.
 | `cradle-ebpf`   | `bpfel-unknown-none` | eBPF programs (XDP + TC). |
 | `cradle`        | host | User-space control plane: loads/attaches programs, programs maps, serves the gRPC API. |
 | `cradle-cni`    | host | Kubernetes CNI plugin (spec 1.1): attaches pods to the data plane. |
-| `cradle-k8s`    | host | Kubernetes controller: Services → eBPF L4 LB, CNI conflist render. |
+| `cradle-k8s`    | host | Kubernetes controller: Services/NodePort → eBPF L4 LB, NetworkPolicy, CiliumEndpoint CRDs, masquerade, CNI conflist render. |
 | `bdd`           | host | Cucumber BDD suite over network namespaces. |
 
 ## Build & run
@@ -47,9 +47,11 @@ drivable over gRPC, and [zebra-rs](https://github.com/zebra-rs/zebra-rs)
 drives it as a real control plane: IS-IS SR/SRv6, BGP L3VPN (MPLS and SRv6),
 and BGP EVPN program the eBPF FIBs through the `FibHandle` tee, with a
 reverse `WatchFdb` channel reporting data-plane MAC learning back up.
-cradle also runs as a **Kubernetes CNI** (plugin + node controller +
-DaemonSet packaging, proven in kind — see below), with Cilium API
-compatibility as the next arc.
+cradle also runs as a **full Kubernetes CNI + service mesh** (see below,
+proven in kind): pod networking with dual-stack IPAM, ClusterIP/NodePort/
+hostPort services, NetworkPolicy, and a complete **kube-proxy replacement**
+— plus **Cilium API compatibility** (the stock `cilium-cni` and
+`CiliumNetworkPolicy` work against a cradle node).
 
 ## Kubernetes CNI support status
 
@@ -59,13 +61,16 @@ permanent neighbor entry) and hands the host end to the daemon, which
 allocates the pod address from node-local IPAM and programs the pod /32
 into the eBPF FIB; `cradle-k8s` maps Services onto the eBPF L4 load
 balancer and renders the kubelet CNI conflist from the Node's podCIDR.
-`deploy/` carries the DaemonSet and `kind-e2e.sh` (a kind cluster with the
-default CNI disabled, smoke-tested end to end). Because zebra-rs is the
-node's routing stack, pod reachability rides real BGP — including the
-direction Cilium doesn't support: **routes learned from BGP program the
-pod datapath** (Cilium's BGP control plane is advertise-only,
-cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
-✅ = implemented (BDD/e2e-proven), 🔶 = partial by design, ⬜ = not yet.
+It is a **full kube-proxy replacement**: `deploy/kind-noproxy-e2e.sh` brings
+up a cluster with `kubeProxyMode: none` and the default CNI disabled, where
+ClusterIP, NodePort, and cluster DNS are all served by cradle's eBPF
+datapath. Because zebra-rs is the node's routing stack, pod reachability
+also rides real BGP — including the direction Cilium doesn't support:
+**routes learned from BGP program the pod datapath** (Cilium's BGP control
+plane is advertise-only, cilium/cilium#34841). Plans: the CNI arc in
+`docs/design/cni-cilium.md`, dual-stack + kube-proxy replacement in
+`docs/design/kube-proxy-dualstack.md`. ✅ = implemented (BDD/e2e-proven),
+🔶 = partial by design, ⬜ = not yet.
 
 | Function | Status | Notes |
 |---|---|---|
@@ -80,15 +85,16 @@ cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
 | Host-network-backed services | ✅ | served by cradle: DNAT to the node-local backend + a clsact-**egress** reverse-NAT that rewrites the local-stack reply back to the VIP; `cradle-k8s` programs them (no longer skipped); `cradle_hostnet` BDD ([design](docs/design/kube-proxy-dualstack.md)) |
 | Dual-stack pods (IPv6 IPAM) | ✅ | node-local v6 allocator + ptp v6 gateway (`fe80::1`); pod `/128` into FIB6; `cradle_cni_v6` BDD ([design](docs/design/kube-proxy-dualstack.md)). Policy engine is still v4-ingress-only |
 | NodePort / hostPort / egress SNAT | ✅ | egress masquerade (`cradle_masq`); NodePort as a node-IP `SERVICES` frontend from `cradle-k8s` (kind e2e) + hostPort via the CNI portMappings capability; `cradle_nodeport` BDD ([design](docs/design/kube-proxy-dualstack.md)) |
-| Full kube-proxy replacement | ⬜ | no NodePort/hostPort/LoadBalancer frontends; host-network-backed services and egress masquerade unhandled ([plan](docs/design/kube-proxy-dualstack.md)) |
+| Full kube-proxy replacement | ✅ | a kind cluster with `kubeProxyMode: none`: ClusterIP + NodePort + cluster DNS all served by cradle (incl. `default/kubernetes`), plus ClientIP session affinity; `deploy/kind-noproxy-e2e.sh` ([design](docs/design/kube-proxy-dualstack.md)) |
 
 ## Cilium compatibility status
 
 Story 2 of `docs/design/cni-cilium.md`: expose Cilium-compatible surfaces so
 the Cilium ecosystem (the stock `cilium-cni` plugin, `kubectl get
 ciliumendpoints`, chaining deployments) works against a cradle node — while
-gaining the routing stack underneath. ✅ = implemented (proven against the
-stock binary), ⬜ = planned, in roadmap order.
+gaining the routing stack underneath. All surfaces below are implemented and
+proven against the stock Cilium binary/agent; only Hubble is out of scope.
+✅ = implemented, ⬜ = not planned for this arc.
 
 | Surface | Status | Notes |
 |---|---|---|
@@ -121,7 +127,7 @@ Function taxonomy after
 [Vinbero's roadmap](https://github.com/takehaya/Vinbero/blob/main/docs/loadmap.md),
 extended with the RFC 9800 compression flavors (uSID/NEXT-C-SID actions and
 REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
-🔶 = partial, ⬜ = not yet.
+🔶 = partial, ⬜ = not yet, 🚫 = no plan.
 
 ### Headend behaviors
 
@@ -148,7 +154,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | End.DT6 | ✅ | decap + per-VRF v6 lookup |
 | End.DT46 | ✅ | dual-family; the BGP L3VPN service SID |
 | End.B6.Encaps / .Red | ✅ | Binding SID: End walk + policy push in XDP (Reduced form on the wire) |
-| End.B6.Insert | ⬜ | deprecated insert form |
+| End.B6.Insert | 🚫 | deprecated insert form — no plan (End.B6.Encaps.Red supersedes it) |
 | End.BM | ⬜ | |
 | End.M (mirror) | ✅ | egress protection: repair-decap + mirror-context lookup + service decap |
 | End.Replicate | ⬜ | BUM replication uses per-remote slots instead |
@@ -180,14 +186,15 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 
 Producers that program the eBPF data plane: cradle's own gRPC/JSON API for
 static entries, and zebra-rs protocol machinery through the `FibHandle` tee
-for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet.
+for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet,
+🚫 = no plan.
 
 | Producer | Data plane | Status | Notes |
 |---|---|---|---|
 | Static ILM (gRPC/JSON) | MPLS | ✅ | `AddIlm`/`DelIlm` + labels on nexthops |
 | IS-IS SR (SR-MPLS) | MPLS | ✅ | prefix SIDs / SRGB → ILM + out-labels teed |
 | BGP L3VPN (VPNv4/v6 over MPLS) | MPLS | ✅ | per-VRF VPN label, `cradle_l3vpn_zebra` |
-| LDP | MPLS | ⬜ | no producer in zebra-rs |
+| LDP | MPLS | 🚫 | no plan — zebra-rs has no LDP producer and none is planned (SR-MPLS is the label-distribution path) |
 | SR-MPLS TI-LFA | MPLS | ✅ | protected-nexthop tee (repair label stack as backup) + link-down failover; `cradle_tilfa_mpls` |
 | Static SRv6 config (gRPC/JSON) | SRv6 | ✅ | every SRv6 function above |
 | IS-IS SRv6 (locators, uN/uA) | SRv6 | ✅ | locator routes + local SIDs teed |

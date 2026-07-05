@@ -23,8 +23,14 @@ pub const UDP: u8 = 17;
 
 /// A cradle service key: (VIP, port, IP proto).
 pub type Key = (Ipv4Addr, u16, u8);
-/// Desired state: service key → backend set.
-pub type Desired = BTreeMap<Key, BTreeSet<(Ipv4Addr, u16)>>;
+/// A programmed service: its backend set + ClientIP session affinity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Svc {
+    pub backends: BTreeSet<(Ipv4Addr, u16)>,
+    pub affinity: bool,
+}
+/// Desired state: service key → service.
+pub type Desired = BTreeMap<Key, Svc>;
 
 pub fn proto_str(proto: u8) -> &'static str {
     if proto == UDP {
@@ -143,6 +149,8 @@ pub fn build_desired(
             if backends.is_empty() {
                 continue;
             }
+            let affinity = spec.session_affinity.as_deref() == Some("ClientIP");
+            let svc = Svc { backends, affinity };
             // NodePort/LoadBalancer: also expose the service on the node's
             // own IP at `nodePort`. The node IP is a local address, but
             // l4_nat's SERVICES lookup runs before the local-punt, so the
@@ -152,10 +160,10 @@ pub fn build_desired(
             // preserving; cross-node Cluster policy is a follow-on).
             if let (Some(node), Ok(np)) = (node_ip, u16::try_from(sp.node_port.unwrap_or(0))) {
                 if np != 0 {
-                    out.insert((node, np, proto), backends.clone());
+                    out.insert((node, np, proto), svc.clone());
                 }
             }
-            out.insert((vip, port, proto), backends);
+            out.insert((vip, port, proto), svc);
         }
     }
     out
@@ -268,7 +276,7 @@ mod tests {
         )];
         let desired = build_desired(&svcs, &slices, None);
         let key = ("10.96.0.10".parse().unwrap(), 80u16, TCP);
-        let backends = desired.get(&key).unwrap();
+        let backends = &desired.get(&key).unwrap().backends;
         assert_eq!(backends.len(), 2);
         assert!(backends.contains(&("10.244.0.2".parse().unwrap(), 8080)));
     }
@@ -293,11 +301,19 @@ mod tests {
         let node: Ipv4Addr = "172.18.0.2".parse().unwrap();
         let desired = build_desired(&svcs, &slices, Some(node));
         // ClusterIP frontend + node-IP:nodePort frontend, same backend.
-        let cluster = desired
+        let cluster = &desired
             .get(&("10.96.0.10".parse().unwrap(), 80, TCP))
-            .unwrap();
-        let np = desired.get(&(node, 31000, TCP)).unwrap();
+            .unwrap()
+            .backends;
+        let np = &desired.get(&(node, 31000, TCP)).unwrap().backends;
         assert_eq!(cluster, np);
+        // A ClientIP-affinity service carries the flag through both frontends.
+        let mut sp2 = sport(None, 80, "TCP");
+        sp2.node_port = Some(31001);
+        let mut aff_svc = service("default", "web", "10.96.0.11", vec![sp2], Some("NodePort"));
+        aff_svc.spec.as_mut().unwrap().session_affinity = Some("ClientIP".into());
+        let aff = build_desired(&[aff_svc], &slices, Some(node));
+        assert!(aff.values().all(|s| s.affinity));
         assert!(np.contains(&("10.244.0.2".parse().unwrap(), 8080)));
         // Without a known node IP, only the ClusterIP frontend is emitted.
         assert_eq!(build_desired(&svcs, &slices, None).len(), 1);
@@ -325,7 +341,7 @@ mod tests {
         // The host-network backend IS programmed now (K4: the egress
         // reverse-NAT makes its reply return through cradle).
         let key = ("10.96.0.1".parse().unwrap(), 443u16, TCP);
-        let backends = desired.get(&key).unwrap();
+        let backends = &desired.get(&key).unwrap().backends;
         assert_eq!(backends.len(), 1);
         assert!(backends.contains(&("172.18.0.2".parse().unwrap(), 6443)));
     }
@@ -349,13 +365,15 @@ mod tests {
             vec![(Some("http"), 8080), (Some("metrics"), 19100)],
         )];
         let desired = build_desired(&svcs, &slices, None);
-        let http = desired
+        let http = &desired
             .get(&("10.96.1.1".parse().unwrap(), 80, TCP))
-            .unwrap();
+            .unwrap()
+            .backends;
         assert!(http.contains(&("10.244.1.5".parse().unwrap(), 8080)));
-        let metrics = desired
+        let metrics = &desired
             .get(&("10.96.1.1".parse().unwrap(), 9100, TCP))
-            .unwrap();
+            .unwrap()
+            .backends;
         assert!(metrics.contains(&("10.244.1.5".parse().unwrap(), 19100)));
     }
 

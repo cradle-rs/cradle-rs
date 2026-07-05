@@ -1,0 +1,12 @@
+# Single-node kind cluster with BOTH the default CNI and kube-proxy disabled:
+# cradle is the ONLY thing providing pod networking AND service load
+# balancing. The cluster only becomes usable if cradle serves the
+# `default/kubernetes` service (the API server, a host-network backend) — the
+# K4/K5 capability. Used by deploy/kind-noproxy-e2e.sh.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  kubeProxyMode: none
+nodes:
+- role: control-plane
