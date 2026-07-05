@@ -87,11 +87,12 @@ cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
 Story 2 of `docs/design/cni-cilium.md`: expose Cilium-compatible surfaces so
 the Cilium ecosystem (the stock `cilium-cni` plugin, `kubectl get
 ciliumendpoints`, chaining deployments) works against a cradle node — while
-gaining the routing stack underneath. ⬜ = planned, in roadmap order.
+gaining the routing stack underneath. ✅ = implemented (proven against the
+stock binary), ⬜ = planned, in roadmap order.
 
 | Surface | Status | Notes |
 |---|---|---|
-| cilium-agent REST API subset (`cilium.sock`) | ⬜ | `/healthz`, `/config`, `/ipam`, `/endpoint/{id}` — the stock `cilium-cni` binary as a drop-in front end (M5) |
+| cilium-agent REST API subset (`cilium.sock`) | ✅ | `serve --cilium-sock`: `/healthz`, `/config`, `/ipam`, `/endpoint` — the UNMODIFIED cilium-cni v1.19.5 binary attaches pods to the cradle datapath; `cradle_cilium` |
 | `CiliumEndpoint` / `CiliumNode` CRDs | ⬜ | kubectl-visible endpoints; cluster-pool IPAM via the stock cilium-operator (M6) |
 | Generic-veth CNI chaining | ⬜ | real Cilium chained on top for policy/observability while cradle owns routing and the FIB (M7) |
 | NetworkPolicy / identity enforcement | ⬜ | native `IDENTITY`/`POLICY` maps + verdict in `cradle_tc`; k8s NetworkPolicy semantics first (M8) |

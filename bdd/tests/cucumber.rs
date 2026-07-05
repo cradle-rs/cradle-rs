@@ -1343,6 +1343,169 @@ async fn cni_gc(world: &mut World, node: String, config: String) {
     println!("✓ CNI GC ran on {}", node);
 }
 
+// --------------------------- Cilium compat steps ---------------------------
+
+/// Resolve the stock cilium-cni binary (extracted from the pinned Cilium
+/// image by `deploy/fetch-cilium-cni.sh`; overridable via $CILIUM_CNI).
+fn cilium_cni_bin() -> String {
+    std::env::var("CILIUM_CNI").unwrap_or_else(|_| {
+        format!(
+            "{}/.cache/cradle-bdd/cilium-cni",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    })
+}
+
+/// Per-feature unix socket path for the Cilium-compat agent API (a bare
+/// path — cilium-cni's CILIUM_SOCK takes no `unix:` scheme).
+fn cilium_sock(world: &World, name: &str) -> String {
+    format!("/tmp/{}_{}.sock", world.feature_tag, name)
+}
+
+/// Start cradle with the Cilium-agent compatibility API enabled alongside
+/// the gRPC control API (fresh per-feature state dir, as the CNI node step).
+#[when(
+    expr = "I start cradle Cilium node in namespace {string} with config {string} pod CIDR {string} serving gRPC as {string} and Cilium API as {string}"
+)]
+async fn start_cradle_cilium_node(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    pod_cidr: String,
+    sock: String,
+    csock: String,
+) {
+    let scoped = world.ns(&namespace);
+    let pid = world.pid_file(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    let cep = cilium_sock(world, &csock);
+    let state = cni_state_dir(world, &namespace);
+    let _ = tokio::process::Command::new("sudo")
+        .args(["rm", "-rf", &state])
+        .status()
+        .await;
+    let log = format!("logs/{}.cradle.log", scoped);
+    let cmd = format!(
+        "exec {} serve --config {} --grpc {} --cilium-sock {} --pod-cidr {} --state-dir {} --pid-file {} >> {} 2>&1",
+        cradle_bin(),
+        cfg,
+        ep,
+        cep,
+        pod_cidr,
+        state,
+        pid,
+        log
+    );
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info,cradle=debug")],
+        "sh",
+        &["-c", &cmd],
+    )
+    .await
+    .expect("Failed to start cradle Cilium node");
+    await_cradle(&scoped, &pid).await;
+    println!(
+        "✓ cradle Cilium node started in {} (gRPC {}, cilium API {}, pod CIDR {})",
+        scoped, ep, cep, pod_cidr
+    );
+}
+
+/// Invoke the STOCK cilium-cni plugin as the runtime would: CNI_* env +
+/// netconf on stdin, CILIUM_SOCK pointing at cradle's compat API, and the
+/// K8S_POD_* CNI_ARGS kubelet always passes (cilium-cni's IPAM owner).
+async fn run_cilium_cni(
+    world: &World,
+    verb: &str,
+    node: &str,
+    pod: &str,
+    container: &str,
+    config: &str,
+    csock: &str,
+) -> (bool, String) {
+    let node_ns = world.ns(node);
+    let pod_ns = world.ns(pod);
+    let cfg_path = config_in(world, config);
+    let conf = std::fs::read_to_string(&cfg_path)
+        .unwrap_or_else(|e| panic!("failed to read CNI netconf {cfg_path}: {e}"));
+    // Real runtimes pass a long hex container id, and cilium-cni derives its
+    // temporary veth name from the first 5 characters of "<cid>:<ifname>" —
+    // a short id like "pod1" would land the ':' in the interface name
+    // (EINVAL from the kernel). Pad to a realistic length.
+    let cid = format!("{container}0badc0de");
+    let mut child = tokio::process::Command::new("sudo")
+        .args(["ip", "netns", "exec", &node_ns, "env"])
+        .arg(format!("CNI_COMMAND={verb}"))
+        .arg(format!("CNI_CONTAINERID={cid}"))
+        .arg(format!("CNI_NETNS=/var/run/netns/{pod_ns}"))
+        .arg("CNI_IFNAME=eth0")
+        .arg("CNI_PATH=/opt/cni/bin")
+        .arg(format!(
+            "CNI_ARGS=IgnoreUnknown=1;K8S_POD_NAMESPACE=default;K8S_POD_NAME={container}"
+        ))
+        .arg(format!("CILIUM_SOCK={}", cilium_sock(world, csock)))
+        .arg(cilium_cni_bin())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn cilium-cni in {node_ns}: {e}"));
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stdin = child.stdin.take().expect("cilium-cni stdin");
+        stdin
+            .write_all(conf.as_bytes())
+            .await
+            .expect("write netconf");
+    }
+    let out = child.wait_with_output().await.expect("cilium-cni run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+#[when(
+    expr = "I run stock cilium-cni ADD for container {string} in pod namespace {string} on node {string} with config {string} via Cilium API {string} expecting {string}"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn cilium_cni_add(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+    csock: String,
+    expected: String,
+) {
+    let (ok, out) = run_cilium_cni(world, "ADD", &node, &pod, &container, &config, &csock).await;
+    assert!(ok, "cilium-cni ADD for {container} failed: {out}");
+    assert!(
+        out.contains(&expected),
+        "cilium-cni ADD result for {container} does not contain {expected:?}: {out}"
+    );
+    println!("✓ stock cilium-cni ADD {} ok", container);
+}
+
+#[when(
+    expr = "I run stock cilium-cni DEL for container {string} in pod namespace {string} on node {string} with config {string} via Cilium API {string}"
+)]
+async fn cilium_cni_del(
+    world: &mut World,
+    container: String,
+    pod: String,
+    node: String,
+    config: String,
+    csock: String,
+) {
+    let (ok, out) = run_cilium_cni(world, "DEL", &node, &pod, &container, &config, &csock).await;
+    assert!(ok, "cilium-cni DEL for {container} failed: {out}");
+    println!("✓ stock cilium-cni DEL {}", container);
+}
+
 // ------------------------------ HTTP service ------------------------------
 
 /// Serve a fixed HTTP body from a namespace (a backend behind an L4/L7 VIP).
