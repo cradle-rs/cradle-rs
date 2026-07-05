@@ -191,6 +191,22 @@ impl Control {
         if let Err(e) = tc::qdisc_add_clsact(name) {
             warn!("qdisc_add_clsact({name}): {e} (continuing; may already exist)");
         }
+        // Predecessor cleanup. On TCX-capable kernels (≥6.6) aya attaches via
+        // a bpf_link, which dies with the owning process — a killed daemon
+        // leaves nothing behind. On older kernels the fallback is a netlink
+        // cls_bpf filter, which DOES outlive the process and would keep
+        // forwarding with the dead instance's maps, ahead of ours. Detach any
+        // stale cradle_tc by program name so only this instance's datapath
+        // runs. NotFound (the common case) is not an error.
+        if let Err(e) = tc::qdisc_detach_program(name, TcAttachType::Ingress, "cradle_tc") {
+            let benign = matches!(&e, tc::TcError::IoError(io)
+                if io.kind() == std::io::ErrorKind::NotFound);
+            if !benign {
+                warn!("detaching stale cradle_tc from {name}: {e} (continuing)");
+            }
+        } else {
+            info!("detached a stale cradle_tc filter from {name} (predecessor cleanup)");
+        }
         let prog: &mut SchedClassifier = bpf
             .program_mut("cradle_tc")
             .context("program cradle_tc not found")?
@@ -832,6 +848,54 @@ impl Control {
     /// Snapshot the persisted pod endpoints (CHECK/GC).
     pub async fn cni_list_endpoints(&self) -> Result<Vec<crate::cni::Endpoint>> {
         self.cni.lock().await.list_endpoints()
+    }
+
+    /// Startup reconcile: re-program every persisted endpoint into the fresh
+    /// eBPF maps (a restarted daemon starts empty — the predecessor's maps
+    /// died with it). An endpoint whose host veth is gone (the pod was torn
+    /// down while we were dead, so the plugin's DEL never reached us) is
+    /// completed instead: its address and record are released. Per-endpoint
+    /// failures are logged, never fatal — one bad record must not take the
+    /// daemon down.
+    pub async fn cni_reconcile(&self) {
+        let endpoints = match self.cni.lock().await.list_endpoints() {
+            Ok(eps) => eps,
+            Err(e) => {
+                warn!("cni reconcile: listing endpoints: {e:#}");
+                return;
+            }
+        };
+        for ep in endpoints {
+            if util::ifindex_of(&ep.host_if).is_ok() {
+                if let Err(e) = self
+                    .cni_create_endpoint(
+                        &ep.container_id,
+                        &ep.ifname,
+                        &ep.netns,
+                        &ep.host_if,
+                        ep.ip,
+                        ep.vrf_id,
+                    )
+                    .await
+                {
+                    warn!(
+                        "cni reconcile {}/{}: {e:#}",
+                        ep.container_id, ep.ifname
+                    );
+                }
+            } else {
+                info!(
+                    "cni reconcile: {}/{} host veth {} gone — completing the delete",
+                    ep.container_id, ep.ifname, ep.host_if
+                );
+                let cni = self.cni.lock().await;
+                let _ = cni.release_ip(
+                    &crate::cni::owner_key(&ep.container_id, &ep.ifname),
+                    Some(ep.ip),
+                );
+                let _ = cni.remove_endpoint(&ep.container_id, &ep.ifname);
+            }
+        }
     }
 
     /// Snapshot the datapath packet counters as `(name, packets)` pairs.

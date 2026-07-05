@@ -1109,22 +1109,28 @@ fn cni_state_dir(world: &World, namespace: &str) -> String {
     format!("/tmp/{}_state", world.ns(namespace))
 }
 
-/// Start cradle as a CNI node: like the gRPC start step, plus a per-feature
-/// `--state-dir`, wiped first so the deterministic pod addresses the feature
-/// asserts don't shift after a crashed prior run.
-#[when(
-    expr = "I start cradle CNI node in namespace {string} with config {string} serving gRPC as {string}"
-)]
-async fn start_cradle_cni_node(world: &mut World, namespace: String, config: String, sock: String) {
-    let scoped = world.ns(&namespace);
-    let pid = world.pid_file(&namespace);
-    let cfg = config_in(world, &config);
-    let ep = grpc_sock(world, &sock);
-    let state = cni_state_dir(world, &namespace);
-    let _ = tokio::process::Command::new("sudo")
-        .args(["rm", "-rf", &state])
-        .status()
-        .await;
+/// Spawn cradle as a CNI node with a per-feature `--state-dir`. `wipe_state`
+/// clears it first (fresh IPAM — the deterministic pod addresses the features
+/// assert must not shift after a crashed prior run); the restart step keeps
+/// it so allocations and endpoint records survive.
+async fn spawn_cradle_cni_node(
+    world: &World,
+    namespace: &str,
+    config: &str,
+    sock: &str,
+    wipe_state: bool,
+) {
+    let scoped = world.ns(namespace);
+    let pid = world.pid_file(namespace);
+    let cfg = config_in(world, config);
+    let ep = grpc_sock(world, sock);
+    let state = cni_state_dir(world, namespace);
+    if wipe_state {
+        let _ = tokio::process::Command::new("sudo")
+            .args(["rm", "-rf", &state])
+            .status()
+            .await;
+    }
     let log = format!("logs/{}.cradle.log", scoped);
     let cmd = format!(
         "exec {} serve --config {} --grpc {} --state-dir {} --pid-file {} >> {} 2>&1",
@@ -1144,7 +1150,35 @@ async fn start_cradle_cni_node(world: &mut World, namespace: String, config: Str
     .await
     .expect("Failed to start cradle CNI node");
     await_cradle(&scoped, &pid).await;
-    println!("✓ cradle CNI node started in {} (gRPC {}, state {})", scoped, ep, state);
+    println!(
+        "✓ cradle CNI node started in {} (gRPC {}, state {}{})",
+        scoped,
+        ep,
+        state,
+        if wipe_state { ", wiped" } else { ", kept" }
+    );
+}
+
+#[when(
+    expr = "I start cradle CNI node in namespace {string} with config {string} serving gRPC as {string}"
+)]
+async fn start_cradle_cni_node(world: &mut World, namespace: String, config: String, sock: String) {
+    spawn_cradle_cni_node(world, &namespace, &config, &sock, true).await;
+}
+
+/// Restart after `I stop cradle in namespace …` (kill -9): the state dir is
+/// KEPT, so the daemon must reconcile its persisted endpoints into the fresh
+/// eBPF maps and keep allocating from where IPAM left off.
+#[when(
+    expr = "I restart cradle CNI node in namespace {string} with config {string} serving gRPC as {string}"
+)]
+async fn restart_cradle_cni_node(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    sock: String,
+) {
+    spawn_cradle_cni_node(world, &namespace, &config, &sock, false).await;
 }
 
 #[when(expr = "I stop cradle CNI node in namespace {string}")]
@@ -1238,6 +1272,33 @@ async fn cni_del(world: &mut World, container: String, pod: String, node: String
     let (ok, out) = run_cni(world, "DEL", &node, &pod, &container, &config).await;
     assert!(ok, "cradle-cni DEL for {container} failed: {out}");
     println!("✓ CNI DEL {}", container);
+}
+
+#[when(
+    expr = "I run CNI CHECK for container {string} in pod namespace {string} on node {string} with config {string}"
+)]
+async fn cni_check_ok(world: &mut World, container: String, pod: String, node: String, config: String) {
+    let (ok, out) = run_cni(world, "CHECK", &node, &pod, &container, &config).await;
+    assert!(ok, "cradle-cni CHECK for {container} failed: {out}");
+    println!("✓ CNI CHECK {} ok", container);
+}
+
+#[then(
+    expr = "CNI CHECK for container {string} in pod namespace {string} on node {string} with config {string} should fail"
+)]
+async fn cni_check_fail(world: &mut World, container: String, pod: String, node: String, config: String) {
+    let (ok, out) = run_cni(world, "CHECK", &node, &pod, &container, &config).await;
+    assert!(!ok, "cradle-cni CHECK for {container} unexpectedly succeeded: {out}");
+    println!("✓ CNI CHECK {} failed (as expected)", container);
+}
+
+/// GC takes no attachment parameters — the netconf carries the runtime's
+/// `cni.dev/valid-attachments` list; everything else is swept.
+#[when(expr = "I run CNI GC on node {string} with config {string}")]
+async fn cni_gc(world: &mut World, node: String, config: String) {
+    let (ok, out) = run_cni(world, "GC", &node, "", "gc", &config).await;
+    assert!(ok, "cradle-cni GC failed: {out}");
+    println!("✓ CNI GC ran on {}", node);
 }
 
 // ------------------------------ HTTP service ------------------------------

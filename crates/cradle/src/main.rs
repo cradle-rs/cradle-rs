@@ -216,6 +216,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         cfg.apply_control(&control).await?;
     }
 
+    // Re-program persisted CNI endpoints into the fresh maps (restart
+    // survival); completes deletes for pods torn down while we were dead.
+    control.cni_reconcile().await;
+
     // Start the L7 transparent proxy (no-op for traffic until an L7 service is
     // configured; best-effort if the transparent bind is unavailable).
     control.start_l7_proxy().await;

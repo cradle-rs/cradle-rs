@@ -171,6 +171,6 @@ with kernel forwarding disabled on both nodes.
 |---|---|---|
 | M1 CNI plugin + endpoint plumbing | ✅ | `cradle-cni` + AllocIp/CreateEndpoint gRPC; `cradle_cni` |
 | M2 multi-node pod routing over BGP | ✅ | learned-route tee to the pod FIB; `cradle_cni_bgp` |
-| M3 lifecycle (CHECK/GC/restart reconcile) | ⬜ | verbs implemented; reconcile + BDD pending |
+| M3 lifecycle (CHECK/GC/restart reconcile) | ✅ | startup reconcile re-programs stored endpoints; `cradle_cni_restart` |
 | M4 Services (ClusterIP via eBPF L4 LB) + kind packaging | ⬜ | |
 | Cilium compat (agent REST subset, CRDs, chaining) | ⬜ | story 2 of `docs/design/cni-cilium.md` |
