@@ -80,7 +80,7 @@ cilium/cilium#34841). Plan and roadmap: `docs/design/cni-cilium.md`.
 | Host-network-backed services | 🔶 | intentionally left to kube-proxy: unprogrammed VIPs miss the eBPF FIB and fall through to the kernel (hybrid model) |
 | Dual-stack pods (IPv6 IPAM) | ⬜ | the datapath is fully dual-stack; the allocator/plumbing is v4-only today |
 | NodePort / hostPort / egress SNAT | ⬜ | ClusterIP only; no masquerade |
-| Full kube-proxy replacement | ⬜ | needs an egress reverse-NAT hook for node-local backends |
+| Full kube-proxy replacement | ⬜ | no NodePort/hostPort/LoadBalancer frontends; host-network-backed services and egress masquerade unhandled ([plan](docs/design/kube-proxy-dualstack.md)) |
 
 ## Cilium compatibility status
 
