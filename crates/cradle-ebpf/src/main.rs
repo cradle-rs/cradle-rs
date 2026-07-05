@@ -247,6 +247,10 @@ struct PolicyScratch6 {
     lpm: Lpm6,
     key4: CtKey,
     lpm4: Lpm4,
+    /// `l2_xmit`'s v6 neighbor key — not policy state, but its 20 bytes sit
+    /// at the bottom of the same over-budget frame; scratch use is strictly
+    /// sequential within one invocation (policy verdict, then transmit).
+    neigh6: Neigh6Key,
 }
 
 /// Most-specific-first policy probe patterns (`policy_denied*`): bit0 = any
@@ -370,7 +374,56 @@ pub fn cradle_tc(ctx: TcContext) -> i32 {
 #[classifier]
 pub fn cradle_egress(ctx: TcContext) -> i32 {
     let _ = egress_reverse_snat(&ctx);
-    TC_ACT_PIPE as i32
+    // Ingress network policy, enforced at *delivery*: the TC egress hook of
+    // the pod's host-veth sees every packet entering the pod — routed,
+    // same-node, and node-originated (kubelet probes, which never traverse
+    // cradle_tc) — post-NAT, so verdicts apply to the real destination.
+    // Living here (not in cradle_tc) also keeps the flattened cradle_tc
+    // frame inside the verifier's 512-byte call-chain stack budget
+    // (docs/design/tailcall-vs-monolithic.md).
+    ingress_policy(&ctx).unwrap_or(TC_ACT_PIPE as i32)
+}
+
+/// Ingress-direction policy verdict + inbound-flow tracking for an enforced
+/// endpoint, keyed by the packet's egress device (`skb->ifindex` at the TC
+/// egress hook = the pod's host-veth).
+#[inline(always)]
+fn ingress_policy(ctx: &TcContext) -> Result<i32, ()> {
+    let oif = unsafe { (*ctx.skb.skb).ifindex };
+    let Some(ep_flags) = EP_POLICY.get_ptr(&oif) else {
+        return Ok(TC_ACT_PIPE as i32);
+    };
+    let ep_flags = unsafe { *ep_flags };
+    let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
+    match u16::from_be(ethertype) {
+        ETH_P_IP => {
+            if ep_flags & EP_F_INGRESS != 0
+                && policy_denied(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
+            {
+                stat_inc(STAT_POLICY_DROP);
+                emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif);
+                return Ok(TC_ACT_SHOT as i32);
+            }
+            // Egress statefulness: record the admitted inbound flow so the
+            // pod's replies bypass its egress rules.
+            if ep_flags & EP_F_EGRESS != 0 {
+                let _ = pct_track(ctx, PCT_INBOUND);
+            }
+        }
+        ETH_P_IPV6 => {
+            if ep_flags & EP_F_INGRESS != 0
+                && policy_denied_v6(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
+            {
+                stat_inc(STAT_POLICY_DROP);
+                return Ok(TC_ACT_SHOT as i32);
+            }
+            if ep_flags & EP_F_EGRESS != 0 {
+                let _ = pct_track6(ctx, PCT_INBOUND);
+            }
+        }
+        _ => {}
+    }
+    Ok(TC_ACT_PIPE as i32)
 }
 
 #[inline(always)]
@@ -1595,26 +1648,9 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     let (nh_id, nh) = resolve_nh(nh_id).ok_or(())?;
     let oif = nh.oif;
 
-    // Ingress network policy: the destination resolved to an enforced pod
-    // endpoint — the packet must be a reply to a pod-initiated flow or match
-    // an allow rule (docs/design/policy.md). One hash miss on the common
-    // (non-endpoint) path.
-    if let Some(ep_flags) = EP_POLICY.get_ptr(&oif) {
-        let ep_flags = unsafe { *ep_flags };
-        if ep_flags & EP_F_INGRESS != 0
-            && policy_denied(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
-        {
-            stat_inc(STAT_POLICY_DROP);
-            // Hubble: a policy drop delivering to endpoint `oif` (ingress).
-            emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif);
-            return Ok(TC_ACT_SHOT as i32);
-        }
-        // Egress statefulness: record the admitted inbound flow (post-NAT)
-        // so the pod's replies bypass its egress rules.
-        if ep_flags & EP_F_EGRESS != 0 {
-            let _ = pct_track(ctx, PCT_INBOUND);
-        }
-    }
+    // Ingress network policy toward `oif` is enforced at delivery — the
+    // veth's TC *egress* hook (`ingress_policy` in cradle_egress), which
+    // also sees node-originated traffic this hook never does.
 
     // SRv6 imposition (H.Encaps) of a v4-inner packet: impose an outer IPv6
     // header toward the SID. Pipe-model — the inner IPv4 TTL is left as-is.
@@ -1780,20 +1816,8 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     let (nh_id, nh) = resolve_nh(nh_id).ok_or(())?;
     let oif = nh.oif;
 
-    // Ingress network policy — the v4 sibling's comment applies.
-    if let Some(ep_flags) = EP_POLICY.get_ptr(&oif) {
-        let ep_flags = unsafe { *ep_flags };
-        if ep_flags & EP_F_INGRESS != 0
-            && policy_denied_v6(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
-        {
-            stat_inc(STAT_POLICY_DROP);
-            return Ok(TC_ACT_SHOT as i32);
-        }
-        // Egress statefulness: admitted inbound flow → replies bypass egress.
-        if ep_flags & EP_F_EGRESS != 0 {
-            let _ = pct_track6(ctx, PCT_INBOUND);
-        }
-    }
+    // Ingress network policy toward `oif` is enforced at delivery — see the
+    // v4 sibling's comment (`ingress_policy` in cradle_egress).
 
     // SRv6 imposition (H.Encaps): impose an outer IPv6 header toward the SID.
     if nh.flags & NH_F_SRV6 != 0 {
@@ -1941,10 +1965,14 @@ fn mpls_l2_xmit(ctx: &TcContext, nh: &NextHop) -> Result<i32, ()> {
 #[inline(always)]
 fn l2_xmit(ctx: &TcContext, nh: &NextHop, ethertype: u16) -> Result<i32, ()> {
     let dst_mac = if nh.flags & NH_F_V6 != 0 {
-        match NEIGH6.get_ptr(&Neigh6Key {
-            ifindex: nh.oif,
-            addr: nh.gateway_v6,
-        }) {
+        // Key built in scratch — see `PolicyScratch6::neigh6`.
+        let s = POL6_SCRATCH.get_ptr_mut(0).ok_or(())?;
+        let e = unsafe {
+            (*s).neigh6.ifindex = nh.oif;
+            (*s).neigh6.addr = nh.gateway_v6;
+            NEIGH6.get_ptr(&(*s).neigh6)
+        };
+        match e {
             Some(e) => unsafe { (*e).mac },
             None => return Ok(TC_ACT_PIPE as i32),
         }
