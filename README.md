@@ -119,7 +119,7 @@ proven against the stock Cilium binary/agent; only Hubble is out of scope.
 | Push (imposition) | ✅ | up to 3-label stacks (TC, IP payloads) |
 | Pop-to-VRF (VPN label) | ✅ | decap + per-VRF lookup; VRF carried XDP→TC as metadata |
 | ECMP over labeled paths | ✅ | flow-hashed nexthop groups |
-| Entropy / TTL-propagate knobs | ⬜ | TTL decrements; no ELI/EL |
+| Entropy / TTL-propagate knobs | ⬜ | label TTL decrements per hop; inner IP TTL preserved (pipe model); no ELI/EL, no pipe/uniform knob |
 
 ## SRv6 support status
 
@@ -137,7 +137,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | H.Encaps.Red | ✅ | the default; single-SID = no SRH |
 | H.Encaps.L2 / L2.Red | ✅ | MAC-in-SRv6 (next-header 143) for EVPN, XDP stage |
 | H.Insert | ✅ | TI-LFA repair imposition (v6; original DA as final segment) |
-| H.M.GTP4.D / GTP6.D | ⬜ | mobile user plane out of scope |
+| H.M.GTP4.D / GTP6.D | ⬜ | the SRv6-integrated mobile headend (GTP↔SRv6, RFC 9433) is not done; standalone GTP4.E encap + GTP-U decap over an IPv4 underlay ARE (BGP-MUP-driven; `cradle_gtp`, `cradle_mup_gtp_zebra`) |
 
 ### Endpoint behaviors
 
