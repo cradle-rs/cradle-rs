@@ -519,6 +519,35 @@ pub struct PortConfig {
 pub const PORT_F_L2: u32 = 1 << 0;
 /// Routed (L3) port.
 pub const PORT_F_L3: u32 = 1 << 1;
+/// A pod endpoint's host-side veth: packets arriving here are pod egress —
+/// tracked in `PCT` so replies pass ingress policy (stateful semantics).
+pub const PORT_F_ENDPOINT: u32 = 1 << 2;
+
+// ============================ network policy ===============================
+
+/// Reserved identity: the node itself (kubelet probes etc.). Follows
+/// Cilium's reserved numbering.
+pub const IDENTITY_HOST: u32 = 1;
+/// Reserved identity: any source with no `IDENTITY` entry.
+pub const IDENTITY_WORLD: u32 = 2;
+
+/// Ingress-policy allow-rule key: `(endpoint oif, source identity, proto,
+/// dport)`. `identity`, `proto`, and `port` may each be 0 = wildcard; the
+/// datapath probes most-specific-first (docs/design/policy.md). Present in
+/// `POLICY` ⇒ allow.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PolicyKey {
+    /// Destination endpoint: the pod's host-side veth ifindex.
+    pub ep: u32,
+    /// Source identity (label-set hash; 1 = host, 2 = world, 0 = any).
+    pub identity: u32,
+    /// Destination L4 port, network byte order (0 = any).
+    pub port: u16,
+    /// IP protocol (0 = any).
+    pub proto: u8,
+    pub _pad: u8,
+}
 
 // ======================= L4: load balancing / conntrack ====================
 
@@ -708,8 +737,10 @@ pub const STAT_GTP_ENCAP: u32 = 35;
 pub const STAT_GTP_DECAP: u32 = 36;
 /// End.DX2/DX2V decaps (EVPN VPWS egress — frame emitted raw on the AC).
 pub const STAT_SRV6_DX2: u32 = 37;
+/// Ingress network-policy drops (enforced endpoint, no PCT/POLICY match).
+pub const STAT_POLICY_DROP: u32 = 38;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 38;
+pub const STAT_MAX: u32 = 39;
 
 // ============================== L7 proxy ===================================
 
@@ -758,6 +789,7 @@ mod user {
         Backend,
         CtKey,
         CtEntry,
+        PolicyKey,
         ServiceKey6,
         Backend6,
         CtKey6,

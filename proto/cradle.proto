@@ -321,6 +321,35 @@ message CniEndpointList {
   repeated CniEndpoint endpoints = 1;
 }
 
+// ---- ingress network policy (docs/design/policy.md) ----
+
+message Identity {
+  string ip = 1;       // pod/node IPv4
+  uint32 identity = 2; // label-set identity (1 = host, 2 = world)
+}
+
+message IdentityDel {
+  string ip = 1;
+}
+
+message PolicyRule {
+  uint32 identity = 1; // source identity (0 = any)
+  uint32 proto = 2;    // IP protocol number (0 = any)
+  uint32 port = 3;     // destination L4 port (0 = any)
+}
+
+// Replace an endpoint's ingress policy (allow rules + enforcement flag).
+// The endpoint is addressed by its host-side veth name, or by pod identity
+// (resolved through the endpoint store). enforce=false restores
+// default-allow and clears the rules.
+message EndpointPolicy {
+  string host_if = 1;
+  string pod_namespace = 2;
+  string pod_name = 3;
+  bool enforce = 4;
+  repeated PolicyRule rules = 5;
+}
+
 message StatsRequest {}
 
 // One datapath counter: a packet count at a forwarding decision point.
@@ -381,6 +410,9 @@ service Cradle {
   rpc DelService(ServiceDel) returns (Empty);
   rpc GetStats(StatsRequest) returns (StatsReply);
   rpc AddL7Service(L7Service) returns (Empty);
+  rpc SetIdentity(Identity) returns (Empty);
+  rpc DelIdentity(IdentityDel) returns (Empty);
+  rpc SetEndpointPolicy(EndpointPolicy) returns (Empty);
   rpc AllocIp(AllocIpRequest) returns (AllocIpReply);
   rpc ReleaseIp(ReleaseIpRequest) returns (Empty);
   rpc CreateEndpoint(CniEndpoint) returns (Empty);

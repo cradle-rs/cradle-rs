@@ -95,7 +95,7 @@ stock binary), ⬜ = planned, in roadmap order.
 | cilium-agent REST API subset (`cilium.sock`) | ✅ | `serve --cilium-sock`: `/healthz`, `/config`, `/ipam`, `/endpoint` — the UNMODIFIED cilium-cni v1.19.5 binary attaches pods to the cradle datapath; `cradle_cilium` |
 | `CiliumEndpoint` / `CiliumNode` CRDs | ✅ | `cradle-k8s --publish-crds` mirrors the daemon's endpoint store into CEPs (`kubectl get cep` shows cradle pods) + a CiliumNode with the podCIDR; vendored CRDs in `deploy/crds/`; kind e2e |
 | Generic-veth CNI chaining | ✅ | the stock Cilium agent chained on cradle-plumbed veths (`chained` netconf mode leaves the veth TC hook to Cilium; the pod /32 stays in the eBPF FIB for fabric-ingress forwarding); a CiliumNetworkPolicy blocks/restores pod traffic in `deploy/kind-cilium-e2e.sh` |
-| NetworkPolicy / identity enforcement | ⬜ | native `IDENTITY`/`POLICY` maps + verdict in `cradle_tc`; k8s NetworkPolicy semantics first (M8) |
+| NetworkPolicy / identity enforcement | ✅ | native `IDENTITY`/`POLICY`/`PCT` maps + ingress verdict in `cradle_tc` (stateful, default-allow); `cradle-k8s --enforce-policy` translates k8s NetworkPolicies; `cradle_policy` BDD + kind e2e ([design](docs/design/policy.md)) |
 | Hubble API | ⬜ | out of scope for this arc |
 
 ## MPLS support status

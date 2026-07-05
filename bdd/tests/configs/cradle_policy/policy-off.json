@@ -1,0 +1,1 @@
+{ "policies": [ { "namespace": "default", "pod": "pod2", "enforce": false } ] }

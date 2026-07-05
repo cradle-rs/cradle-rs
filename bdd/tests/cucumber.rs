@@ -1249,6 +1249,9 @@ async fn run_cni(
         .arg(format!("CNI_NETNS=/var/run/netns/{pod_ns}"))
         .arg("CNI_IFNAME=eth0")
         .arg("CNI_PATH=/opt/cni/bin")
+        .arg(format!(
+            "CNI_ARGS=IgnoreUnknown=1;K8S_POD_NAMESPACE=default;K8S_POD_NAME={container}"
+        ))
         .arg(cradle_cni_bin())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

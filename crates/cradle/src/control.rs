@@ -89,6 +89,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "gtp_encap",
     "gtp_decap",
     "srv6_dx2",
+    "policy_drop",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -824,6 +825,17 @@ impl Control {
         // the veth egress hook, which redirects traverse).
         if !chained {
             self.set_port(host_if, None, true, 0, vrf).await?;
+            // Flag the veth as an endpoint port so the datapath tracks pod
+            // egress (PCT) for stateful ingress policy. set_port left it
+            // PORT_F_L3; re-set with the endpoint bit added.
+            let mac = util::mac_of(host_if)?;
+            self.dp.lock().await.port_set(
+                ifindex,
+                mac,
+                cradle_common::PORT_F_L3 | cradle_common::PORT_F_ENDPOINT,
+                0,
+                vrf,
+            )?;
         }
         {
             let mut dp = self.dp.lock().await;
@@ -870,6 +882,52 @@ impl Control {
         cni.release_ip(&crate::cni::owner_key(container_id, ifname), Some(ep.ip))?;
         cni.remove_endpoint(container_id, ifname)?;
         info!("cni endpoint {container_id}/{ifname} removed ({})", ep.ip);
+        Ok(())
+    }
+
+    /// Bind a pod/node address to a policy identity.
+    pub async fn set_identity(&self, ip: Ipv4Addr, identity: u32) -> Result<()> {
+        self.dp.lock().await.identity_set(ip, identity)
+    }
+
+    /// Remove an identity binding (idempotent).
+    pub async fn del_identity(&self, ip: Ipv4Addr) -> Result<()> {
+        self.dp.lock().await.identity_del(ip)
+    }
+
+    /// Resolve a policy target to its endpoint ifindex: by host veth name,
+    /// or by pod identity through the endpoint store.
+    pub async fn resolve_endpoint(
+        &self,
+        host_if: &str,
+        pod_namespace: &str,
+        pod_name: &str,
+    ) -> Result<u32> {
+        if !host_if.is_empty() {
+            return util::ifindex_of(host_if);
+        }
+        let eps = self.cni.lock().await.list_endpoints()?;
+        eps.iter()
+            .find(|ep| ep.pod_name == pod_name && ep.pod_namespace == pod_namespace)
+            .map(|ep| ep.host_ifindex)
+            .with_context(|| format!("no endpoint for pod {pod_namespace}/{pod_name}"))
+    }
+
+    /// Replace an endpoint's ingress policy (see `Dataplane::endpoint_policy_set`).
+    pub async fn set_endpoint_policy(
+        &self,
+        ep: u32,
+        enforce: bool,
+        rules: &[(u32, u8, u16)],
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .endpoint_policy_set(ep, enforce, rules)?;
+        info!(
+            "endpoint policy ifindex {ep}: enforce={enforce}, {} rule(s)",
+            rules.len()
+        );
         Ok(())
     }
 
@@ -1582,6 +1640,51 @@ impl Cradle for GrpcService {
             .map(|(name, packets)| pb::StatEntry { name, packets })
             .collect();
         Ok(Response::new(pb::StatsReply { entries }))
+    }
+
+    async fn set_identity(
+        &self,
+        req: Request<pb::Identity>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let i = req.into_inner();
+        let ip = i.ip.parse::<Ipv4Addr>().map_err(st)?;
+        self.control
+            .set_identity(ip, i.identity)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_identity(
+        &self,
+        req: Request<pb::IdentityDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let i = req.into_inner();
+        let ip = i.ip.parse::<Ipv4Addr>().map_err(st)?;
+        self.control.del_identity(ip).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_endpoint_policy(
+        &self,
+        req: Request<pb::EndpointPolicy>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let p = req.into_inner();
+        let ep = self
+            .control
+            .resolve_endpoint(&p.host_if, &p.pod_namespace, &p.pod_name)
+            .await
+            .map_err(st)?;
+        let rules: Vec<(u32, u8, u16)> = p
+            .rules
+            .iter()
+            .map(|r| (r.identity, r.proto as u8, r.port as u16))
+            .collect();
+        self.control
+            .set_endpoint_policy(ep, p.enforce, &rules)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
     }
 
     async fn alloc_ip(

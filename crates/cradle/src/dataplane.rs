@@ -21,9 +21,10 @@ use aya::{
 use cradle_common::{
     Backend, Backend6, BackendKey, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
     GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
-    Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
-    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED, STAT_MAX,
+    NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
+    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, FDB_F_REMOTE, LB_ALGO_RANDOM,
+    MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, STAT_FDB_AGED,
+    STAT_MAX,
 };
 
 use crate::{
@@ -77,6 +78,10 @@ pub struct Dataplane {
     backends: HashMap<MapData, BackendKey, Backend>,
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
     backends6: HashMap<MapData, BackendKey, Backend6>,
+    /// Ingress network policy (docs/design/policy.md).
+    identity: HashMap<MapData, u32, u32>,
+    ep_policy: HashMap<MapData, u32, u8>,
+    policy: HashMap<MapData, PolicyKey, u8>,
     stats: PerCpuArray<MapData, u64>,
     l7_services: HashMap<MapData, ServiceKey, u8>,
 }
@@ -151,6 +156,11 @@ impl Dataplane {
             services6: HashMap::try_from(
                 bpf.take_map("SERVICES6").context("map SERVICES6 missing")?,
             )?,
+            identity: HashMap::try_from(bpf.take_map("IDENTITY").context("map IDENTITY missing")?)?,
+            ep_policy: HashMap::try_from(
+                bpf.take_map("EP_POLICY").context("map EP_POLICY missing")?,
+            )?,
+            policy: HashMap::try_from(bpf.take_map("POLICY").context("map POLICY missing")?)?,
             backends6: HashMap::try_from(
                 bpf.take_map("BACKENDS6").context("map BACKENDS6 missing")?,
             )?,
@@ -341,6 +351,58 @@ impl Dataplane {
             });
         }
         self.services6.remove(&key)?;
+        Ok(())
+    }
+
+    /// Bind `ip` to a policy identity (`docs/design/policy.md`).
+    pub fn identity_set(&mut self, ip: std::net::Ipv4Addr, identity: u32) -> Result<()> {
+        self.identity.insert(util::ipv4_to_map(ip), identity, 0)?;
+        Ok(())
+    }
+
+    /// Remove an identity binding (idempotent).
+    pub fn identity_del(&mut self, ip: std::net::Ipv4Addr) -> Result<()> {
+        let _ = self.identity.remove(&util::ipv4_to_map(ip));
+        Ok(())
+    }
+
+    /// Replace endpoint `ep`'s ingress policy: clear its old allow rules,
+    /// install `rules` (`(identity, proto, port)`, 0 = wildcard), and mark it
+    /// enforcing. `enforce = false` removes enforcement and all rules —
+    /// back to default-allow.
+    pub fn endpoint_policy_set(
+        &mut self,
+        ep: u32,
+        enforce: bool,
+        rules: &[(u32, u8, u16)],
+    ) -> Result<()> {
+        let stale: Vec<PolicyKey> = self
+            .policy
+            .keys()
+            .filter_map(|k| k.ok())
+            .filter(|k| k.ep == ep)
+            .collect();
+        for key in stale {
+            let _ = self.policy.remove(&key);
+        }
+        if !enforce {
+            let _ = self.ep_policy.remove(&ep);
+            return Ok(());
+        }
+        for &(identity, proto, port) in rules {
+            self.policy.insert(
+                PolicyKey {
+                    ep,
+                    identity,
+                    port: util::port_to_map(port),
+                    proto,
+                    _pad: 0,
+                },
+                1u8,
+                0,
+            )?;
+        }
+        self.ep_policy.insert(ep, 1u8, 0)?;
         Ok(())
     }
 
