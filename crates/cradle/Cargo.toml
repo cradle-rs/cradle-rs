@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 nix = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
+prost-types = { workspace = true }
 prost = { workspace = true }
 socket2 = { workspace = true }
 hyper = { workspace = true }

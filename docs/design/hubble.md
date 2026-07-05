@@ -88,13 +88,15 @@ server, both on infrastructure that already exists.
 
 ## Milestones
 
-- **H1 — flow events + minimal Observer.** `FLOWS` ringbuf + emit at
-  L3-forward (FORWARDED) and policy-drop (DROPPED); user-space drain +
-  in-memory ring; `GetFlows` (number/follow) + `ServerStatus` on
-  `hubble.sock`. **Acceptance**: the stock `hubble observe` CLI (pinned,
-  extracted from the Cilium image like `cilium-cni`) against a cradle node
-  shows FORWARDED pod↔pod flows and a DROPPED flow when a NetworkPolicy
-  blocks traffic. BDD `cradle_hubble` (namespaces) + a kind-e2e phase.
+- **H1 — flow events + minimal Observer. ✅ delivered.** `FLOWS` ringbuf +
+  emit at L3-forward (FORWARDED) and policy-drop (DROPPED); user-space drain +
+  in-memory ring; `GetFlows` (number/follow) + `ServerStatus` + `GetNodes` +
+  `GetNamespaces` on `hubble.sock` (`serve --hubble-sock`, `--node-name`).
+  **Acceptance (met)**: the stock `hubble` v1.19.5 CLI (extracted from the
+  Cilium image by `deploy/fetch-hubble.sh`, like `cilium-cni`) against a
+  cradle node shows FORWARDED pod↔pod flows and a DROPPED flow when a
+  NetworkPolicy blocks traffic — proven by the `cradle_hubble` BDD feature.
+  A kind-e2e phase is still to come.
 - **H2 — enrichment + filters + service/masq verdicts.** Endpoint
   identity/namespace/pod/labels on both ends; TRANSLATED for service DNAT +
   masquerade; `FlowFilter` (verdict / namespace / pod / protocol);

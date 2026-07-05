@@ -51,6 +51,7 @@ serde_json = "1"
 nix = { version = "0.27", features = ["net", "time"] }
 tonic = "0.14"
 tonic-prost = "0.14"
+prost-types = "0.14"
 prost = "0.14"
 tonic-prost-build = "0.14"
 

@@ -11,6 +11,15 @@ fn main() -> anyhow::Result<()> {
         "/../../proto/cradle.proto"
     ))?;
 
+    // Hubble Observer API (docs/design/hubble.md). `proto/hubble` is the
+    // include root so `import "flow/flow.proto"` resolves; observer.proto
+    // pulls in flow.proto + relay.proto.
+    let hubble = concat!(env!("CARGO_MANIFEST_DIR"), "/../../proto/hubble");
+    tonic_prost_build::configure().compile_protos(
+        &[format!("{hubble}/observer/observer.proto")],
+        &[hubble.to_string()],
+    )?;
+
     // eBPF data plane.
     aya_build::build_ebpf(
         [Package {

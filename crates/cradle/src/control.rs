@@ -936,6 +936,20 @@ impl Control {
         Ok(())
     }
 
+    /// Snapshot of pod IPv4 → (namespace, pod_name) for Hubble flow
+    /// enrichment. Rebuilt from the endpoint store per drain wake (pod churn
+    /// is far slower than the flow rate).
+    pub async fn cni_ip_index(&self) -> std::collections::HashMap<Ipv4Addr, (String, String)> {
+        let cni = self.cni.lock().await;
+        let mut idx = std::collections::HashMap::new();
+        if let Ok(eps) = cni.list_endpoints() {
+            for ep in eps {
+                idx.insert(ep.ip, (ep.pod_namespace.clone(), ep.pod_name.clone()));
+            }
+        }
+        idx
+    }
+
     /// Set the node's uplink IPv4 for egress masquerade (None = disable).
     pub async fn set_masq_node(&self, node: Option<Ipv4Addr>) -> Result<()> {
         self.dp.lock().await.masq_node_set(node)?;

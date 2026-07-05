@@ -1190,6 +1190,116 @@ async fn start_cradle_cni_node(world: &mut World, namespace: String, config: Str
     spawn_cradle_cni_node(world, &namespace, &config, &sock, true).await;
 }
 
+/// Per-feature filesystem path for the Hubble Observer unix socket (the stock
+/// `hubble` CLI connects here as `unix://<path>`; netns does not isolate the
+/// filesystem, so the path is host-global like the gRPC/Cilium sockets).
+fn hubble_sock(world: &World, name: &str) -> String {
+    format!("/tmp/{}_{}.sock", world.feature_tag, name)
+}
+
+/// Resolve the stock `hubble` CLI (extracted from the pinned Cilium image by
+/// `deploy/fetch-hubble.sh`; overridable via $HUBBLE).
+fn hubble_bin() -> String {
+    std::env::var("HUBBLE").unwrap_or_else(|_| {
+        format!(
+            "{}/.cache/cradle-bdd/hubble",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    })
+}
+
+/// Start a cradle CNI node with the Hubble Observer API enabled alongside the
+/// gRPC control API (fresh per-feature state dir, as the plain CNI node step).
+#[when(
+    expr = "I start cradle CNI node in namespace {string} with config {string} serving gRPC as {string} and Hubble as {string}"
+)]
+async fn start_cradle_cni_node_hubble(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    sock: String,
+    hsock: String,
+) {
+    let scoped = world.ns(&namespace);
+    let pid = world.pid_file(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    let state = cni_state_dir(world, &namespace);
+    let hub = hubble_sock(world, &hsock);
+    let _ = tokio::process::Command::new("sudo")
+        .args(["rm", "-rf", &state])
+        .status()
+        .await;
+    let log = format!("logs/{}.cradle.log", scoped);
+    let cmd = format!(
+        "exec {} serve --config {} --grpc {} --state-dir {} --hubble-sock {} --node-name {} --pid-file {} >> {} 2>&1",
+        cradle_bin(),
+        cfg,
+        ep,
+        state,
+        hub,
+        scoped,
+        pid,
+        log
+    );
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info,cradle=debug")],
+        "sh",
+        &["-c", &cmd],
+    )
+    .await
+    .expect("Failed to start cradle CNI node with Hubble");
+    await_cradle(&scoped, &pid).await;
+    println!(
+        "✓ cradle CNI node started in {} (gRPC {}, hubble {})",
+        scoped, ep, hub
+    );
+}
+
+/// Poll the stock `hubble observe` CLI until a flow with the given verdict
+/// between the two IPs shows up in the node's recent-flow buffer. Uses
+/// newline-delimited JSON output (`-o json`, one flow object per line) so a
+/// single matching line proves that exact (verdict, src, dst) flow was
+/// observed by the datapath and served over hubble.sock.
+#[then(
+    expr = "hubble observe on node {string} via Hubble {string} should show a {string} flow from {string} to {string}"
+)]
+async fn hubble_should_show_flow(
+    world: &mut World,
+    node: String,
+    hsock: String,
+    verdict: String,
+    src: String,
+    dst: String,
+) {
+    let scoped = world.ns(&node);
+    let server = format!("unix://{}", hubble_sock(world, &hsock));
+    let bin = hubble_bin();
+    for _ in 0..15 {
+        let out = netns::exec_in_netns(
+            &scoped,
+            &bin,
+            &[
+                "observe", "--server", &server, "--last", "500", "-o", "json",
+            ],
+        )
+        .await
+        .unwrap_or_default();
+        let hit = out.lines().any(|l| {
+            l.contains(&format!("\"{verdict}\""))
+                && l.contains(&format!("\"{src}\""))
+                && l.contains(&format!("\"{dst}\""))
+        });
+        if hit {
+            println!("✓ hubble observe saw {verdict} {src} -> {dst}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    panic!("hubble observe never showed a {verdict} flow from {src} to {dst}");
+}
+
 /// Restart after `I stop cradle in namespace …` (kill -9): the state dir is
 /// KEPT, so the daemon must reconcile its persisted endpoints into the fresh
 /// eBPF maps and keep allocating from where IPAM left off.

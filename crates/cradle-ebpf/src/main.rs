@@ -30,18 +30,19 @@ use aya_ebpf::{
         bpf_sk_release, bpf_skc_lookup_tcp, bpf_xdp_adjust_head, bpf_xdp_adjust_meta,
     },
     macros::{classifier, map, xdp},
-    maps::{lpm_trie::Key, Array, HashMap, LpmTrie, LruHashMap, PerCpuArray},
+    maps::{lpm_trie::Key, Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf},
     programs::{TcContext, XdpContext},
 };
 use cradle_common::{
     fibw_unpack, mpls_lse, mpls_lse_unpack, AffinityKey, AffinityVal, Backend, Backend6,
     BackendKey, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey,
-    FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey,
-    MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig,
-    ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, AFFINITY_TIMEOUT_NS,
-    CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID,
-    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
+    FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry,
+    MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey,
+    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
+    AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK,
+    FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FLOW_DIR_EGRESS,
+    FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS,
+    MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
     PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M,
     SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX2,
     SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
@@ -182,6 +183,13 @@ static CT: LruHashMap<CtKey, CtEntry> = LruHashMap::with_max_entries(65536, 0);
 /// slot per service, so new flows from the same client stick to it.
 #[map]
 static AFFINITY: LruHashMap<AffinityKey, AffinityVal> = LruHashMap::with_max_entries(65536, 0);
+
+/// Hubble flow events (docs/design/hubble.md): a verdict record per forwarded
+/// or dropped IPv4 flow, drained + enriched in user space and served over the
+/// Hubble Observer gRPC API. 4 MiB ring (best-effort; a full ring drops
+/// records rather than blocking the datapath).
+#[map]
+static FLOWS: RingBuf = RingBuf::with_byte_size(1 << 22, 0);
 
 // --- ingress network policy (docs/design/policy.md) ---
 /// Source IPv4 (map-encoded) → identity. Miss = `IDENTITY_WORLD`.
@@ -469,7 +477,9 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
         // place (service DNAT / reverse SNAT / egress masquerade) so routing
         // then targets the real endpoint. Failures fall through to routing.
         let _ = l4_nat(ctx, masq_src);
-        l3_forward(ctx, port.vrf_id)
+        // `masq_src` == this ingress port is a pod endpoint (pod egress) —
+        // reused as the Hubble flow direction hint.
+        l3_forward(ctx, port.vrf_id, masq_src)
     } else {
         Ok(TC_ACT_PIPE as i32)
     }
@@ -736,6 +746,45 @@ fn masq_v4(
     snat(ctx, proto, src_ip, sport, node, sport)?;
     stat_inc(STAT_MASQ);
     Ok(())
+}
+
+/// Emit a Hubble flow event for the current IPv4 packet (best-effort). `dir`
+/// is `FLOW_DIR_*`; `ep` is the local endpoint veth ifindex (0 = none, for
+/// user-space enrichment). Never affects forwarding.
+#[inline(always)]
+fn emit_flow_v4(ctx: &TcContext, verdict: u8, dir: u8, ep: u32) {
+    let (Ok(saddr), Ok(daddr), Ok(proto)) = (
+        ctx.load::<[u8; 4]>(IP_SRC_OFF),
+        ctx.load::<[u8; 4]>(IP_DST_OFF),
+        ctx.load::<u8>(IP_PROTO_OFF),
+    ) else {
+        return;
+    };
+    let ver_ihl: u8 = ctx.load(IP_VER_IHL_OFF).unwrap_or(0);
+    let (sport, dport) = if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) && ver_ihl & 0x0f == 5 {
+        (
+            ctx.load::<u16>(L4_OFF).unwrap_or(0),
+            ctx.load::<u16>(L4_OFF + 2).unwrap_or(0),
+        )
+    } else {
+        (0, 0)
+    };
+    let Some(mut slot) = FLOWS.reserve::<FlowRecord>(0) else {
+        return;
+    };
+    slot.write(FlowRecord {
+        time_ns: unsafe { bpf_ktime_get_ns() },
+        ep_ifindex: ep,
+        saddr,
+        daddr,
+        sport,
+        dport,
+        proto,
+        verdict,
+        dir,
+        _pad: 0,
+    });
+    slot.submit(0);
 }
 
 #[inline(always)]
@@ -1112,10 +1161,10 @@ fn resolve_nh(nh_id: u32) -> Option<(u32, NextHop)> {
 }
 
 #[inline(always)]
-fn l3_forward(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
+fn l3_forward(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<i32, ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     match u16::from_be(ethertype) {
-        ETH_P_IP => l3_forward_v4(ctx, port_vrf),
+        ETH_P_IP => l3_forward_v4(ctx, port_vrf, from_endpoint),
         ETH_P_IPV6 => l3_forward_v6(ctx, port_vrf),
         ETH_P_MPLS_UC => mpls_forward(ctx),
         _ => Ok(TC_ACT_PIPE as i32), // ARP, ... -> stack
@@ -1292,7 +1341,7 @@ fn fib4_lookup(vrf_id: u32, dst: [u8; 4]) -> Option<FibEntry> {
 }
 
 #[inline(always)]
-fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
+fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<i32, ()> {
     // End.DX4 hand-off — see the v6 sibling.
     let dx_nh = tc_meta_dx(ctx);
     if dx_nh != 0 {
@@ -1343,6 +1392,8 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     // (non-endpoint) path.
     if EP_POLICY.get_ptr(&oif).is_some() && policy_denied(ctx, oif).unwrap_or(true) {
         stat_inc(STAT_POLICY_DROP);
+        // Hubble: a policy drop delivering to endpoint `oif` (ingress).
+        emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif);
         return Ok(TC_ACT_SHOT as i32);
     }
 
@@ -1402,6 +1453,15 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
         dst
     };
     stat_inc(STAT_L3V4_FORWARD);
+    // Hubble: a forwarded flow. Pod egress (from_endpoint) is EGRESS; a packet
+    // being delivered toward a local endpoint is INGRESS. `oif` is the local
+    // endpoint veth when this is ingress-to-pod (enrichment key).
+    let (dir, ep) = if from_endpoint {
+        (FLOW_DIR_EGRESS, 0)
+    } else {
+        (FLOW_DIR_INGRESS, oif)
+    };
+    emit_flow_v4(ctx, FLOW_FORWARDED, dir, ep);
     let mut params = bpf_redir_neigh {
         nh_family: AF_INET,
         __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
