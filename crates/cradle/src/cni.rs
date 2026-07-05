@@ -48,6 +48,10 @@ pub struct Endpoint {
     pub pod_name: String,
     #[serde(default)]
     pub pod_namespace: String,
+    /// CNI-chained endpoint: cradle's datapath is not attached to the veth
+    /// (the chained plugin — e.g. Cilium generic-veth — owns that hook).
+    #[serde(default)]
+    pub chained: bool,
 }
 
 /// One pod-IP allocation: address → owner.

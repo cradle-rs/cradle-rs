@@ -82,6 +82,11 @@ struct NetConf {
     /// VRF table pod endpoints join (0 = global).
     #[serde(default)]
     vrf: u32,
+    /// Chained deployment (e.g. Cilium generic-veth after cradle-cni in the
+    /// conflist): cradle does IPAM/veth/routes but leaves the veth TC hook
+    /// to the chained plugin.
+    #[serde(default)]
+    chained: bool,
     /// GC input: attachments the runtime still considers valid.
     #[serde(rename = "cni.dev/valid-attachments", default)]
     valid_attachments: Vec<Attachment>,
@@ -381,6 +386,7 @@ async fn plumb(
         vrf_id: conf.vrf,
         pod_name: env.pod_name.clone(),
         pod_namespace: env.pod_namespace.clone(),
+        chained: conf.chained,
     })
     .await
     .map_err(|e| {

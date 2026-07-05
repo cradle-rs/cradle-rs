@@ -159,6 +159,7 @@ mod tests {
             vrf_id: 0,
             pod_name: pod.into(),
             pod_namespace: ns.into(),
+            chained: false,
         }
     }
 

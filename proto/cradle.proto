@@ -305,6 +305,11 @@ message CniEndpoint {
   // the CiliumEndpoint CRD publication; empty outside Kubernetes.
   string pod_name = 8;
   string pod_namespace = 9;
+  // CNI-chained deployment (e.g. Cilium generic-veth on top): cradle skips
+  // attaching its datapath to the pod veth — the chained plugin owns that
+  // hook — but still allocates, records, installs the kernel route, and
+  // keeps the pod /32 in the eBPF FIB for fabric-ingress forwarding.
+  bool chained = 10;
 }
 
 message CniEndpointKey {
