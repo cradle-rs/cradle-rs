@@ -14,6 +14,8 @@ mod ctl;
 mod dataplane;
 mod dir24;
 mod grpc;
+mod hpb;
+mod hubble;
 mod kernel;
 mod l7;
 mod pb;
@@ -86,6 +88,15 @@ struct ServeArgs {
     /// Pod CIDR the Cilium-compat IPAM allocates from.
     #[arg(long)]
     pod_cidr: Option<String>,
+    /// Serve the Hubble Observer gRPC API on this unix socket, so the stock
+    /// `hubble observe` CLI can stream this node's datapath flows. Typically
+    /// /var/run/cilium/hubble.sock.
+    #[arg(long)]
+    hubble_sock: Option<PathBuf>,
+    /// Node name reported to Hubble (defaults to $NODE_NAME / $HOSTNAME / the
+    /// kernel hostname).
+    #[arg(long)]
+    node_name: Option<String>,
     /// IPv4 FIB engine: `lpm` (default) or `dir24` (DIR-24-8 direct-index —
     /// sizes TBL24/TBL8 at load; ~68 MiB, full-DFZ capacity). Load-time only;
     /// the JSON config's `fib4_mode` applies when this flag is not given.
@@ -169,6 +180,21 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Best-effort node name for Hubble: `$NODE_NAME` (Kubernetes downward API),
+/// then `$HOSTNAME`, then the kernel hostname, falling back to `"cradle"`.
+fn default_node_name() -> String {
+    let from_env = |k| std::env::var(k).ok().filter(|s| !s.is_empty());
+    from_env("NODE_NAME")
+        .or_else(|| from_env("HOSTNAME"))
+        .or_else(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "cradle".to_string())
+}
+
 async fn serve(args: ServeArgs) -> Result<()> {
     if let Some(p) = &args.pid_file {
         std::fs::write(p, std::process::id().to_string())
@@ -237,6 +263,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
         dp.set_fib4_mode_dir24()?;
         info!("IPv4 FIB engine: dir24 (DIR-24-8 direct index)");
     }
+    // Take the Hubble flow ring buffer out of the object before `Control`
+    // consumes `bpf` (only when the Observer API is enabled).
+    let flows_map = if args.hubble_sock.is_some() {
+        Some(bpf.take_map("FLOWS").context("map FLOWS missing")?)
+    } else {
+        None
+    };
+
     let control = Control::new(bpf, dp, args.state_dir.clone());
 
     if let Some(cfg) = &cfg {
@@ -258,6 +292,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = cilium::serve(c, sock, cidr).await {
                 tracing::warn!("cilium compat API stopped: {e:#}");
+            }
+        });
+    }
+
+    // Hubble Observer API: stream datapath flow verdicts to the stock
+    // `hubble` CLI (docs/design/hubble.md).
+    if let Some(sock) = args.hubble_sock.clone() {
+        let map = flows_map.expect("FLOWS map taken when --hubble-sock is set");
+        let node = args.node_name.clone().unwrap_or_else(default_node_name);
+        let c = control.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hubble::serve(c, sock, map, node).await {
+                tracing::warn!("hubble API stopped: {e:#}");
             }
         });
     }

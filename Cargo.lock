@@ -514,6 +514,7 @@ dependencies = [
  "hyper-util",
  "nix",
  "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "socket2 0.5.10",

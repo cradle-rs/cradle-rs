@@ -769,6 +769,41 @@ pub const STAT_MASQ: u32 = 39;
 /// Number of stat slots (the `STATS` map's `max_entries`).
 pub const STAT_MAX: u32 = 40;
 
+// ====================== Hubble flow events (docs/design/hubble.md) ==========
+
+/// Flow verdicts, mapped in user space to the Hubble `Verdict` enum.
+pub const FLOW_FORWARDED: u8 = 1;
+pub const FLOW_DROPPED: u8 = 2;
+pub const FLOW_TRANSLATED: u8 = 3;
+
+/// Traffic direction (Hubble `TrafficDirection`).
+pub const FLOW_DIR_UNKNOWN: u8 = 0;
+pub const FLOW_DIR_INGRESS: u8 = 1;
+pub const FLOW_DIR_EGRESS: u8 = 2;
+
+/// A datapath flow event pushed onto the `FLOWS` ring buffer at a forwarding
+/// verdict point (H1 = IPv4). User space enriches it into a Hubble `Flow`.
+/// `saddr`/`daddr` are the network-order octets as loaded; `sport`/`dport`
+/// are network-order 16-bit (user space applies `u16::from_be`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FlowRecord {
+    /// `bpf_ktime_get_ns()` when the verdict was reached.
+    pub time_ns: u64,
+    /// The local pod endpoint's host-veth ifindex (0 = none) — enrichment key.
+    pub ep_ifindex: u32,
+    pub saddr: [u8; 4],
+    pub daddr: [u8; 4],
+    pub sport: u16,
+    pub dport: u16,
+    pub proto: u8,
+    /// `FLOW_FORWARDED` / `FLOW_DROPPED` / `FLOW_TRANSLATED`.
+    pub verdict: u8,
+    /// `FLOW_DIR_*`.
+    pub dir: u8,
+    pub _pad: u8,
+}
+
 // ============================== L7 proxy ===================================
 
 /// TCP port the user-space L7 proxy listens on (transparently). The eBPF
@@ -823,6 +858,7 @@ mod user {
         Backend6,
         CtKey6,
         CtEntry6,
+        FlowRecord,
     );
 }
 
