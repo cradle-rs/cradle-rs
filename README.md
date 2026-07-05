@@ -1,6 +1,7 @@
 # cradle-rs
 
-eBPF-based networking for L2–L7 with routing-protocol integration — in Rust.
+A Kubernetes **CNI plug-in** built on eBPF L2–L7 networking with real
+routing-protocol integration — in Rust.
 
 A Cilium-class eBPF **L2–L7** data plane — adding true L2 switching below
 Cilium's L3 floor — whose forwarding is driven by a real multi-protocol routing
@@ -8,6 +9,13 @@ stack ([zebra-rs](https://github.com/zebra-rs/zebra-rs)).
 Where Cilium's BGP control plane only *advertises* routes, cradle-rs installs
 **learned** routes directly into the eBPF data plane. The whole stack is Rust:
 the data plane uses [aya](https://aya-rs.dev) (no clang/libbpf required).
+
+**cradle-rs approaches container networking from the routing-technology
+side.** Container networks keep reinventing routing concepts to cope with
+their own complexity — overlays, segmentation, traffic steering. cradle-rs
+instead packages a router as a CNI plug-in: a FIB/VRF/MPLS/SRv6/EVPN data
+plane programmed by real routing protocols, with pod networking as one more
+service on top of technology routers have proven for decades.
 
 See [`docs/design/architecture.md`](docs/design/architecture.md) for the full
 design and roadmap.

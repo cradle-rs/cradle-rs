@@ -27,7 +27,8 @@ use aya_ebpf::{
     },
     helpers::generated::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
-        bpf_sk_release, bpf_skc_lookup_tcp, bpf_xdp_adjust_head, bpf_xdp_adjust_meta,
+        bpf_sk_release, bpf_skb_load_bytes, bpf_skc_lookup_tcp, bpf_xdp_adjust_head,
+        bpf_xdp_adjust_meta,
     },
     macros::{classifier, map, xdp},
     maps::{lpm_trie::Key, Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf},
@@ -39,11 +40,12 @@ use cradle_common::{
     FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry,
     MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey,
     PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
-    AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, FDB_F_REMOTE, FIBW_ID_MASK,
-    FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FLOW_DIR_EGRESS,
-    FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, IDENTITY_WORLD, L7_PROXY_PORT,
-    MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS,
-    NH_F_SRV6, NH_F_V6, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
+    AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, EP_F_EGRESS, EP_F_INGRESS,
+    FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL,
+    FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
+    IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP,
+    NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
     SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
     SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
@@ -191,19 +193,96 @@ static AFFINITY: LruHashMap<AffinityKey, AffinityVal> = LruHashMap::with_max_ent
 #[map]
 static FLOWS: RingBuf = RingBuf::with_byte_size(1 << 22, 0);
 
-// --- ingress network policy (docs/design/policy.md) ---
-/// Source IPv4 (map-encoded) → identity. Miss = `IDENTITY_WORLD`.
+// --- network policy (docs/design/policy.md) ---
+/// Peer IPv4 (map-encoded) → identity. Miss = `CIDR_ID` LPM, then world.
 #[map]
 static IDENTITY: HashMap<u32, u32> = HashMap::with_max_entries(65536, 0);
-/// Enforced endpoints: host-veth ifindex → 1. Miss = default-allow.
+/// Peer CIDR → identity, consulted on `IDENTITY` miss (ipBlock peers; an
+/// `except` prefix is a more-specific entry mapping back to world).
+#[map]
+static CIDR_ID: LpmTrie<[u8; 4], u32> = LpmTrie::with_max_entries(4096, 0);
+/// Peer IPv6 → identity (v6 sibling of `IDENTITY`).
+#[map]
+static IDENTITY6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(65536, 0);
+/// Peer IPv6 CIDR → identity (v6 sibling of `CIDR_ID`).
+#[map]
+static CIDR_ID6: LpmTrie<[u8; 16], u32> = LpmTrie::with_max_entries(4096, 0);
+/// Enforced endpoints: host-veth ifindex → `EP_F_*` direction bits.
+/// Miss = default-allow.
 #[map]
 static EP_POLICY: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
 /// Allow rules; present = allow (wildcard fallback in `policy_denied`).
 #[map]
 static POLICY: HashMap<PolicyKey, u8> = HashMap::with_max_entries(65536, 0);
-/// Pod-initiated flows (pre-NAT 5-tuples): replies bypass ingress policy.
+/// Policy conntrack (`PCT_*` values): recorded flows whose replies bypass
+/// the reverse direction's rules.
 #[map]
 static PCT: LruHashMap<CtKey, u8> = LruHashMap::with_max_entries(65536, 0);
+/// v6 policy conntrack (v6 sibling of `PCT`).
+#[map]
+static PCT6: LruHashMap<CtKey6, u8> = LruHashMap::with_max_entries(65536, 0);
+/// `CIDR_ID6` LPM key with public layout (aya's `Key` fields are private);
+/// pointer-cast to `Key<[u8; 16]>` — same `#[repr(C)]` shape.
+#[repr(C)]
+struct Lpm6 {
+    prefix_len: u32,
+    data: [u8; 16],
+}
+
+/// `CIDR_ID` (v4) LPM key with public layout — see `Lpm6`.
+#[repr(C)]
+struct Lpm4 {
+    prefix_len: u32,
+    data: [u8; 4],
+}
+
+/// Policy scratch: the v6 reply-lookup `CtKey6`, both CIDR LPM keys, and
+/// the v4 reply/track `CtKey` — everything the policy code would otherwise
+/// hold on the stack. `cradle_tc`'s flattened frame must stay ≤ 448 bytes:
+/// the verifier's call-chain budget is 512 with 32 bytes charged each for
+/// the entry stub and the compiler-emitted `memset`.
+#[repr(C)]
+struct PolicyScratch6 {
+    key: CtKey6,
+    lpm: Lpm6,
+    key4: CtKey,
+    lpm4: Lpm4,
+}
+
+/// Most-specific-first policy probe patterns (`policy_denied*`): bit0 = any
+/// identity, bit1 = any proto, bit2 = any port. Static so the iteration
+/// reads .rodata, not a stack array.
+static POLICY_PATS: [u8; 6] = [0, 4, 6, 1, 5, 7];
+
+/// Load a v6 address from the packet straight into (per-CPU) map memory
+/// with a *constant* length — `TcContext::load_bytes` computes a bounded
+/// length the verifier can't prove non-zero ("invalid zero-sized read"),
+/// and a stack-side `ctx.load::<[u8; 16]>` temp is what the scratch map
+/// exists to avoid.
+#[inline(always)]
+fn skb_load_v6(ctx: &TcContext, offset: usize, dst: &mut [u8; 16]) -> Result<(), ()> {
+    let ret = unsafe {
+        bpf_skb_load_bytes(
+            ctx.skb.skb as *const _,
+            offset as u32,
+            dst.as_mut_ptr() as *mut core::ffi::c_void,
+            16,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+/// Per-CPU scratch for the v6 policy keys: `cradle_tc`'s flattened frame is
+/// ~430 bytes, so a bpf2bpf callee has ~80 bytes of the kernel's 512-byte
+/// combined call-chain budget — a 40-byte `CtKey6` and a 20-byte LPM key
+/// must live off-stack (docs/design/tailcall-vs-monolithic.md, the Vinbero
+/// scratch-ctx pattern).
+#[map]
+static POL6_SCRATCH: PerCpuArray<PolicyScratch6> = PerCpuArray::with_max_entries(1, 0);
 
 // --- egress masquerade (docs/design/kube-proxy-dualstack.md, K2) ---
 /// `[0]` = this node's uplink IPv4 (map-encoded); 0 = masquerade disabled.
@@ -471,15 +550,17 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
         // Pod egress: track the pre-NAT flow so replies pass ingress policy.
         let masq_src = port.flags & PORT_F_ENDPOINT != 0;
         if masq_src {
-            let _ = pct_track(ctx);
+            // Each tracker no-ops on the other family's ethertype.
+            let _ = pct_track(ctx, PCT_POD_INITIATED);
+            let _ = pct_track6(ctx, PCT_POD_INITIATED);
         }
         // L4 NAT is a best-effort pre-routing stage; it rewrites the packet in
         // place (service DNAT / reverse SNAT / egress masquerade) so routing
         // then targets the real endpoint. Failures fall through to routing.
         let _ = l4_nat(ctx, masq_src);
-        // `masq_src` == this ingress port is a pod endpoint (pod egress) —
-        // reused as the Hubble flow direction hint.
-        l3_forward(ctx, port.vrf_id, masq_src)
+        // Pod egress carries the endpoint ifindex (0 = not an endpoint):
+        // egress policy enforcement point and the Hubble direction hint.
+        l3_forward(ctx, port.vrf_id, if masq_src { iif } else { 0 })
     } else {
         Ok(TC_ACT_PIPE as i32)
     }
@@ -576,12 +657,15 @@ fn l4_nat(ctx: &TcContext, masq_src: bool) -> Result<(), ()> {
 
 // ============================ network policy ===============================
 
-/// Record a pod-egress flow (pre-NAT IPv4 5-tuple) in `PCT`, so its replies
-/// bypass ingress policy at the pod — Kubernetes policy is stateful. Runs on
-/// `PORT_F_ENDPOINT` ingress before `l4_nat` (the pre-translation tuple is
-/// what the reverse-SNAT'd reply matches).
+/// Record a flow 5-tuple in `PCT` — Kubernetes policy is stateful, so a
+/// recorded flow's replies bypass the reverse direction's rules. Called with
+/// `PCT_POD_INITIATED` on `PORT_F_ENDPOINT` ingress before `l4_nat` (the
+/// pre-translation tuple is what the reverse-SNAT'd reply matches), and with
+/// `PCT_INBOUND` at ingress delivery to an egress-enforced endpoint
+/// (post-NAT: the tuple the pod's reply reverses). The key is built in the
+/// `POL6_SCRATCH` per-CPU map, not on the stack — see `PolicyScratch6`.
 #[inline(always)]
-fn pct_track(ctx: &TcContext) -> Result<(), ()> {
+fn pct_track(ctx: &TcContext, val: u8) -> Result<(), ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     if u16::from_be(ethertype) != ETH_P_IP {
         return Ok(());
@@ -594,32 +678,127 @@ fn pct_track(ctx: &TcContext) -> Result<(), ()> {
     if proto != IPPROTO_TCP && proto != IPPROTO_UDP {
         return Ok(());
     }
-    let src: u32 = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
-    let dst: u32 = ctx.load(IP_DST_OFF).map_err(|_| ())?;
-    let sport: u16 = ctx.load(L4_OFF).map_err(|_| ())?;
-    let dport: u16 = ctx.load(L4_OFF + 2).map_err(|_| ())?;
-    let _ = PCT.insert(
-        &CtKey {
-            src,
-            dst,
-            src_port: sport,
-            dst_port: dport,
-            proto,
-            _pad: [0; 3],
-        },
-        &1u8,
-        0,
-    );
+    let s = POL6_SCRATCH.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        let k4 = &mut (*s).key4;
+        k4.src = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
+        k4.dst = ctx.load(IP_DST_OFF).map_err(|_| ())?;
+        k4.src_port = ctx.load(L4_OFF).map_err(|_| ())?;
+        k4.dst_port = ctx.load(L4_OFF + 2).map_err(|_| ())?;
+        k4.proto = proto;
+        k4._pad = [0; 3];
+        let _ = PCT.insert(&(*s).key4, &val, 0);
+    }
     Ok(())
 }
 
-/// Ingress-policy verdict for a packet about to egress the enforced endpoint
-/// veth `ep`: false = allow. Allows replies to pod-initiated flows (`PCT`
-/// reverse hit), then probes `POLICY` most-specific-first with wildcard
-/// fallback (identity/proto/port each 0 = any). Runs post-NAT, so verdicts
-/// apply to the real pod destination.
+/// v6 sibling of `pct_track`: record a flow 5-tuple in `PCT6`. Base IPv6
+/// header only (no extension headers), like the rest of the v6 datapath.
+/// Key built in `POL6_SCRATCH`, addresses loaded with `skb_load_v6`.
 #[inline(always)]
-fn policy_denied(ctx: &TcContext, ep: u32) -> Result<bool, ()> {
+fn pct_track6(ctx: &TcContext, val: u8) -> Result<(), ()> {
+    let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
+    if u16::from_be(ethertype) != ETH_P_IPV6 {
+        return Ok(());
+    }
+    let proto: u8 = ctx.load(IP6_NEXTHDR_OFF).map_err(|_| ())?;
+    if proto != IPPROTO_TCP && proto != IPPROTO_UDP {
+        return Ok(());
+    }
+    let s = POL6_SCRATCH.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        let key = &mut (*s).key;
+        skb_load_v6(ctx, IP6_SRC_OFF, &mut key.src)?;
+        skb_load_v6(ctx, IP6_DST_OFF, &mut key.dst)?;
+        key.src_port = ctx.load(IP6_L4_OFF).map_err(|_| ())?;
+        key.dst_port = ctx.load(IP6_L4_OFF + 2).map_err(|_| ())?;
+        key.proto = proto;
+        key._pad = [0; 3];
+        let _ = PCT6.insert(&(*s).key, &val, 0);
+    }
+    Ok(())
+}
+
+/// v6 sibling of `policy_denied` — same `POLICY` rules (identities are
+/// address-family-agnostic), v6 peer resolution and conntrack.
+///
+/// `inline(never)` + `PCT6_KEY` scratch (see `pct_track6`): the reversed
+/// reply-lookup tuple is built in per-CPU map memory, the peer address is
+/// read back out of it, and the six wildcard probes are built from scalars
+/// — no `CtKey6` or probe array on the stack.
+#[inline(always)]
+fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
+    let proto: u8 = ctx.load(IP6_NEXTHDR_OFF).map_err(|_| ())?;
+    let (sport, dport) = if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+        (
+            ctx.load::<u16>(IP6_L4_OFF).map_err(|_| ())?,
+            ctx.load::<u16>(IP6_L4_OFF + 2).map_err(|_| ())?,
+        )
+    } else {
+        (0, 0)
+    };
+
+    let s = POL6_SCRATCH.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        let key = &mut (*s).key;
+        // Reversed tuple: a hit = reply to a flow recorded oppositely.
+        skb_load_v6(ctx, IP6_DST_OFF, &mut key.src)?;
+        skb_load_v6(ctx, IP6_SRC_OFF, &mut key.dst)?;
+        key.src_port = dport;
+        key.dst_port = sport;
+        key.proto = proto;
+        key._pad = [0; 3];
+        if PCT6.get_ptr(&(*s).key).is_some() {
+            return Ok(false);
+        }
+
+        // The peer in the *reversed* key: egress peer = packet dst = key.src;
+        // ingress peer = packet src = key.dst.
+        let peer: *const [u8; 16] = if dir == POLICY_DIR_EGRESS {
+            &(*s).key.src
+        } else {
+            &(*s).key.dst
+        };
+        let identity = match IDENTITY6.get(&*peer) {
+            Some(id) => *id,
+            None => {
+                (*s).lpm.prefix_len = 128;
+                core::ptr::copy_nonoverlapping(peer as *const u8, (*s).lpm.data.as_mut_ptr(), 16);
+                let lpm = core::ptr::addr_of!((*s).lpm) as *const Key<[u8; 16]>;
+                match CIDR_ID6.get(&*lpm) {
+                    Some(&id) => id,
+                    None => IDENTITY_WORLD,
+                }
+            }
+        };
+        // Wildcard patterns, most specific first (`POLICY_PATS`).
+        for &pat in POLICY_PATS.iter() {
+            let k = PolicyKey {
+                ep,
+                identity: if pat & 1 != 0 { 0 } else { identity },
+                port: if pat & 4 != 0 { 0 } else { dport },
+                proto: if pat & 2 != 0 { 0 } else { proto },
+                dir,
+            };
+            if POLICY.get_ptr(&k).is_some() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Policy verdict for the enforced endpoint veth `ep`: false = allow.
+/// `dir` selects the rule direction and which address is the peer: ingress
+/// checks the packet's source identity (packet delivered to the pod), egress
+/// checks its destination identity (packet initiated by the pod). Allows
+/// replies to flows recorded in the opposite direction (`PCT` reverse hit),
+/// then probes `POLICY` most-specific-first with wildcard fallback
+/// (identity/proto/port each 0 = any). Runs post-NAT, so verdicts apply to
+/// the real peer, not a service VIP.
+///
+#[inline(always)]
+fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
     let proto: u8 = ctx.load(IP_PROTO_OFF).map_err(|_| ())?;
     let src: u32 = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
     let dst: u32 = ctx.load(IP_DST_OFF).map_err(|_| ())?;
@@ -633,46 +812,50 @@ fn policy_denied(ctx: &TcContext, ep: u32) -> Result<bool, ()> {
         (0, 0)
     };
 
-    // Reply to a flow this pod initiated?
-    if PCT
-        .get_ptr(&CtKey {
-            src: dst,
-            dst: src,
-            src_port: dport,
-            dst_port: sport,
-            proto,
-            _pad: [0; 3],
-        })
-        .is_some()
-    {
-        return Ok(false);
+    // Reply to a flow recorded in the opposite direction? (Ingress: the pod
+    // initiated it. Egress: it was admitted inbound.) Reversed key built in
+    // scratch — see `PolicyScratch6`.
+    let s = POL6_SCRATCH.get_ptr_mut(0).ok_or(())?;
+    unsafe {
+        let k4 = &mut (*s).key4;
+        k4.src = dst;
+        k4.dst = src;
+        k4.src_port = dport;
+        k4.dst_port = sport;
+        k4.proto = proto;
+        k4._pad = [0; 3];
+        if PCT.get_ptr(&(*s).key4).is_some() {
+            return Ok(false);
+        }
     }
 
-    let identity = match unsafe { IDENTITY.get(&src) } {
+    // The peer whose identity the rules match: the remote end of the flow.
+    // Exact (pod/node) binding first, then the CIDR LPM (ipBlock peers);
+    // the LPM key is built in scratch.
+    let peer = if dir == POLICY_DIR_EGRESS { dst } else { src };
+    let identity = match unsafe { IDENTITY.get(&peer) } {
         Some(id) => *id,
-        None => IDENTITY_WORLD,
+        None => unsafe {
+            (*s).lpm4.prefix_len = 32;
+            (*s).lpm4.data = peer.to_ne_bytes();
+            let lpm = core::ptr::addr_of!((*s).lpm4) as *const Key<[u8; 4]>;
+            match CIDR_ID.get(&*lpm) {
+                Some(&id) => id,
+                None => IDENTITY_WORLD,
+            }
+        },
     };
-    // Most-specific-first allow probes; each identity/proto/port slot may be
-    // wildcarded with 0. Unrolled — six exact-match lookups, no loop.
-    let probes = [
-        (identity, proto, dport),
-        (identity, proto, 0),
-        (identity, 0, 0),
-        (0, proto, dport),
-        (0, proto, 0),
-        (0, 0, 0),
-    ];
-    for &(id, pr, po) in probes.iter() {
-        if POLICY
-            .get_ptr(&PolicyKey {
-                ep,
-                identity: id,
-                port: po,
-                proto: pr,
-                _pad: 0,
-            })
-            .is_some()
-        {
+    // Most-specific-first allow probes, keys built from scalars per pattern
+    // (no probe array on the stack).
+    for &pat in POLICY_PATS.iter() {
+        let k = PolicyKey {
+            ep,
+            identity: if pat & 1 != 0 { 0 } else { identity },
+            port: if pat & 4 != 0 { 0 } else { dport },
+            proto: if pat & 2 != 0 { 0 } else { proto },
+            dir,
+        };
+        if POLICY.get_ptr(&k).is_some() {
             return Ok(false);
         }
     }
@@ -754,6 +937,7 @@ fn masq_v4(
 /// Emit a Hubble flow event for the current IPv4 packet (best-effort). `dir`
 /// is `FLOW_DIR_*`; `ep` is the local endpoint veth ifindex (0 = none, for
 /// user-space enrichment). Never affects forwarding.
+///
 #[inline(always)]
 fn emit_flow_v4(ctx: &TcContext, verdict: u8, dir: u8, ep: u32) {
     let (Ok(saddr), Ok(daddr), Ok(proto)) = (
@@ -996,6 +1180,9 @@ fn snat(
 
 // ------------------------------ L4 IPv6 ------------------------------------
 
+// NOTE: keep inlined — as a bpf2bpf callee its ~230-byte frame *adds* to
+// the call-chain stack, while inlined its slots overlap main's existing
+// budget (verified empirically; docs/design/tailcall-vs-monolithic.md).
 #[inline(always)]
 fn l4_nat_v6(ctx: &TcContext) -> Result<(), ()> {
     let proto: u8 = ctx.load(IP6_NEXTHDR_OFF).map_err(|_| ())?;
@@ -1167,11 +1354,11 @@ fn resolve_nh(nh_id: u32) -> Option<(u32, NextHop)> {
 }
 
 #[inline(always)]
-fn l3_forward(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<i32, ()> {
+fn l3_forward(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     match u16::from_be(ethertype) {
-        ETH_P_IP => l3_forward_v4(ctx, port_vrf, from_endpoint),
-        ETH_P_IPV6 => l3_forward_v6(ctx, port_vrf),
+        ETH_P_IP => l3_forward_v4(ctx, port_vrf, from_ep),
+        ETH_P_IPV6 => l3_forward_v6(ctx, port_vrf, from_ep),
         ETH_P_MPLS_UC => mpls_forward(ctx),
         _ => Ok(TC_ACT_PIPE as i32), // ARP, ... -> stack
     }
@@ -1347,7 +1534,7 @@ fn fib4_lookup(vrf_id: u32, dst: [u8; 4]) -> Option<FibEntry> {
 }
 
 #[inline(always)]
-fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<i32, ()> {
+fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()> {
     // End.DX4 hand-off — see the v6 sibling.
     let dx_nh = tc_meta_dx(ctx);
     if dx_nh != 0 {
@@ -1356,6 +1543,22 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<
         }
         return Ok(TC_ACT_PIPE as i32);
     }
+
+    // Egress network policy: the packet was initiated by a local enforced
+    // endpoint — post-NAT (the real peer, not a service VIP), pre-FIB (the
+    // verdict must not depend on route presence). docs/design/policy.md.
+    if from_ep != 0 {
+        if let Some(ep_flags) = EP_POLICY.get_ptr(&from_ep) {
+            if unsafe { *ep_flags } & EP_F_EGRESS != 0
+                && policy_denied(ctx, from_ep, POLICY_DIR_EGRESS).unwrap_or(true)
+            {
+                stat_inc(STAT_POLICY_DROP);
+                emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_EGRESS, from_ep);
+                return Ok(TC_ACT_SHOT as i32);
+            }
+        }
+    }
+
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
     // Port binding wins; else VRF context from a VPN-label decap (XDP meta).
     let vrf_id = if port_vrf != 0 {
@@ -1396,11 +1599,21 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<
     // endpoint — the packet must be a reply to a pod-initiated flow or match
     // an allow rule (docs/design/policy.md). One hash miss on the common
     // (non-endpoint) path.
-    if EP_POLICY.get_ptr(&oif).is_some() && policy_denied(ctx, oif).unwrap_or(true) {
-        stat_inc(STAT_POLICY_DROP);
-        // Hubble: a policy drop delivering to endpoint `oif` (ingress).
-        emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif);
-        return Ok(TC_ACT_SHOT as i32);
+    if let Some(ep_flags) = EP_POLICY.get_ptr(&oif) {
+        let ep_flags = unsafe { *ep_flags };
+        if ep_flags & EP_F_INGRESS != 0
+            && policy_denied(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
+        {
+            stat_inc(STAT_POLICY_DROP);
+            // Hubble: a policy drop delivering to endpoint `oif` (ingress).
+            emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif);
+            return Ok(TC_ACT_SHOT as i32);
+        }
+        // Egress statefulness: record the admitted inbound flow (post-NAT)
+        // so the pod's replies bypass its egress rules.
+        if ep_flags & EP_F_EGRESS != 0 {
+            let _ = pct_track(ctx, PCT_INBOUND);
+        }
     }
 
     // SRv6 imposition (H.Encaps) of a v4-inner packet: impose an outer IPv6
@@ -1459,10 +1672,10 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_endpoint: bool) -> Result<
         dst
     };
     stat_inc(STAT_L3V4_FORWARD);
-    // Hubble: a forwarded flow. Pod egress (from_endpoint) is EGRESS; a packet
+    // Hubble: a forwarded flow. Pod egress (from_ep != 0) is EGRESS; a packet
     // being delivered toward a local endpoint is INGRESS. `oif` is the local
     // endpoint veth when this is ingress-to-pod (enrichment key).
-    let (dir, ep) = if from_endpoint {
+    let (dir, ep) = if from_ep != 0 {
         (FLOW_DIR_EGRESS, 0)
     } else {
         (FLOW_DIR_INGRESS, oif)
@@ -1500,7 +1713,7 @@ fn fib6_lookup(vrf_id: u32, dst: [u8; 16]) -> Option<FibEntry> {
 }
 
 #[inline(always)]
-fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
+fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()> {
     // End.DX6 hand-off: XDP decapped and pinned the cross-connect
     // adjacency in DX metadata — forward straight to it, no FIB and no
     // hop-limit decrement (RFC 8986 §4.4 S03).
@@ -1511,6 +1724,20 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
         }
         return Ok(TC_ACT_PIPE as i32);
     }
+
+    // Egress network policy — the v4 sibling's comment applies. (No Hubble
+    // flow record: v6 flow export doesn't exist yet.)
+    if from_ep != 0 {
+        if let Some(ep_flags) = EP_POLICY.get_ptr(&from_ep) {
+            if unsafe { *ep_flags } & EP_F_EGRESS != 0
+                && policy_denied_v6(ctx, from_ep, POLICY_DIR_EGRESS).unwrap_or(true)
+            {
+                stat_inc(STAT_POLICY_DROP);
+                return Ok(TC_ACT_SHOT as i32);
+            }
+        }
+    }
+
     let dst: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
 
     // A local SID pre-empts the FIB (an SRv6 endpoint address is not an
@@ -1552,6 +1779,21 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32) -> Result<i32, ()> {
     };
     let (nh_id, nh) = resolve_nh(nh_id).ok_or(())?;
     let oif = nh.oif;
+
+    // Ingress network policy — the v4 sibling's comment applies.
+    if let Some(ep_flags) = EP_POLICY.get_ptr(&oif) {
+        let ep_flags = unsafe { *ep_flags };
+        if ep_flags & EP_F_INGRESS != 0
+            && policy_denied_v6(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
+        {
+            stat_inc(STAT_POLICY_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
+        // Egress statefulness: admitted inbound flow → replies bypass egress.
+        if ep_flags & EP_F_EGRESS != 0 {
+            let _ = pct_track6(ctx, PCT_INBOUND);
+        }
+    }
 
     // SRv6 imposition (H.Encaps): impose an outer IPv6 header toward the SID.
     if nh.flags & NH_F_SRV6 != 0 {

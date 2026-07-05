@@ -1,0 +1,1 @@
+{ "ports": [ {"name":"fwd1","l3":true}, {"name":"fwd2","l3":true} ] }
