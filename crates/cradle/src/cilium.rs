@@ -292,6 +292,8 @@ impl Api {
                 &ecr.interface_name,
                 ip,
                 0,
+                &ecr.k8s_pod_name,
+                &ecr.k8s_namespace,
             )
             .await?;
         // v1.19.5's cilium-cni installs no ARP entry for the gateway (the

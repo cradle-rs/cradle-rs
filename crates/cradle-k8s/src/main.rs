@@ -12,6 +12,7 @@
 //!    becomes schedulable for pods — the Cilium-style "agent writes the CNI
 //!    config when ready" flow.
 
+mod cep;
 mod pb;
 mod sync;
 
@@ -55,6 +56,10 @@ struct Args {
     /// Full-resync period: re-push all services (covers a restarted daemon).
     #[arg(long, default_value_t = 30)]
     resync_secs: u64,
+    /// Publish CiliumEndpoint/CiliumNode CRDs for this node's cradle
+    /// endpoints (needs the cilium.io/v2 CRDs installed — see deploy/crds/).
+    #[arg(long)]
+    publish_crds: bool,
 }
 
 fn connect_uri(ep: &str) -> String {
@@ -92,7 +97,74 @@ async fn main() -> Result<()> {
         tokio::spawn(render_cni_conf(client.clone(), node, path, cni_grpc));
     }
 
+    if args.publish_crds {
+        let node = args
+            .node_name
+            .clone()
+            .context("--publish-crds needs --node-name (or env NODE_NAME)")?;
+        tokio::spawn(publish_crds_task(client.clone(), node, args.grpc.clone()));
+    }
+
     service_sync(client, &args.grpc, args.resync_secs).await
+}
+
+/// CRD publication loop: every few seconds, mirror the daemon's endpoint
+/// store into CiliumEndpoint objects and keep this node's CiliumNode fresh.
+/// Missing CRDs (or an unreachable daemon) warn and retry — publication
+/// starts working as soon as both are available.
+async fn publish_crds_task(client: Client, node: String, grpc: String) {
+    let nodes: Api<Node> = Api::all(client.clone());
+    let mut cradle: Option<CradleClient<tonic::transport::Channel>> = None;
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    info!("CRD publication started (CiliumEndpoint/CiliumNode for node {node})");
+    loop {
+        interval.tick().await;
+        let (node_ip, pod_cidr) = match nodes.get(&node).await {
+            Ok(n) => {
+                let ip = n
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.addresses.as_ref())
+                    .and_then(|a| a.iter().find(|x| x.type_ == "InternalIP"))
+                    .map(|x| x.address.clone())
+                    .unwrap_or_default();
+                let spec = n.spec.unwrap_or_default();
+                let cidr = spec
+                    .pod_cidrs
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|c| c.contains('.'))
+                    .or(spec.pod_cidr.filter(|c| c.contains('.')))
+                    .unwrap_or_default();
+                (ip, cidr)
+            }
+            Err(e) => {
+                warn!("publish-crds: getting node {node}: {e}");
+                continue;
+            }
+        };
+        if cradle.is_none() {
+            match CradleClient::connect(connect_uri(&grpc)).await {
+                Ok(c) => cradle = Some(c),
+                Err(e) => {
+                    warn!("publish-crds: connecting to cradle at {grpc}: {e}");
+                    continue;
+                }
+            }
+        }
+        let endpoints = match cradle.as_mut().unwrap().list_endpoints(pb::Empty {}).await {
+            Ok(r) => r.into_inner().endpoints,
+            Err(e) => {
+                warn!("publish-crds: ListEndpoints: {e}");
+                cradle = None;
+                continue;
+            }
+        };
+        if let Err(e) = cep::publish(&client, &node, &node_ip, &pod_cidr, &endpoints).await {
+            warn!("publish-crds: {e:#} (are the cilium.io CRDs installed?)");
+        }
+    }
 }
 
 /// Watch a resource kind purely as a change signal.

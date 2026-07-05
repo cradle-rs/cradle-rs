@@ -30,6 +30,9 @@ rules:
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["cilium.io"]
+  resources: ["ciliumendpoints", "ciliumnodes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -93,6 +96,7 @@ spec:
         - cradle-k8s
         - --grpc=unix:/run/cradle/cradle.sock
         - --write-cni-conf=/host/etc/cni/net.d/05-cradle.conflist
+        - --publish-crds
         env:
         - name: NODE_NAME
           valueFrom:

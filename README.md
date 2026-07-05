@@ -93,7 +93,7 @@ stock binary), ⬜ = planned, in roadmap order.
 | Surface | Status | Notes |
 |---|---|---|
 | cilium-agent REST API subset (`cilium.sock`) | ✅ | `serve --cilium-sock`: `/healthz`, `/config`, `/ipam`, `/endpoint` — the UNMODIFIED cilium-cni v1.19.5 binary attaches pods to the cradle datapath; `cradle_cilium` |
-| `CiliumEndpoint` / `CiliumNode` CRDs | ⬜ | kubectl-visible endpoints; cluster-pool IPAM via the stock cilium-operator (M6) |
+| `CiliumEndpoint` / `CiliumNode` CRDs | ✅ | `cradle-k8s --publish-crds` mirrors the daemon's endpoint store into CEPs (`kubectl get cep` shows cradle pods) + a CiliumNode with the podCIDR; vendored CRDs in `deploy/crds/`; kind e2e |
 | Generic-veth CNI chaining | ⬜ | real Cilium chained on top for policy/observability while cradle owns routing and the FIB (M7) |
 | NetworkPolicy / identity enforcement | ⬜ | native `IDENTITY`/`POLICY` maps + verdict in `cradle_tc`; k8s NetworkPolicy semantics first (M8) |
 | Hubble API | ⬜ | out of scope for this arc |

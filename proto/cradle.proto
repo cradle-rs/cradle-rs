@@ -301,6 +301,10 @@ message CniEndpoint {
   string ip = 5;            // pod IPv4 address
   uint32 vrf_id = 6;        // VRF table (0 = global)
   uint32 host_ifindex = 7;  // filled by the server on create; echoed on list
+  // Kubernetes pod identity (from the runtime's K8S_POD_* CNI args) — feeds
+  // the CiliumEndpoint CRD publication; empty outside Kubernetes.
+  string pod_name = 8;
+  string pod_namespace = 9;
 }
 
 message CniEndpointKey {

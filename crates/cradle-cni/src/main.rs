@@ -117,6 +117,19 @@ struct CniEnv {
     container_id: String,
     netns: String,
     ifname: String,
+    /// Kubernetes pod identity from CNI_ARGS (`K8S_POD_NAME` /
+    /// `K8S_POD_NAMESPACE`, set by kubelet); empty outside Kubernetes.
+    pod_name: String,
+    pod_namespace: String,
+}
+
+/// Extract one `KEY=VAL` from the `;`-separated CNI_ARGS.
+fn cni_arg(args: &str, key: &str) -> String {
+    args.split(';')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_default()
 }
 
 fn require_env(name: &str) -> Result<String> {
@@ -128,6 +141,7 @@ fn require_env(name: &str) -> Result<String> {
 
 impl CniEnv {
     fn load(netns_required: bool) -> Result<Self> {
+        let args = std::env::var("CNI_ARGS").unwrap_or_default();
         Ok(Self {
             container_id: require_env("CNI_CONTAINERID")?,
             netns: if netns_required {
@@ -136,6 +150,8 @@ impl CniEnv {
                 std::env::var("CNI_NETNS").unwrap_or_default()
             },
             ifname: require_env("CNI_IFNAME")?,
+            pod_name: cni_arg(&args, "K8S_POD_NAME"),
+            pod_namespace: cni_arg(&args, "K8S_POD_NAMESPACE"),
         })
     }
 }
@@ -363,6 +379,8 @@ async fn plumb(
         host_ifindex: 0,
         ip: pod_ip.to_string(),
         vrf_id: conf.vrf,
+        pod_name: env.pod_name.clone(),
+        pod_namespace: env.pod_namespace.clone(),
     })
     .await
     .map_err(|e| {

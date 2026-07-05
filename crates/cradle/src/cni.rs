@@ -42,6 +42,12 @@ pub struct Endpoint {
     pub host_ifindex: u32,
     pub ip: Ipv4Addr,
     pub vrf_id: u32,
+    /// Kubernetes pod identity (empty outside Kubernetes) — feeds the
+    /// CiliumEndpoint CRD publication. Defaults keep pre-M6 records readable.
+    #[serde(default)]
+    pub pod_name: String,
+    #[serde(default)]
+    pub pod_namespace: String,
 }
 
 /// One pod-IP allocation: address → owner.
