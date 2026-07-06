@@ -91,6 +91,15 @@ Feature: Network policy in the eBPF datapath
     Then ping from "host1" to "10.244.0.3" should eventually succeed
     And ping from "pod1" to "10.244.0.3" should fail
 
+  Scenario: L7 policy filters HTTP by method and path via the proxy
+    Given the test topology exists
+    # pod2's port 8080 is steered through the transparent proxy, which
+    # allows only GET /allowed* and answers anything else with an empty 403.
+    When I apply cradle config "policy-l7.json" to namespace "node" via gRPC as "ctl"
+    And HTTP GET "http://10.244.0.3:8080/secret" from namespace "pod1" should fail
+    Then the cradle stat "l7_redirect" in namespace "node" via gRPC as "ctl" should be nonzero
+    And HTTP GET "http://10.244.0.3:8080/allowed" from namespace "pod1" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop HTTP in namespace "pod1"

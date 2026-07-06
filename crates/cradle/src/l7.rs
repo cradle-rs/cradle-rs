@@ -26,14 +26,44 @@ pub struct L7Route {
     pub backend: SocketAddr,
 }
 
+/// One allowed HTTP request shape (empty method/prefix = any).
+#[derive(Clone, Debug)]
+pub struct L7PolicyRule {
+    pub method: String,
+    pub path_prefix: String,
+}
+
 /// Maps an L7 VIP:port to its ordered path-prefix routes. Shared between the
 /// control plane (which populates it) and the proxy (which reads it).
 #[derive(Default)]
 pub struct RouteTable {
+    /// Ingress L7 policy allow-lists keyed by the *original* destination
+    /// (the pod ip:port). A steered flow matching no rule is answered with
+    /// an empty 403 and closed; a match proxies to the original
+    /// destination transparently (docs/design/policy.md phase 5).
+    policies: std::collections::HashMap<SocketAddr, Vec<L7PolicyRule>>,
     services: HashMap<(IpAddr, u16), Vec<L7Route>>,
 }
 
 impl RouteTable {
+    pub fn set_policy(&mut self, dst: SocketAddr, rules: Vec<L7PolicyRule>) {
+        self.policies.insert(dst, rules);
+    }
+
+    pub fn del_policy(&mut self, dst: &SocketAddr) {
+        self.policies.remove(dst);
+    }
+
+    /// The policy verdict for a request to `dst`: None = no L7 policy
+    /// (fall through to routing), Some(true) = allowed, Some(false) = 403.
+    fn policy_verdict(&self, dst: &SocketAddr, method: &str, path: &str) -> Option<bool> {
+        let rules = self.policies.get(dst)?;
+        Some(rules.iter().any(|r| {
+            (r.method.is_empty() || r.method == method)
+                && (r.path_prefix.is_empty() || path.starts_with(&r.path_prefix))
+        }))
+    }
+
     pub fn add(&mut self, vip: IpAddr, port: u16, routes: Vec<L7Route>) {
         self.services.insert((vip, port), routes);
     }
@@ -98,17 +128,38 @@ async fn handle(mut client: TcpStream, routes: SharedRoutes) -> Result<()> {
     let n = client.read(&mut head).await.context("read request")?;
     head.truncate(n);
     let (method, path, host) = parse_request(&head);
+    // Ingress L7 policy: enforce the allow-list before any routing.
+    match routes.lock().await.policy_verdict(&orig, &method, &path) {
+        Some(true) => {
+            info!("L7 policy allow {method} {path} -> {orig}");
+            return splice_to(client, orig, &head).await;
+        }
+        Some(false) => {
+            info!("L7 policy deny {method} {path} -> {orig} (403)");
+            let _ = client
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            return Ok(());
+        }
+        None => {}
+    }
 
     let backend = match routes.lock().await.choose(orig, &path) {
         Some(b) => b,
         None => return Ok(()), // unconfigured / no matching route
     };
     info!("L7 {method} {path} Host={host:?} {orig} -> {backend}");
+    splice_to(client, backend, &head).await
+}
 
+/// Connect to `backend`, replay the buffered request head, splice the rest.
+async fn splice_to(mut client: TcpStream, backend: SocketAddr, head: &[u8]) -> Result<()> {
     let mut upstream = TcpStream::connect(backend)
         .await
         .with_context(|| format!("connecting upstream {backend}"))?;
-    upstream.write_all(&head).await.context("forward head")?;
+    upstream.write_all(head).await.context("forward head")?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream)
         .await
         .context("proxy copy")?;
@@ -126,4 +177,29 @@ fn parse_request(head: &[u8]) -> (String, String, Option<String>) {
         .find(|l| l.len() >= 5 && l[..5].eq_ignore_ascii_case("host:"))
         .map(|l| l[5..].trim().to_string());
     (method, path, host)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_verdict_matches_method_and_prefix() {
+        let mut rt = RouteTable::default();
+        let dst: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        rt.set_policy(
+            dst,
+            vec![L7PolicyRule {
+                method: "GET".into(),
+                path_prefix: "/allowed".into(),
+            }],
+        );
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed/x"), Some(true));
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/secret"), Some(false));
+        assert_eq!(rt.policy_verdict(&dst, "POST", "/allowed"), Some(false));
+        let other: SocketAddr = "10.0.0.3:8080".parse().unwrap();
+        assert_eq!(rt.policy_verdict(&other, "GET", "/allowed"), None);
+        rt.del_policy(&dst);
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed"), None);
+    }
 }

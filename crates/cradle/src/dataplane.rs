@@ -201,6 +201,16 @@ impl Dataplane {
         )?;
         Ok(())
     }
+    /// Remove an L7 steering entry (idempotent).
+    pub fn l7_service_del(&mut self, vip: Ipv4Addr, port: u16) -> Result<()> {
+        let _ = self.l7_services.remove(&ServiceKey {
+            vip: util::ipv4_to_map(vip),
+            port: util::port_to_map(port),
+            proto: 6,
+            _pad: 0,
+        });
+        Ok(())
+    }
 
     /// Read the per-CPU datapath packet counters, summed across CPUs and indexed
     /// by the `STAT_*` constants (see `cradle_common`).

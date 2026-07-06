@@ -297,8 +297,9 @@ async fn push_policy(
             })
             .and_then(|p| p.metadata.labels.clone())
             .unwrap_or_default();
-        let (cnp_in, cnp_eg, cnp_any_in, cnp_any_eg) =
+        let (cnp_in, cnp_eg, cnp_any_in, cnp_any_eg, cnp_l7) =
             cnp::endpoint_rules(cnps, &ep.pod_namespace, &pod_labels, pods, alloc);
+        policy.l7.extend(cnp_l7);
         let host = pb::PolicyRule {
             identity: netpol::IDENTITY_HOST,
             proto: 0,

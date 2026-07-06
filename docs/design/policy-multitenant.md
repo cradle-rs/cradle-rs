@@ -30,7 +30,13 @@ controller are unchanged). Overlapping-CIDR tenancy is BDD-proven
 in VRF 2, giving opposite verdicts under identical rules). Remaining
 phase-4 tails: namespace→VRF tenant mapping in cradle-k8s/CNI,
 per-tenant EVPN/SRv6 slice documentation, CiliumClusterwideNetworkPolicy,
-host endpoint. Phases 5+ remain plan. Builds on the implemented
+host endpoint. Phase 5's ingress half is implemented: per-port HTTP allow-lists
+(`EndpointPolicy.l7`, CNP `toPorts.rules.http` with path-as-prefix)
+steered through the existing TPROXY proxy via `L7_SERVICES` — no new
+datapath code — with 403-on-miss enforcement in the proxy
+(`cradle_policy` L7 BDD scenario). Remaining phase-5 tails: egress L7,
+path regex, Hubble L7 flow records, visibility annotations. Phase 6
+remains plan. Builds on the implemented
 ingress-only IPv4 NetworkPolicy engine ([`policy.md`](policy.md)), the
 Cilium-compat groundwork ([`cni-cilium.md`](cni-cilium.md) story 2), and
 the program-structure analysis

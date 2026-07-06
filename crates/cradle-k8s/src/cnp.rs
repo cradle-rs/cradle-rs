@@ -64,6 +64,27 @@ pub struct Rule {
 pub struct PortRule {
     #[serde(default)]
     pub ports: Vec<Port>,
+    /// L7 rules attached to these ports (`rules.http`, the Cilium syntax).
+    #[serde(default)]
+    pub rules: Option<PortL7Rules>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortL7Rules {
+    #[serde(default)]
+    pub http: Vec<HttpRule>,
+}
+
+/// One allowed HTTP request shape (empty field = any). `path` is a prefix
+/// (Cilium uses regex; prefix is the phase-5 subset).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpRule {
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub path: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -192,7 +213,9 @@ fn rule_ports(rule: &Rule) -> Vec<(u8, u16)> {
 
 /// Expand the CNPs that select `pod_labels` in `ns` into cradle policy
 /// rules. Returns (ingress, egress) rule lists — deny rules carry
-/// `deny: true` — plus whether any CNP selected the pod per direction.
+/// `deny: true` — whether any CNP selected the pod per direction, and the
+/// ingress L7 (HTTP) port policies (`toPorts.rules.http`; ingress only —
+/// egress L7 is a follow-up).
 #[allow(clippy::type_complexity)]
 pub fn endpoint_rules(
     cnps: &[Cnp],
@@ -200,9 +223,16 @@ pub fn endpoint_rules(
     pod_labels: &BTreeMap<String, String>,
     pods: &[k8s_openapi::api::core::v1::Pod],
     alloc: &Alloc,
-) -> (Vec<pb::PolicyRule>, Vec<pb::PolicyRule>, bool, bool) {
+) -> (
+    Vec<pb::PolicyRule>,
+    Vec<pb::PolicyRule>,
+    bool,
+    bool,
+    Vec<pb::L7PortPolicy>,
+) {
     let mut ingress = Vec::new();
     let mut egress = Vec::new();
+    let mut l7 = Vec::new();
     let (mut any_in, mut any_eg) = (false, false);
     for cnp in cnps {
         if cnp.namespace != ns || !selector_matches(&cnp.spec.endpoint_selector, pod_labels) {
@@ -231,6 +261,27 @@ pub fn endpoint_rules(
             any_in = true;
             ingress.extend(expand(&cnp.spec.ingress, from_peers, false));
             ingress.extend(expand(&cnp.spec.ingress_deny, from_peers, true));
+            for rule in &cnp.spec.ingress {
+                for pr in &rule.to_ports {
+                    let Some(l7r) = &pr.rules else { continue };
+                    if l7r.http.is_empty() {
+                        continue;
+                    }
+                    for port in &pr.ports {
+                        l7.push(pb::L7PortPolicy {
+                            port: port.port.parse().unwrap_or(0),
+                            rules: l7r
+                                .http
+                                .iter()
+                                .map(|h| pb::L7Rule {
+                                    method: h.method.clone(),
+                                    path_prefix: h.path.clone(),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
         }
         if !cnp.spec.egress.is_empty() || !cnp.spec.egress_deny.is_empty() {
             any_eg = true;
@@ -238,7 +289,7 @@ pub fn endpoint_rules(
             egress.extend(expand(&cnp.spec.egress_deny, to_peers, true));
         }
     }
-    (ingress, egress, any_in, any_eg)
+    (ingress, egress, any_in, any_eg, l7)
 }
 
 #[cfg(test)]
@@ -265,7 +316,7 @@ mod tests {
             namespace: "default".into(),
             spec,
         }];
-        let (ing, eg, any_in, any_eg) = endpoint_rules(
+        let (ing, eg, any_in, any_eg, _) = endpoint_rules(
             &cnps,
             "default",
             &labels(&[("app", "web")]),
@@ -280,6 +331,32 @@ mod tests {
     }
 
     #[test]
+    fn http_rules_become_l7_port_policies() {
+        let spec: CnpSpec = serde_json::from_value(serde_json::json!({
+            "endpointSelector": { "matchLabels": { "app": "web" } },
+            "ingress": [ { "toPorts": [ { "ports": [ { "port": "8080", "protocol": "TCP" } ],
+                                          "rules": { "http": [ { "method": "GET", "path": "/api" } ] } } ] } ]
+        }))
+        .unwrap();
+        let cnps = vec![Cnp {
+            namespace: "default".into(),
+            spec,
+        }];
+        let (_, _, any_in, _, l7) = endpoint_rules(
+            &cnps,
+            "default",
+            &labels(&[("app", "web")]),
+            &[],
+            &Alloc::default(),
+        );
+        assert!(any_in);
+        assert_eq!(l7.len(), 1);
+        assert_eq!(l7[0].port, 8080);
+        assert_eq!(l7[0].rules[0].method, "GET");
+        assert_eq!(l7[0].rules[0].path_prefix, "/api");
+    }
+
+    #[test]
     fn non_matching_selector_is_skipped() {
         let spec: CnpSpec = serde_json::from_value(serde_json::json!({
             "endpointSelector": { "matchLabels": { "app": "db" } },
@@ -290,7 +367,7 @@ mod tests {
             namespace: "default".into(),
             spec,
         }];
-        let (ing, _, any_in, _) = endpoint_rules(
+        let (ing, _, any_in, _, _) = endpoint_rules(
             &cnps,
             "default",
             &labels(&[("app", "web")]),
