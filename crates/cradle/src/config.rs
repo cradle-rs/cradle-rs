@@ -324,6 +324,9 @@ pub struct PolicyRuleCfg {
     pub proto: String,
     #[serde(default)]
     pub port: u16,
+    /// Deny rule: wins over allow at any specificity.
+    #[serde(default)]
+    pub deny: bool,
 }
 
 /// Parse a policy-rule proto ("" = any).
@@ -681,9 +684,9 @@ impl Config {
             let ep = ctl
                 .resolve_endpoint(&pol.host_if, &pol.namespace, &pol.pod)
                 .await?;
-            let as_tuples = |rs: &[PolicyRuleCfg]| -> Result<Vec<(u32, u8, u16)>> {
+            let as_tuples = |rs: &[PolicyRuleCfg]| -> Result<Vec<(u32, u8, u16, bool)>> {
                 rs.iter()
-                    .map(|r| Ok((r.identity, rule_proto(&r.proto)?, r.port)))
+                    .map(|r| Ok((r.identity, rule_proto(&r.proto)?, r.port, r.deny)))
                     .collect()
             };
             let rules = as_tuples(&pol.rules)?;

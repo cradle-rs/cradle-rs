@@ -560,6 +560,14 @@ pub const PCT_POD_INITIATED: u8 = 1;
 /// ingress delivery, post-NAT) — its replies bypass the pod's egress policy.
 pub const PCT_INBOUND: u8 = 2;
 
+/// `POLICY` value: allow the matched traffic.
+pub const POLICY_ALLOW: u8 = 1;
+/// `POLICY` value: deny the matched traffic. Deny wins over allow at *any*
+/// specificity (Cilium deny-rule semantics): the verdict walks all probes,
+/// returns denied on the first deny hit, and otherwise allows iff some
+/// probe hit an allow.
+pub const POLICY_DENY: u8 = 2;
+
 /// Policy allow-rule key: `(endpoint oif, peer identity, proto, dport,
 /// direction)`. The peer is the source for ingress rules and the destination
 /// for egress rules. `identity`, `proto`, and `port` may each be 0 =

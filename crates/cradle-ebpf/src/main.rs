@@ -45,21 +45,21 @@ use cradle_common::{
     FIB_F_LOCAL, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
     FLOW_TRANSLATED, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP,
     MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PCT_INBOUND,
-    PCT_POD_INITIATED, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT,
-    PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U,
-    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V,
-    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
-    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
-    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
-    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
-    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
-    STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT,
-    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
-    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
-    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
-    STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY, XDP_META_MAGIC, XDP_META_MAGIC_DX,
-    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
+    PCT_POD_INITIATED, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS,
+    POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
+    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
+    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
+    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
+    STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
+    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
+    STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY,
+    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -861,7 +861,9 @@ fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
             }
         };
         (*s).peer_id = identity;
-        // Wildcard patterns, most specific first (`POLICY_PATS`).
+        // Walk every pattern: a deny at any specificity wins over any allow
+        // (Cilium deny semantics), so no early exit on allow.
+        let mut allowed = false;
         for &pat in POLICY_PATS.iter() {
             let k = PolicyKey {
                 ep,
@@ -870,12 +872,15 @@ fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
                 proto: if pat & 2 != 0 { 0 } else { proto },
                 dir,
             };
-            if POLICY.get_ptr(&k).is_some() {
-                return Ok(false);
+            if let Some(v) = POLICY.get_ptr(&k) {
+                if *v == POLICY_DENY {
+                    return Ok(true);
+                }
+                allowed = true;
             }
         }
+        Ok(!allowed)
     }
-    Ok(true)
 }
 
 /// Policy verdict for the enforced endpoint veth `ep`: false = allow.
@@ -941,8 +946,10 @@ fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
         },
     };
     unsafe { (*s).peer_id = identity };
-    // Most-specific-first allow probes, keys built from scalars per pattern
-    // (no probe array on the stack).
+    // Walk every pattern, keys built from scalars (no probe array on the
+    // stack). A deny at any specificity wins over any allow (Cilium deny
+    // semantics), so no early exit on allow.
+    let mut allowed = false;
     for &pat in POLICY_PATS.iter() {
         let k = PolicyKey {
             ep,
@@ -951,11 +958,14 @@ fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
             proto: if pat & 2 != 0 { 0 } else { proto },
             dir,
         };
-        if POLICY.get_ptr(&k).is_some() {
-            return Ok(false);
+        if let Some(v) = POLICY.get_ptr(&k) {
+            if unsafe { *v } == POLICY_DENY {
+                return Ok(true);
+            }
+            allowed = true;
         }
     }
-    Ok(true)
+    Ok(!allowed)
 }
 
 /// Egress masquerade (docs/design/kube-proxy-dualstack.md, K2): a new pod

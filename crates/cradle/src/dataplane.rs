@@ -24,8 +24,8 @@ use cradle_common::{
     NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
     Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS,
     EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE,
-    NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
-    STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
+    NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -442,8 +442,8 @@ impl Dataplane {
         enforce: bool,
         enforce_egress: bool,
         audit: bool,
-        rules: &[(u32, u8, u16)],
-        egress_rules: &[(u32, u8, u16)],
+        rules: &[(u32, u8, u16, bool)],
+        egress_rules: &[(u32, u8, u16, bool)],
     ) -> Result<()> {
         let sweep = |policy: &mut HashMap<MapData, PolicyKey, u8>, keep_gen: Option<u8>| {
             let stale: Vec<PolicyKey> = policy
@@ -479,7 +479,7 @@ impl Dataplane {
             if !on {
                 continue;
             }
-            for &(identity, proto, port) in dir_rules {
+            for &(identity, proto, port, deny) in dir_rules {
                 self.policy.insert(
                     PolicyKey {
                         ep,
@@ -488,7 +488,7 @@ impl Dataplane {
                         proto,
                         dir: dir | gen_bit,
                     },
-                    1u8,
+                    if deny { POLICY_DENY } else { POLICY_ALLOW },
                     0,
                 )?;
             }

@@ -356,6 +356,7 @@ message PolicyRule {
                        // destination for egress rules
   uint32 proto = 2;    // IP protocol number (0 = any)
   uint32 port = 3;     // destination L4 port (0 = any)
+  bool deny = 4;       // deny rule: wins over allow at any specificity
 }
 
 // Replace an endpoint's policy (allow rules + per-direction enforcement).
