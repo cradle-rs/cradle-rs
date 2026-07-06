@@ -102,14 +102,16 @@ Feature: Network policy in the eBPF datapath
     And the cradle policy trace "10.1.1.2 10.244.0.3 0" in namespace "node" via gRPC as "ctl" should contain "verdict: DENY"
     And the cradle policy trace "10.1.1.2 10.244.0.2 0" in namespace "node" via gRPC as "ctl" should contain "verdict: DEFAULT-ALLOW"
 
-  Scenario: L7 policy filters HTTP by method and path via the proxy
+  Scenario: L7 policy filters HTTP by method and path regex via the proxy
     Given the test topology exists
     # pod2's port 8080 is steered through the transparent proxy, which
-    # allows only GET /allowed* and answers anything else with an empty 403.
+    # allows only GET matching the path regex /api/v[0-9]/.* (Cilium
+    # full-match semantics) and answers anything else with an empty 403.
     When I apply cradle config "policy-l7.json" to namespace "node" via gRPC as "ctl"
-    And HTTP GET "http://10.244.0.3:8080/secret" from namespace "pod1" should fail
+    And HTTP GET "http://10.244.0.3:8080/api/vX/users" from namespace "pod1" should fail
     Then the cradle stat "l7_redirect" in namespace "node" via gRPC as "ctl" should be nonzero
-    And HTTP GET "http://10.244.0.3:8080/allowed" from namespace "pod1" should eventually succeed
+    # A path the regex matches (digit version + sub-path) is proxied through.
+    And HTTP GET "http://10.244.0.3:8080/api/v2/users" from namespace "pod1" should eventually succeed
 
   Scenario: Teardown topology
     Given the test topology exists

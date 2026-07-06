@@ -28,6 +28,7 @@ tonic-prost = { workspace = true }
 prost-types = { workspace = true }
 prost = { workspace = true }
 socket2 = { workspace = true }
+regex = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }

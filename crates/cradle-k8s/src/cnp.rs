@@ -275,7 +275,7 @@ pub fn endpoint_rules(
                                 .iter()
                                 .map(|h| pb::L7Rule {
                                     method: h.method.clone(),
-                                    path_prefix: h.path.clone(),
+                                    path: h.path.clone(),
                                 })
                                 .collect(),
                         });
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(l7.len(), 1);
         assert_eq!(l7[0].port, 8080);
         assert_eq!(l7[0].rules[0].method, "GET");
-        assert_eq!(l7[0].rules[0].path_prefix, "/api");
+        assert_eq!(l7[0].rules[0].path, "/api");
     }
 
     #[test]

@@ -40,6 +40,7 @@ anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util", "process"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 socket2 = { version = "0.5", features = ["all"] }
+regex = "1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
