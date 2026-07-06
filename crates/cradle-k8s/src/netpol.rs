@@ -24,6 +24,7 @@ use k8s_openapi::api::core::v1::{Namespace, Pod};
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyPeer, NetworkPolicyPort};
 use kube::ResourceExt as _;
 
+use crate::identity::Alloc;
 use crate::pb;
 
 pub const IDENTITY_HOST: u32 = 1;
@@ -124,6 +125,7 @@ fn peer_identities(
     policy_ns: &str,
     pods: &[Pod],
     namespaces: &[Namespace],
+    alloc: &Alloc,
 ) -> Option<Vec<u32>> {
     if let Some(b) = &peer.ip_block {
         // The CIDR's identity; the binding itself (CIDR → identity, plus
@@ -133,7 +135,7 @@ fn peer_identities(
     Some(
         peer_pods(peer, policy_ns, pods, namespaces)
             .iter()
-            .map(|pod| identity(&pod.namespace().unwrap_or_default(), &labels_of(pod)))
+            .map(|pod| alloc.resolve(&pod.namespace().unwrap_or_default(), &labels_of(pod)))
             .collect(),
     )
 }
@@ -169,6 +171,7 @@ fn rule_tuples(
     pods: &[Pod],
     namespaces: &[Namespace],
     port_pods: &[&Pod],
+    alloc: &Alloc,
 ) -> Vec<(u32, u8, u16)> {
     // Peers: empty ⇒ any (identity 0); else the union of peers.
     let identities: Vec<u32> = match peers {
@@ -177,7 +180,7 @@ fn rule_tuples(
         Some(f) => {
             let mut ids = Vec::new();
             for peer in f {
-                if let Some(mut p) = peer_identities(peer, policy_ns, pods, namespaces) {
+                if let Some(mut p) = peer_identities(peer, policy_ns, pods, namespaces, alloc) {
                     ids.append(&mut p);
                 }
             }
@@ -230,6 +233,7 @@ pub fn endpoint_policy(
     policies: &[NetworkPolicy],
     pods: &[Pod],
     namespaces: &[Namespace],
+    alloc: &Alloc,
 ) -> pb::EndpointPolicy {
     let ns = &ep.pod_namespace;
     // This pod (for its labels and its containerPorts — ingress named ports).
@@ -290,9 +294,15 @@ pub fn endpoint_policy(
         let Some(spec) = &np.spec else { continue };
         if has_type(np, "Ingress") {
             for rule in spec.ingress.iter().flatten() {
-                for (identity, proto, port) in
-                    rule_tuples(&rule.from, &rule.ports, ns, pods, namespaces, &target)
-                {
+                for (identity, proto, port) in rule_tuples(
+                    &rule.from,
+                    &rule.ports,
+                    ns,
+                    pods,
+                    namespaces,
+                    &target,
+                    alloc,
+                ) {
                     rules.push(pb::PolicyRule {
                         identity,
                         proto: proto as u32,
@@ -312,7 +322,7 @@ pub fn endpoint_policy(
                     .flat_map(|peer| peer_pods(peer, ns, pods, namespaces))
                     .collect();
                 for (identity, proto, port) in
-                    rule_tuples(&rule.to, &rule.ports, ns, pods, namespaces, &peers)
+                    rule_tuples(&rule.to, &rule.ports, ns, pods, namespaces, &peers, alloc)
                 {
                     egress_rules.push(pb::PolicyRule {
                         identity,
@@ -375,10 +385,10 @@ pub fn cidr_bindings(policies: &[NetworkPolicy]) -> Vec<(String, u32)> {
 
 /// All pod-IP → identity bindings currently derivable (dual-stack: every
 /// address in `podIPs`, plus `podIP` for older status shapes).
-pub fn identities(pods: &[Pod]) -> Vec<(String, u32)> {
+pub fn identities(pods: &[Pod], alloc: &Alloc) -> Vec<(String, u32)> {
     pods.iter()
         .flat_map(|p| {
-            let id = identity(&p.namespace().unwrap_or_default(), &labels_of(p));
+            let id = alloc.resolve(&p.namespace().unwrap_or_default(), &labels_of(p));
             let status = p.status.as_ref();
             let mut ips: Vec<String> = status
                 .and_then(|s| s.pod_ips.as_ref())
@@ -505,7 +515,7 @@ mod tests {
             Some(vec!["Egress"]),
             Some(&[("app", "db")]),
         );
-        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[]);
+        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[], &Alloc::default());
         assert!(!p.enforce, "ingress must stay default-allow");
         assert!(p.rules.is_empty());
         assert!(p.enforce_egress);
@@ -553,7 +563,7 @@ mod tests {
             ..Default::default()
         });
         let pods = vec![web];
-        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[]);
+        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[], &Alloc::default());
         assert!(p.enforce);
         // host rule + (any, tcp, 8080)
         assert!(p
@@ -594,12 +604,12 @@ mod tests {
         let pods = vec![pod("default", "web", &[("app", "web")], "10.0.0.1")];
         // No policyTypes, egress rules present ⇒ Ingress AND Egress enforced.
         let np = netpol_with("default", &[("app", "web")], None, Some(&[("app", "db")]));
-        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[]);
+        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[], &Alloc::default());
         assert!(p.enforce);
         assert!(p.enforce_egress);
         // No policyTypes, no egress rules ⇒ ingress only.
         let np = netpol_with("default", &[("app", "web")], None, None);
-        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[]);
+        let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[], &Alloc::default());
         assert!(p.enforce);
         assert!(!p.enforce_egress);
         assert!(p.egress_rules.is_empty());

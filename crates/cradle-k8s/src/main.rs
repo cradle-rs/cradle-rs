@@ -13,6 +13,8 @@
 //!    config when ready" flow.
 
 mod cep;
+mod cnp;
+mod identity;
 mod netpol;
 mod pb;
 mod sync;
@@ -150,6 +152,8 @@ async fn policy_task(client: Client, grpc: String, mode: String) {
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let policies: Api<NetworkPolicy> = Api::all(client.clone());
 
+    let cid_api = identity::cilium_identity_api(&client);
+    let cnp_api = cnp::cnp_api(&client);
     let notify = Arc::new(Notify::new());
     tokio::spawn(watch_notify(pods.clone(), notify.clone()));
     tokio::spawn(watch_notify(policies.clone(), notify.clone()));
@@ -189,6 +193,22 @@ async fn policy_task(client: Client, grpc: String, mode: String) {
                 }
             }
         }
+        // Allocated identities + CNPs — both degrade gracefully when the
+        // cilium.io CRDs aren't installed (FNV fallback / no CNP rules).
+        let alloc = match identity::ensure_identities(&cid_api, &pl).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("identity allocator: {e:#} — FNV fallback");
+                identity::Alloc::default()
+            }
+        };
+        let cnps = match cnp_api.list(&lp).await {
+            Ok(l) => cnp::parse(&l.items),
+            Err(e) => {
+                warn!("cnp list: {e} — CiliumNetworkPolicies skipped");
+                Vec::new()
+            }
+        };
         let cl = cradle.as_mut().unwrap();
         // This node's endpoints from the daemon's store.
         let endpoints = match cl.list_endpoints(pb::Empty {}).await {
@@ -199,13 +219,26 @@ async fn policy_task(client: Client, grpc: String, mode: String) {
                 continue;
             }
         };
-        if let Err(e) = push_policy(cl, &pl, &nl, &npl, &endpoints, &mut last_cidrs, &mode).await {
+        if let Err(e) = push_policy(
+            cl,
+            &pl,
+            &nl,
+            &npl,
+            &endpoints,
+            &mut last_cidrs,
+            &mode,
+            &alloc,
+            &cnps,
+        )
+        .await
+        {
             warn!("enforce-policy: {e:#}");
             cradle = None;
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn push_policy(
     cl: &mut CradleClient<tonic::transport::Channel>,
     pods: &[k8s_openapi::api::core::v1::Pod],
@@ -214,8 +247,10 @@ async fn push_policy(
     endpoints: &[pb::CniEndpoint],
     last_cidrs: &mut Vec<(String, u32)>,
     mode: &str,
+    alloc: &identity::Alloc,
+    cnps: &[cnp::Cnp],
 ) -> Result<()> {
-    for (ip, id) in netpol::identities(pods) {
+    for (ip, id) in netpol::identities(pods, alloc) {
         cl.set_identity(pb::Identity { ip, identity: id }).await?;
     }
     // ipBlock CIDR bindings: set the current ones, delete the vanished ones.
@@ -243,7 +278,40 @@ async fn push_policy(
         if ep.pod_name.is_empty() {
             continue;
         }
-        let mut policy = netpol::endpoint_policy(ep, policies, pods, namespaces);
+        let mut policy = netpol::endpoint_policy(ep, policies, pods, namespaces, alloc);
+        // CiliumNetworkPolicy rules (incl. deny + entities) merge on top of
+        // the NetworkPolicy translation; a CNP-only direction gets the same
+        // implicit host allow (kubelet probes).
+        let pod_labels = pods
+            .iter()
+            .find(|p| {
+                kube::ResourceExt::namespace(*p).as_deref() == Some(ep.pod_namespace.as_str())
+                    && kube::ResourceExt::name_any(*p) == ep.pod_name
+            })
+            .and_then(|p| p.metadata.labels.clone())
+            .unwrap_or_default();
+        let (cnp_in, cnp_eg, cnp_any_in, cnp_any_eg) =
+            cnp::endpoint_rules(cnps, &ep.pod_namespace, &pod_labels, pods, alloc);
+        let host = pb::PolicyRule {
+            identity: netpol::IDENTITY_HOST,
+            proto: 0,
+            port: 0,
+            deny: false,
+        };
+        if cnp_any_in {
+            if !policy.enforce {
+                policy.enforce = true;
+                policy.rules.push(host);
+            }
+            policy.rules.extend(cnp_in);
+        }
+        if cnp_any_eg {
+            if !policy.enforce_egress {
+                policy.enforce_egress = true;
+                policy.egress_rules.push(host);
+            }
+            policy.egress_rules.extend(cnp_eg);
+        }
         match mode {
             // Enforcement off: translated but not applied.
             "never" => {
