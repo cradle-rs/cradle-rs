@@ -123,7 +123,16 @@ Everything above, plus the gaps that let kube-proxy be turned **off**:
   `AFFINITY` map `(svc_id, client_ip) → (slot, expiry)` consulted before the
   random pick in `l4_nat`; `cradle-k8s` sets it from the Service.
 - **LB quality** (follow-on): wire the existing `LB_ALGO_MAGLEV` stub for
-  consistent backend selection across nodes.
+  consistent backend selection across nodes. **Blocked on the monolith
+  stack wall** (see [`tailcall-vs-monolithic.md`](tailcall-vs-monolithic.md)):
+  a working userspace table generator + datapath lookup were prototyped,
+  but the backend-selection change adds ~16 bytes to `cradle_tc`'s already
+  at-budget main frame — inlining grows main past the 448-byte verifier
+  budget, and out-lining forces the fat `l4_nat_v4/v6` NAT branches (which
+  must stay inlined to *overlap* their mutually-exclusive stack) into a
+  too-deep call chain. Maglev is the LB feature that hits the wall the
+  policy engine first hit; it wants the tail-call restructuring, not
+  another stack shave.
 - **Health-check node port** for `externalTrafficPolicy: Local`.
 - **Deploy**: `deploy/kind-config.yaml` gains `kubeProxyMode: none`; the
   DaemonSet already carries the datapath. A dedicated
