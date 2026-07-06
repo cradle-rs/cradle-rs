@@ -102,14 +102,13 @@ distribution. `cradle_cni_bgp` is the BDD proof.
 
 ## NetworkPolicy
 
-cradle enforces Kubernetes-style ingress NetworkPolicy **natively in the
-datapath**. `cradle-k8s --enforce-policy` translates NetworkPolicies into the
-`IDENTITY` / `POLICY` / `EP_POLICY` maps: pod IPs map to label-set identities,
-and an enforced endpoint drops ingress that is neither a reply to a
-pod-initiated flow (stateful, tracked in `PCT`) nor matched by an allow rule.
-The verdict is taken in `cradle_tc` where the destination resolves to the pod's
-veth, so same-node and fabric-ingress traffic enforce at the same point. The
-design is in `docs/design/policy.md`.
+cradle enforces network policy **natively in the datapath** —
+`cradle-k8s --enforce-policy` translates Kubernetes `NetworkPolicy` and the
+Cilium policy CRDs into BPF maps that the datapath decides from. It is
+dual-stack, ingress and egress, stateful, supports deny rules and L7 HTTP
+filtering, and scopes identity by VRF for per-tenant policy over overlapping
+pod CIDRs. See the dedicated [Network Policy](ch-05-03-network-policy.md)
+chapter.
 
 ## Status
 
@@ -127,5 +126,5 @@ kind end-to-end script. See [BDD Integration Tests](ch-04-00-bdd-tests.md).
 | Dual-stack pods (IPv6 IPAM) | ✅ | `cradle_cni_v6` |
 | NodePort / hostPort / egress masquerade | ✅ | `cradle_nodeport`, `cradle_masq` |
 | Full kube-proxy replacement | ✅ | `deploy/kind-noproxy-e2e.sh` |
-| Native ingress NetworkPolicy | ✅ | `cradle_policy` |
+| Native NetworkPolicy (ingress + egress, dual-stack, deny, L7) | ✅ | `cradle_policy`, `cradle_policy_v6`, `cradle_policy_vrf` |
 | DaemonSet packaging + kind e2e | ✅ | `deploy/kind-e2e.sh` |
