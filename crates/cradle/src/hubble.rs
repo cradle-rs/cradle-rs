@@ -30,7 +30,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
 
 use cradle_common::{
-    FlowRecord, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
+    FlowRecord, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
+    FLOW_TRANSLATED,
 };
 
 use crate::control::{Control, EpInfo};
@@ -193,6 +194,8 @@ fn build_flow(rec: &FlowRecord, index: &HashMap<Ipv4Addr, EpInfo>, node: &str) -
         FLOW_FORWARDED => flow::Verdict::Forwarded,
         FLOW_DROPPED => flow::Verdict::Dropped,
         FLOW_TRANSLATED => flow::Verdict::Translated,
+        // Denied by policy but forwarded — the endpoint is in audit mode.
+        FLOW_AUDITED => flow::Verdict::Audit,
         _ => flow::Verdict::Unknown,
     } as i32;
     let traffic_direction = match rec.dir {
@@ -241,6 +244,24 @@ fn build_flow(rec: &FlowRecord, index: &HashMap<Ipv4Addr, EpInfo>, node: &str) -
         })
     };
 
+    // Policy verdicts carry the peer identity the rules were matched
+    // against (CIDR-derived identities have no ipcache entry, so the
+    // datapath-resolved value beats the index): graft it onto the peer's
+    // endpoint when the index had nothing better.
+    let mut source = endpoint(&src);
+    let mut destination = endpoint(&dst);
+    if rec.peer_identity != 0 {
+        let peer = if rec.dir == FLOW_DIR_INGRESS {
+            &mut source
+        } else {
+            &mut destination
+        };
+        let e = peer.get_or_insert_with(Default::default);
+        if e.identity == 0 {
+            e.identity = rec.peer_identity;
+        }
+    }
+
     flow::Flow {
         time: Some(now_ts()),
         verdict,
@@ -251,8 +272,8 @@ fn build_flow(rec: &FlowRecord, index: &HashMap<Ipv4Addr, EpInfo>, node: &str) -
             ..Default::default()
         }),
         l4,
-        source: endpoint(&src),
-        destination: endpoint(&dst),
+        source,
+        destination,
         r#type: flow::FlowType::L3L4 as i32,
         node_name: node.to_string(),
         traffic_direction,

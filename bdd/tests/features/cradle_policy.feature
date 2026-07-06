@@ -67,6 +67,22 @@ Feature: Network policy in the eBPF datapath
     # The /32 except entry is more specific → host1 is world again, denied.
     Then ping from "host1" to "10.244.0.3" should fail
 
+  Scenario: Audit mode reports but forwards; replace flips generations
+    Given the test topology exists
+    # pod2 enforced with no allow rules BUT audit: denied verdicts are
+    # counted (policy_audit) while the traffic still flows.
+    When I apply cradle config "policy-audit.json" to namespace "node" via gRPC as "ctl"
+    Then ping from "host1" to "10.244.0.3" should eventually succeed
+    And the cradle stat "policy_audit" in namespace "node" via gRPC as "ctl" should be nonzero
+    # Back to enforcing (an A/B generation flip per apply): verdicts hold
+    # across repeated replaces.
+    When I apply cradle config "policy-on.json" to namespace "node" via gRPC as "ctl"
+    Then ping from "pod1" to "10.244.0.3" should succeed
+    And ping from "host1" to "10.244.0.3" should fail
+    When I apply cradle config "policy-on.json" to namespace "node" via gRPC as "ctl"
+    Then ping from "pod1" to "10.244.0.3" should succeed
+    And ping from "host1" to "10.244.0.3" should fail
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop HTTP in namespace "pod1"

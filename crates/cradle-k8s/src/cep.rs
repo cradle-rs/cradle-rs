@@ -56,6 +56,9 @@ pub fn cep_object(node: &str, node_ip: &str, ep: &pb::CniEndpoint) -> Value {
             "id": ep.host_ifindex,
             "state": "ready",
             "networking": networking,
+            // The daemon's per-endpoint policy revision (0 = never
+            // programmed) — the observable for "policy realized".
+            "policy": { "revision": ep.policy_revision },
         },
     })
 }
@@ -150,6 +153,7 @@ mod tests {
 
     fn ep(pod: &str, ns: &str, ip: &str, ifindex: u32) -> pb::CniEndpoint {
         pb::CniEndpoint {
+            policy_revision: 3,
             container_id: format!("{pod}-cid"),
             ifname: "eth0".into(),
             netns: String::new(),

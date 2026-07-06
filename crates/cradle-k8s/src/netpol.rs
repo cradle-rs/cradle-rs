@@ -270,6 +270,7 @@ pub fn endpoint_policy(
             rules: Vec::new(),
             enforce_egress: false,
             egress_rules: Vec::new(),
+            audit: false,
         };
     }
 
@@ -334,6 +335,9 @@ pub fn endpoint_policy(
         rules,
         enforce_egress,
         egress_rules,
+        // Kubernetes NetworkPolicy has no audit notion; enforcement-mode
+        // config (default/always/never/audit) is phase-3 CiliumNetworkPolicy.
+        audit: false,
     }
 }
 

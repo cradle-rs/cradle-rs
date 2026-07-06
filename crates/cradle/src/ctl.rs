@@ -230,6 +230,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         rules: as_rules(&pol.rules)?,
                         enforce_egress: pol.enforce_egress,
                         egress_rules: as_rules(&pol.egress_rules)?,
+                        audit: pol.audit,
                     })
                     .await?;
             }

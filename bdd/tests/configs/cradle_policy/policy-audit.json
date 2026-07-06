@@ -1,0 +1,7 @@
+{
+  "policies": [
+    { "namespace": "default", "pod": "pod1", "enforce": false },
+    { "namespace": "default", "pod": "pod2", "enforce": true, "audit": true,
+      "rules": [] }
+  ]
+}

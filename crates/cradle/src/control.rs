@@ -91,6 +91,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "srv6_dx2",
     "policy_drop",
     "masq",
+    "policy_audit",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -125,6 +126,9 @@ pub struct Control {
     /// identity), for Hubble flow enrichment. Kept in step with `set_identity`
     /// / `del_identity`.
     identities: Arc<Mutex<HashMap<Ipv4Addr, u32>>>,
+    /// Per-endpoint policy revision: bumped on every SetEndpointPolicy
+    /// (0 = never programmed). Published via ListEndpoints → CiliumEndpoint.
+    policy_revisions: Arc<Mutex<HashMap<u32, u64>>>,
 }
 
 impl Control {
@@ -138,6 +142,7 @@ impl Control {
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
+            policy_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1073,23 +1078,36 @@ impl Control {
         ep: u32,
         enforce: bool,
         enforce_egress: bool,
+        audit: bool,
         rules: &[(u32, u8, u16)],
         egress_rules: &[(u32, u8, u16)],
-    ) -> Result<()> {
+    ) -> Result<u64> {
         self.dp.lock().await.endpoint_policy_set(
             ep,
             enforce,
             enforce_egress,
+            audit,
             rules,
             egress_rules,
         )?;
+        let rev = {
+            let mut revs = self.policy_revisions.lock().await;
+            let rev = revs.entry(ep).or_insert(0);
+            *rev += 1;
+            *rev
+        };
         info!(
-            "endpoint policy ifindex {ep}: ingress={enforce} ({} rule(s)), \
-             egress={enforce_egress} ({} rule(s))",
+            "endpoint policy ifindex {ep} rev {rev}: ingress={enforce} ({} rule(s)), \
+             egress={enforce_egress} ({} rule(s)), audit={audit}",
             rules.len(),
             egress_rules.len()
         );
-        Ok(())
+        Ok(rev)
+    }
+
+    /// Snapshot of all per-endpoint policy revisions.
+    pub async fn policy_revisions_snapshot(&self) -> HashMap<u32, u64> {
+        self.policy_revisions.lock().await.clone()
     }
 
     /// Snapshot the persisted pod endpoints (CHECK/GC).
@@ -1895,7 +1913,14 @@ impl Cradle for GrpcService {
         let rules = as_tuples(&p.rules);
         let egress_rules = as_tuples(&p.egress_rules);
         self.control
-            .set_endpoint_policy(ep, p.enforce, p.enforce_egress, &rules, &egress_rules)
+            .set_endpoint_policy(
+                ep,
+                p.enforce,
+                p.enforce_egress,
+                p.audit,
+                &rules,
+                &egress_rules,
+            )
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -1992,6 +2017,7 @@ impl Cradle for GrpcService {
         &self,
         _req: Request<pb::Empty>,
     ) -> Result<Response<pb::CniEndpointList>, Status> {
+        let revs = self.control.policy_revisions_snapshot().await;
         let endpoints = self
             .control
             .cni_list_endpoints()
@@ -1999,6 +2025,7 @@ impl Cradle for GrpcService {
             .map_err(st)?
             .into_iter()
             .map(|ep| pb::CniEndpoint {
+                policy_revision: revs.get(&ep.host_ifindex).copied().unwrap_or(0),
                 container_id: ep.container_id,
                 ifname: ep.ifname,
                 netns: ep.netns,
