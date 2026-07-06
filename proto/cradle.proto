@@ -336,10 +336,12 @@ message CniEndpointList {
 message Identity {
   string ip = 1;       // pod/node IP (IPv4 or IPv6)
   uint32 identity = 2; // label-set identity (1 = host, 2 = world)
+  uint32 vrf_id = 3;   // identity scope (0 = global; tenants may reuse IPs)
 }
 
 message IdentityDel {
   string ip = 1;
+  uint32 vrf_id = 2;
 }
 
 // A CIDR → identity binding (ipBlock peers): consulted when the peer IP has
@@ -349,6 +351,7 @@ message CidrIdentity {
   string cidr = 1;     // "a.b.c.d/len"
   uint32 identity = 2;
   bool del = 3;        // true = remove the binding
+  uint32 vrf_id = 4;   // identity scope (0 = global)
 }
 
 message PolicyRule {

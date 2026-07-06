@@ -278,6 +278,9 @@ pub struct Neighbor {
 pub struct IdentityCfg {
     pub ip: String,
     pub id: u32,
+    /// Identity scope (0 = global).
+    #[serde(default)]
+    pub vrf: u32,
 }
 
 /// An endpoint policy: target by `host_if` or `namespace`/`pod`. `enforce`
@@ -312,6 +315,9 @@ fn default_true() -> bool {
 pub struct CidrIdentityCfg {
     pub cidr: String,
     pub id: u32,
+    /// Identity scope (0 = global).
+    #[serde(default)]
+    pub vrf: u32,
 }
 
 /// An allow rule: 0 / empty = wildcard.
@@ -667,17 +673,17 @@ impl Config {
                 .parse::<IpAddr>()
                 .with_context(|| format!("bad identity ip {:?}", i.ip))?
             {
-                IpAddr::V4(ip) => ctl.set_identity(ip, i.id).await?,
-                IpAddr::V6(ip) => ctl.set_identity6(ip, i.id, false).await?,
+                IpAddr::V4(ip) => ctl.set_identity(i.vrf, ip, i.id).await?,
+                IpAddr::V6(ip) => ctl.set_identity6(i.vrf, ip, i.id, false).await?,
             }
         }
         for c in &self.cidr_identities {
             if c.cidr.contains(':') {
                 let (net, len) = util::parse_ipv6_prefix(&c.cidr)?;
-                ctl.set_cidr6_identity(net, len, c.id, false).await?;
+                ctl.set_cidr6_identity(c.vrf, net, len, c.id, false).await?;
             } else {
                 let (net, len) = util::parse_ipv4_prefix(&c.cidr)?;
-                ctl.set_cidr_identity(net, len, c.id, false).await?;
+                ctl.set_cidr_identity(c.vrf, net, len, c.id, false).await?;
             }
         }
         for pol in &self.policies {

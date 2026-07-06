@@ -1003,30 +1003,42 @@ impl Control {
         Ok(())
     }
 
-    /// Bind a pod/node address to a policy identity.
-    pub async fn set_identity(&self, ip: Ipv4Addr, identity: u32) -> Result<()> {
-        self.dp.lock().await.identity_set(ip, identity)?;
-        self.identities.lock().await.insert(ip, identity);
+    /// Bind a pod/node address to a policy identity (`vrf` 0 = global; the
+    /// Hubble enrichment mirror tracks the global scope only).
+    pub async fn set_identity(&self, vrf: u32, ip: Ipv4Addr, identity: u32) -> Result<()> {
+        self.dp.lock().await.identity_set(vrf, ip, identity)?;
+        if vrf == 0 {
+            self.identities.lock().await.insert(ip, identity);
+        }
         Ok(())
     }
 
     /// Remove an identity binding (idempotent).
-    pub async fn del_identity(&self, ip: Ipv4Addr) -> Result<()> {
-        self.dp.lock().await.identity_del(ip)?;
-        self.identities.lock().await.remove(&ip);
+    pub async fn del_identity(&self, vrf: u32, ip: Ipv4Addr) -> Result<()> {
+        self.dp.lock().await.identity_del(vrf, ip)?;
+        if vrf == 0 {
+            self.identities.lock().await.remove(&ip);
+        }
         Ok(())
     }
 
     /// v6 sibling of `set_identity` / `del_identity`. (No Hubble identity
     /// mirror: flow export is v4-only.)
-    pub async fn set_identity6(&self, ip: Ipv6Addr, identity: u32, del: bool) -> Result<()> {
-        self.dp.lock().await.identity6_set(ip, identity, del)?;
+    pub async fn set_identity6(
+        &self,
+        vrf: u32,
+        ip: Ipv6Addr,
+        identity: u32,
+        del: bool,
+    ) -> Result<()> {
+        self.dp.lock().await.identity6_set(vrf, ip, identity, del)?;
         Ok(())
     }
 
     /// Bind (or remove, `del`) a peer-CIDR identity (ipBlock peers).
     pub async fn set_cidr_identity(
         &self,
+        vrf: u32,
         net: Ipv4Addr,
         prefix_len: u8,
         identity: u32,
@@ -1035,13 +1047,14 @@ impl Control {
         self.dp
             .lock()
             .await
-            .cidr_identity_set(net, prefix_len, identity, del)?;
+            .cidr_identity_set(vrf, net, prefix_len, identity, del)?;
         Ok(())
     }
 
     /// v6 sibling of `set_cidr_identity`.
     pub async fn set_cidr6_identity(
         &self,
+        vrf: u32,
         net: Ipv6Addr,
         prefix_len: u8,
         identity: u32,
@@ -1050,7 +1063,7 @@ impl Control {
         self.dp
             .lock()
             .await
-            .cidr6_identity_set(net, prefix_len, identity, del)?;
+            .cidr6_identity_set(vrf, net, prefix_len, identity, del)?;
         Ok(())
     }
 
@@ -1854,8 +1867,12 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let i = req.into_inner();
         match i.ip.parse::<IpAddr>().map_err(st)? {
-            IpAddr::V4(ip) => self.control.set_identity(ip, i.identity).await,
-            IpAddr::V6(ip) => self.control.set_identity6(ip, i.identity, false).await,
+            IpAddr::V4(ip) => self.control.set_identity(i.vrf_id, ip, i.identity).await,
+            IpAddr::V6(ip) => {
+                self.control
+                    .set_identity6(i.vrf_id, ip, i.identity, false)
+                    .await
+            }
         }
         .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -1867,8 +1884,8 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let i = req.into_inner();
         match i.ip.parse::<IpAddr>().map_err(st)? {
-            IpAddr::V4(ip) => self.control.del_identity(ip).await,
-            IpAddr::V6(ip) => self.control.set_identity6(ip, 0, true).await,
+            IpAddr::V4(ip) => self.control.del_identity(i.vrf_id, ip).await,
+            IpAddr::V6(ip) => self.control.set_identity6(i.vrf_id, ip, 0, true).await,
         }
         .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -1882,13 +1899,13 @@ impl Cradle for GrpcService {
         if c.cidr.contains(':') {
             let (net, len) = util::parse_ipv6_prefix(&c.cidr).map_err(st)?;
             self.control
-                .set_cidr6_identity(net, len, c.identity, c.del)
+                .set_cidr6_identity(c.vrf_id, net, len, c.identity, c.del)
                 .await
                 .map_err(st)?;
         } else {
             let (net, len) = util::parse_ipv4_prefix(&c.cidr).map_err(st)?;
             self.control
-                .set_cidr_identity(net, len, c.identity, c.del)
+                .set_cidr_identity(c.vrf_id, net, len, c.identity, c.del)
                 .await
                 .map_err(st)?;
         }
