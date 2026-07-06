@@ -304,6 +304,25 @@ pub struct PolicyCfg {
     /// Audit mode: report denied verdicts, forward the packets.
     #[serde(default)]
     pub audit: bool,
+    /// Ingress L7 (HTTP) policy per port.
+    #[serde(default)]
+    pub l7: Vec<L7PortCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct L7PortCfg {
+    pub port: u16,
+    #[serde(default)]
+    pub rules: Vec<L7RuleCfg>,
+}
+
+/// Empty method/path = any.
+#[derive(Debug, Deserialize)]
+pub struct L7RuleCfg {
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub path: String,
 }
 
 fn default_true() -> bool {
@@ -697,6 +716,22 @@ impl Config {
             };
             let rules = as_tuples(&pol.rules)?;
             let egress_rules = as_tuples(&pol.egress_rules)?;
+            let l7: Vec<(u16, Vec<crate::l7::L7PolicyRule>)> = pol
+                .l7
+                .iter()
+                .map(|pp| {
+                    (
+                        pp.port,
+                        pp.rules
+                            .iter()
+                            .map(|r| crate::l7::L7PolicyRule {
+                                method: r.method.clone(),
+                                path_prefix: r.path.clone(),
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
             ctl.set_endpoint_policy(
                 ep,
                 pol.enforce,
@@ -704,6 +739,7 @@ impl Config {
                 pol.audit,
                 &rules,
                 &egress_rules,
+                &l7,
             )
             .await?;
         }

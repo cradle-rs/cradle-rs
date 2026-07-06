@@ -378,6 +378,20 @@ message EndpointPolicy {
   // Audit mode: denied verdicts are counted (policy_audit) and reported as
   // AUDITED Hubble flows, but the packet is forwarded.
   bool audit = 8;
+  // Ingress L7 (HTTP) policy per port: flows to these ports are steered
+  // through the transparent proxy, which enforces the rules (403 on miss).
+  repeated L7PortPolicy l7 = 9;
+}
+
+// One allowed HTTP request shape (empty field = any).
+message L7Rule {
+  string method = 1;
+  string path_prefix = 2;
+}
+
+message L7PortPolicy {
+  uint32 port = 1;           // TCP port on the endpoint
+  repeated L7Rule rules = 2;
 }
 
 // ---- egress masquerade (docs/design/kube-proxy-dualstack.md) ----

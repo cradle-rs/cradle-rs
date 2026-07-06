@@ -234,6 +234,21 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         enforce_egress: pol.enforce_egress,
                         egress_rules: as_rules(&pol.egress_rules)?,
                         audit: pol.audit,
+                        l7: pol
+                            .l7
+                            .iter()
+                            .map(|pp| pb::L7PortPolicy {
+                                port: pp.port as u32,
+                                rules: pp
+                                    .rules
+                                    .iter()
+                                    .map(|r| pb::L7Rule {
+                                        method: r.method.clone(),
+                                        path_prefix: r.path.clone(),
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
                     })
                     .await?;
             }

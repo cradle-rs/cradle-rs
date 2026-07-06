@@ -129,6 +129,8 @@ pub struct Control {
     /// Per-endpoint policy revision: bumped on every SetEndpointPolicy
     /// (0 = never programmed). Published via ListEndpoints → CiliumEndpoint.
     policy_revisions: Arc<Mutex<HashMap<u32, u64>>>,
+    /// L7-steered (ip, port)s programmed per endpoint — replace semantics.
+    l7_policies: Arc<Mutex<HashMap<u32, Vec<(Ipv4Addr, u16)>>>>,
 }
 
 impl Control {
@@ -143,6 +145,7 @@ impl Control {
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
+            l7_policies: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1094,7 +1097,9 @@ impl Control {
         audit: bool,
         rules: &[(u32, u8, u16, bool)],
         egress_rules: &[(u32, u8, u16, bool)],
+        l7: &[(u16, Vec<crate::l7::L7PolicyRule>)],
     ) -> Result<u64> {
+        self.set_endpoint_l7(ep, l7).await?;
         self.dp.lock().await.endpoint_policy_set(
             ep,
             enforce,
@@ -1116,6 +1121,53 @@ impl Control {
             egress_rules.len()
         );
         Ok(rev)
+    }
+
+    /// Program the endpoint's ingress L7 policy: steer each (pod-ip, port)
+    /// through the proxy (`L7_SERVICES`) and install the allow-list in the
+    /// route table. Replace semantics per endpoint; endpoints without a
+    /// CNI-recorded IPv4 (plain `host_if` ports) log and skip.
+    async fn set_endpoint_l7(
+        &self,
+        ep: u32,
+        l7: &[(u16, Vec<crate::l7::L7PolicyRule>)],
+    ) -> Result<()> {
+        let ip = self
+            .cni
+            .lock()
+            .await
+            .list_endpoints()?
+            .iter()
+            .find(|e| e.host_ifindex == ep)
+            .map(|e| e.ip);
+        let mut programmed = self.l7_policies.lock().await;
+        let old = programmed.remove(&ep).unwrap_or_default();
+        let mut new_set = Vec::new();
+        if let Some(ip) = ip {
+            for (port, rules) in l7 {
+                self.dp.lock().await.l7_service_add(ip, *port)?;
+                self.routes
+                    .lock()
+                    .await
+                    .set_policy(std::net::SocketAddr::from((ip, *port)), rules.clone());
+                new_set.push((ip, *port));
+            }
+        } else if !l7.is_empty() {
+            warn!("endpoint {ep}: L7 policy needs a CNI-recorded pod IPv4 — skipped");
+        }
+        for (ip, port) in old {
+            if !new_set.contains(&(ip, port)) {
+                let _ = self.dp.lock().await.l7_service_del(ip, port);
+                self.routes
+                    .lock()
+                    .await
+                    .del_policy(&std::net::SocketAddr::from((ip, port)));
+            }
+        }
+        if !new_set.is_empty() {
+            programmed.insert(ep, new_set);
+        }
+        Ok(())
     }
 
     /// Snapshot of all per-endpoint policy revisions.
@@ -1929,6 +1981,21 @@ impl Cradle for GrpcService {
         };
         let rules = as_tuples(&p.rules);
         let egress_rules = as_tuples(&p.egress_rules);
+        let l7: Vec<(u16, Vec<crate::l7::L7PolicyRule>)> =
+            p.l7.iter()
+                .map(|pp| {
+                    (
+                        pp.port as u16,
+                        pp.rules
+                            .iter()
+                            .map(|r| crate::l7::L7PolicyRule {
+                                method: r.method.clone(),
+                                path_prefix: r.path_prefix.clone(),
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
         self.control
             .set_endpoint_policy(
                 ep,
@@ -1937,6 +2004,7 @@ impl Cradle for GrpcService {
                 p.audit,
                 &rules,
                 &egress_rules,
+                &l7,
             )
             .await
             .map_err(st)?;
