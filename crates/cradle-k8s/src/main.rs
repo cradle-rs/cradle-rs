@@ -63,6 +63,11 @@ struct Args {
     /// endpoints (needs the cilium.io/v2 CRDs installed — see deploy/crds/).
     #[arg(long)]
     publish_crds: bool,
+    /// Garbage-collect CiliumIdentity CRDs no CiliumEndpoint references
+    /// (mark-and-sweep with a grace period). Requires `--publish-crds` for
+    /// the cluster-wide CEP in-use set; runs inside that loop.
+    #[arg(long)]
+    gc_identities: bool,
     /// Translate Kubernetes NetworkPolicies into cradle ingress policy for
     /// this node's endpoints (docs/design/policy.md).
     #[arg(long)]
@@ -115,7 +120,12 @@ async fn main() -> Result<()> {
             .node_name
             .clone()
             .context("--publish-crds needs --node-name (or env NODE_NAME)")?;
-        tokio::spawn(publish_crds_task(client.clone(), node, args.grpc.clone()));
+        tokio::spawn(publish_crds_task(
+            client.clone(),
+            node,
+            args.grpc.clone(),
+            args.gc_identities,
+        ));
     }
 
     if args.enforce_policy {
@@ -353,11 +363,16 @@ async fn push_policy(
 /// store into CiliumEndpoint objects and keep this node's CiliumNode fresh.
 /// Missing CRDs (or an unreachable daemon) warn and retry — publication
 /// starts working as soon as both are available.
-async fn publish_crds_task(client: Client, node: String, grpc: String) {
+async fn publish_crds_task(client: Client, node: String, grpc: String, gc_identities: bool) {
     use k8s_openapi::api::core::v1::Pod;
     let nodes: Api<Node> = Api::all(client.clone());
     let pods: Api<Pod> = Api::all(client.clone());
     let cid_api = identity::cilium_identity_api(&client);
+    // Consecutive rounds each unreferenced CID has been seen (GC grace).
+    let mut gc_strikes: std::collections::HashMap<u32, u32> = Default::default();
+    // Grace = 3 rounds (~15s at the 5s tick): a fresh CID survives the lag
+    // until its pod's CEP is published.
+    const GC_GRACE: u32 = 3;
     let mut cradle: Option<CradleClient<tonic::transport::Channel>> = None;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -414,6 +429,31 @@ async fn publish_crds_task(client: Client, node: String, grpc: String) {
             cep::publish(&client, &node, &node_ip, &pod_cidr, &endpoints, &identities).await
         {
             warn!("publish-crds: {e:#} (are the cilium.io CRDs installed?)");
+        }
+
+        // Identity GC: sweep CiliumIdentities no CEP references, cluster-wide.
+        if gc_identities {
+            match (
+                identity::all_cid_ids(&cid_api).await,
+                cep::in_use_identities(&client).await,
+            ) {
+                (Ok(cids), Ok(in_use)) => {
+                    let (strikes, del) = identity::gc_plan(&cids, &in_use, &gc_strikes, GC_GRACE);
+                    gc_strikes = strikes;
+                    for id in del {
+                        identity::delete_cid(&cid_api, id).await;
+                        info!("identity GC: removed unreferenced CiliumIdentity {id}");
+                    }
+                }
+                (a, b) => {
+                    if let Err(e) = a {
+                        warn!("identity GC: listing CiliumIdentities: {e}");
+                    }
+                    if let Err(e) = b {
+                        warn!("identity GC: listing CiliumEndpoints: {e}");
+                    }
+                }
+            }
         }
     }
 }

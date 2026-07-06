@@ -170,6 +170,33 @@ EOF
     kubectl delete networkpolicy deny-client-egress
 }
 
+# Identity GC: a throwaway deployment with a fresh label set gets its own
+# CiliumIdentity (allocator); deleting it must return the CID count to the
+# baseline (mark-and-sweep with a grace period), proving live identities
+# survive while orphans are collected.
+check_identity_gc() {
+    echo "==> checking CiliumIdentity GC"
+    local base
+    base=$(kubectl get ciliumidentities -o name 2>/dev/null | wc -l)
+    kubectl create deployment gctest --image=nginx >/dev/null
+    kubectl wait deploy/gctest --for=condition=Available --timeout=120s >/dev/null
+    local grew=0
+    for i in $(seq 1 30); do
+        [ "$(kubectl get ciliumidentities -o name | wc -l)" -gt "$base" ] && { grew=1; break; }
+        sleep 2
+    done
+    [ "$grew" = 1 ] || { echo "✗ no CiliumIdentity allocated for gctest" >&2; exit 1; }
+    echo "✓ gctest allocated a CiliumIdentity (count > $base)"
+    kubectl delete deployment gctest --wait >/dev/null
+    local swept=0
+    for i in $(seq 1 40); do
+        [ "$(kubectl get ciliumidentities -o name | wc -l)" -le "$base" ] && { swept=1; break; }
+        sleep 2
+    done
+    [ "$swept" = 1 ] || { echo "✗ orphan CiliumIdentity not GC'd (still > $base)" >&2; exit 1; }
+    echo "✓ orphan CiliumIdentity garbage-collected back to baseline $base"
+}
+
 VIP=$(kubectl get svc web -o jsonpath='{.spec.clusterIP}')
 echo "==> curling ClusterIP $VIP from the client pod"
 for i in $(seq 1 30); do
@@ -185,6 +212,7 @@ for i in $(seq 1 30); do
             check_nodeport
             check_policy
             check_egress_policy
+            check_identity_gc
             exit 0
         fi
         echo "✗ VIP answered but l4_dnat=0 — served by kube-proxy, not eBPF" >&2

@@ -83,6 +83,26 @@ pub fn cep_object(
     })
 }
 
+/// The security-identity ids referenced by every CiliumEndpoint in the
+/// cluster — the in-use set for identity GC. Cluster-wide (not this node's),
+/// so an identity a pod on another node still uses is never collected.
+pub async fn in_use_identities(client: &Client) -> Result<std::collections::HashSet<u32>> {
+    let all: Api<DynamicObject> = Api::all_with(client.clone(), &cep_resource());
+    let mut ids = std::collections::HashSet::new();
+    for item in all.list(&ListParams::default()).await?.items {
+        if let Some(id) = item
+            .data
+            .get("status")
+            .and_then(|s| s.get("identity"))
+            .and_then(|i| i.get("id"))
+            .and_then(|v| v.as_u64())
+        {
+            ids.insert(id as u32);
+        }
+    }
+    Ok(ids)
+}
+
 /// Build this node's CiliumNode object.
 pub fn cilium_node_object(node: &str, node_ip: &str, pod_cidr: &str) -> Value {
     let mut addresses = Vec::new();
