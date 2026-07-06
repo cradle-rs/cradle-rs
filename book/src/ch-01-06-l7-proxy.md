@@ -70,6 +70,17 @@ datapath, not the kernel, moved the traffic. Those are host/topology policy and
 are left to the operator; only the service-specific VIP route is cradle's to
 install.
 
+## Also an L7 policy enforcement point
+
+The same proxy enforces **ingress L7 HTTP policy**. When a Kubernetes endpoint
+carries L7 rules (`CiliumNetworkPolicy` `toPorts.rules.http`), the control plane
+steers that pod's port through this proxy — reusing the exact `bpf_sk_assign`
+machinery above, no extra datapath code — and the proxy checks each request
+against the endpoint's allow-list (method + a full-match path **regex**),
+answering a non-match with an empty **403** and splicing a match to the pod.
+Every handled request is reported to Hubble as an L7 flow. See
+[Network Policy](ch-05-03-network-policy.md).
+
 ## Scope
 
 The L7 proxy currently handles IPv4 HTTP and routes on the request path (with the

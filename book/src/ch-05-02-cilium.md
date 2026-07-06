@@ -34,8 +34,10 @@ datapath). `cradle_cilium` runs the unmodified plugin against this API.
 
 `cradle-k8s --publish-crds` mirrors the daemon's endpoint store into
 `CiliumEndpoint` resources — so `kubectl get ciliumendpoints` shows cradle's
-pods with their addresses — and publishes a `CiliumNode` carrying the node's
-`podCIDR`. The CRDs are vendored under `deploy/crds/`.
+pods with their addresses, security identity (`status.identity`), and policy
+revision — and publishes a `CiliumNode` carrying the node's `podCIDR`. The
+policy engine also allocates `CiliumIdentity` CRDs (garbage-collected when
+unreferenced). The CRDs are vendored under `deploy/crds/`.
 
 ## Generic-veth chaining
 
@@ -61,12 +63,14 @@ cradle serve --hubble-sock /var/run/cilium/hubble.sock --hubble-listen 0.0.0.0:4
 
 A `FLOWS` eBPF ring buffer carries one record per verdict; user space drains it,
 enriches each into a Hubble `Flow`, and keeps the most recent in a per-node
-ring:
+ring. The L7 [transparent proxy](ch-01-06-l7-proxy.md) also reports the HTTP
+requests it handles as **L7 (HTTP) flows** (`hubble observe --type l7`).
 
 | Verdict | Emitted at |
 |---|---|
-| `FORWARDED` | L3 forward success |
-| `DROPPED` | the ingress-policy check |
+| `FORWARDED` | L3 forward success; an allowed L7 request |
+| `DROPPED` | a policy drop (ingress or egress); an L7 403 |
+| `AUDITED` | a policy verdict that would drop but the endpoint is in audit mode |
 | `TRANSLATED` | service DNAT and egress masquerade |
 
 Each flow is **enriched** with the endpoint's namespace, pod name, security
@@ -107,10 +111,12 @@ The design and milestones are in `docs/design/hubble.md`.
 | Surface | Status | Proof |
 |---|---|---|
 | cilium-agent REST shim (stock `cilium-cni`) | ✅ | `cradle_cilium` |
-| `CiliumEndpoint` / `CiliumNode` CRDs | ✅ | `deploy/kind-e2e.sh` |
+| `CiliumEndpoint` / `CiliumNode` / `CiliumIdentity` CRDs | ✅ | `deploy/kind-e2e.sh` |
+| `CiliumNetworkPolicy` / `CiliumClusterwideNetworkPolicy` | ✅ | `deploy/kind-cilium-e2e.sh` |
 | Generic-veth chaining (real Cilium on top) | ✅ | `deploy/kind-cilium-e2e.sh` |
-| Hubble Observer + Peer (stock `hubble` / relay / UI) | ✅ | `cradle_hubble`, `deploy/kind-hubble-e2e.sh` |
+| Hubble Observer + Peer (stock `hubble` / relay / UI), incl. L7 flows | ✅ | `cradle_hubble`, `deploy/kind-hubble-e2e.sh` |
 
-Follow-ons: multi-node Hubble peer federation, IPv6 and L7/HTTP flows. The
-NetworkPolicy engine that feeds the `DROPPED` verdict is IPv4-ingress only —
-see [CNI Support](ch-05-01-cni.md).
+Follow-ons: multi-node Hubble peer federation and IPv6 flow records. The
+NetworkPolicy engine that feeds the `DROPPED` / `AUDITED` verdicts is dual-stack,
+ingress and egress, deny-capable, and L7-aware — see
+[Network Policy](ch-05-03-network-policy.md).

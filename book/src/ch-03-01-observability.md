@@ -16,6 +16,9 @@ l4_dnat        0
 l4_snat        0
 drop           0
 l7_redirect    10
+policy_drop    2
+policy_audit   0
+masq           0
 ```
 
 ## The counters
@@ -31,6 +34,9 @@ l7_redirect    10
 | `l4_snat` | A return packet is SNAT'd back to the VIP. |
 | `drop` | A packet is dropped by the datapath. |
 | `l7_redirect` | A TCP flow is assigned to the L7 proxy via `bpf_sk_assign`. |
+| `policy_drop` | A packet is dropped by [network policy](ch-05-03-network-policy.md) (ingress or egress). |
+| `policy_audit` | A policy verdict that would drop, but the endpoint is in audit mode (forwarded). |
+| `masq` | A pod-egress flow to outside the cluster is SNAT'd to the node IP. |
 
 ## How they are stored and read
 

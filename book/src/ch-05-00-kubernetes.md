@@ -36,19 +36,21 @@ node:
   node-local IPAM allocator, and the persistent endpoint store, and exposes the
   gRPC control API both of the above drive.
 
-## Two compatibility surfaces
-
-This section is split by what a cradle node presents to the outside world:
+## The chapters
 
 - [**CNI Support**](ch-05-01-cni.md) — cradle's own CNI provider: the
   `cradle-cni` plugin, node-local IPAM, the pod-endpoint lifecycle, Services as
-  a kube-proxy replacement, dual-stack, and native NetworkPolicy.
+  a kube-proxy replacement, and dual-stack.
 - [**Cilium API Compatibility**](ch-05-02-cilium.md) — the surfaces that let
   the *unmodified* Cilium ecosystem drive a cradle node: the cilium-agent REST
   API shim (so the stock `cilium-cni` plugin works), the `CiliumEndpoint` /
-  `CiliumNode` CRDs, generic-veth chaining, and the Hubble Observer/Peer API
-  (so the stock `hubble`, `hubble-relay`, and `hubble-ui` observe cradle
-  flows).
+  `CiliumNode` / `CiliumIdentity` CRDs, generic-veth chaining, and the Hubble
+  Observer/Peer API (so the stock `hubble`, `hubble-relay`, and `hubble-ui`
+  observe cradle flows).
+- [**Network Policy**](ch-05-03-network-policy.md) — native, in-datapath
+  enforcement of Kubernetes `NetworkPolicy` and the Cilium policy CRDs:
+  ingress + egress, dual-stack, deny rules, L7 HTTP, and per-tenant identity
+  over overlapping pod CIDRs.
 
 ## Deploying
 
