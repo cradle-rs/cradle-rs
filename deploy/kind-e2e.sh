@@ -26,7 +26,8 @@ kind create cluster --name "$CLUSTER" --config deploy/kind-config.yaml --wait 0s
 kind load docker-image cradle:dev --name "$CLUSTER"
 
 echo "==> installing cradle (+ vendored cilium.io CRDs)"
-kubectl apply -f deploy/crds/ciliumendpoints.yaml -f deploy/crds/ciliumnodes.yaml
+kubectl apply -f deploy/crds/ciliumendpoints.yaml -f deploy/crds/ciliumnodes.yaml \
+    -f deploy/crds/ciliumidentities.yaml
 kubectl apply -f deploy/cradle.yaml
 kubectl -n cradle-system rollout status ds/cradle --timeout=180s
 kubectl wait node --all --for=condition=Ready --timeout=180s
