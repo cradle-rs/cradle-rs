@@ -208,9 +208,9 @@ pub fn endpoint_rules(
         if cnp.namespace != ns || !selector_matches(&cnp.spec.endpoint_selector, pod_labels) {
             continue;
         }
-        let mut expand = |rules: &[Rule],
-                          peers_of: for<'r> fn(&'r Rule) -> (&'r [Selector], &'r [String]),
-                          deny: bool| {
+        let expand = |rules: &[Rule],
+                      peers_of: for<'r> fn(&'r Rule) -> (&'r [Selector], &'r [String]),
+                      deny: bool| {
             let mut out = Vec::new();
             for rule in rules {
                 let (peers, entities) = peers_of(rule);

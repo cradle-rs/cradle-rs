@@ -426,8 +426,6 @@ async fn service_sync(
     let services: Api<Service> = Api::all(client.clone());
     let slices: Api<EndpointSlice> = Api::all(client.clone());
 
-    let cid_api = identity::cilium_identity_api(&client);
-    let cnp_api = cnp::cnp_api(&client);
     let notify = Arc::new(Notify::new());
     tokio::spawn(watch_notify(services.clone(), notify.clone()));
     tokio::spawn(watch_notify(slices.clone(), notify.clone()));
