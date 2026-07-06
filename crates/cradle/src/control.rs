@@ -154,6 +154,12 @@ impl Control {
 
     /// Start the user-space L7 transparent proxy (best-effort; logs and
     /// continues if the transparent bind is unavailable).
+    /// Register the Hubble L7 flow sink so the transparent proxy reports the
+    /// HTTP requests it handles as L7 (HTTP) flow records.
+    pub async fn set_l7_hubble_sink(&self, sink: crate::l7::L7Sink) {
+        self.routes.lock().await.set_hubble_sink(sink);
+    }
+
     pub async fn start_l7_proxy(&self) {
         if let Err(e) = crate::l7::spawn_proxy(self.routes.clone()).await {
             warn!("L7 proxy disabled: {e:#}");

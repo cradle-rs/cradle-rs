@@ -35,8 +35,8 @@ per-tenant EVPN/SRv6 slice documentation, host endpoint (CiliumClusterwideNetwor
 steered through the existing TPROXY proxy via `L7_SERVICES` — no new
 datapath code — with 403-on-miss enforcement in the proxy
 (`cradle_policy` L7 BDD scenario). Remaining phase-5 tails: egress L7,
-Hubble L7 flow records, visibility annotations (path regex done —
-Cilium full-match semantics via the `regex` crate). Phase 6 is
+visibility annotations (path regex done — Cilium full-match semantics;
+Hubble L7 HTTP flow records done — the proxy reports each request). Phase 6 is
 implemented: `cradle ctl policy-trace` (live-map flow resolution with
 per-step explanation), `cradle ctl policy-summary` (map-pressure
 gauges), and `cradle policy-bench` (generation-flip churn: ~450
