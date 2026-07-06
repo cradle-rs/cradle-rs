@@ -22,10 +22,10 @@ use cradle_common::{
     Backend, Backend6, BackendKey, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
     GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, EP_F_EGRESS, EP_F_INGRESS,
-    FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS,
-    NH_F_SRV6, NH_F_V6, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, STAT_FDB_AGED, STAT_MAX,
-    SVC_F_AFFINITY,
+    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS,
+    EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE,
+    NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
+    STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -431,9 +431,9 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Replace endpoint `ep`'s policy: clear its old allow rules, install
-    /// `rules` (ingress) and `egress_rules` (`(identity, proto, port)`, 0 =
-    /// wildcard), and mark the enforced directions in `EP_POLICY`. Neither
+    /// Replace endpoint `ep`'s policy atomically (A/B generation flip; see
+    /// the body). `rules` (ingress) / `egress_rules` are `(identity, proto,
+    /// port)`, 0 = wildcard; `audit` reports instead of dropping. Neither
     /// direction enforcing removes the endpoint entirely — back to
     /// default-allow.
     pub fn endpoint_policy_set(
@@ -441,22 +441,36 @@ impl Dataplane {
         ep: u32,
         enforce: bool,
         enforce_egress: bool,
+        audit: bool,
         rules: &[(u32, u8, u16)],
         egress_rules: &[(u32, u8, u16)],
     ) -> Result<()> {
-        let stale: Vec<PolicyKey> = self
-            .policy
-            .keys()
-            .filter_map(|k| k.ok())
-            .filter(|k| k.ep == ep)
-            .collect();
-        for key in stale {
-            let _ = self.policy.remove(&key);
-        }
+        let sweep = |policy: &mut HashMap<MapData, PolicyKey, u8>, keep_gen: Option<u8>| {
+            let stale: Vec<PolicyKey> = policy
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| k.ep == ep)
+                .filter(|k| keep_gen.is_none_or(|g| k.dir & POLICY_KEY_GEN != g))
+                .collect();
+            for key in stale {
+                let _ = policy.remove(&key);
+            }
+        };
         if !enforce && !enforce_egress {
             let _ = self.ep_policy.remove(&ep);
+            sweep(&mut self.policy, None);
             return Ok(());
         }
+        // A/B generation flip: new rules land under the inactive generation,
+        // the single EP_POLICY word update switches the endpoint atomically,
+        // then the stale generation is swept — packets never observe a
+        // half-replaced table.
+        let new_gen = match self.ep_policy.get(&ep, 0) {
+            Ok(v) if v & EP_F_GEN != 0 => 0,
+            Ok(_) => EP_F_GEN,
+            Err(_) => 0,
+        };
+        let gen_bit = if new_gen != 0 { POLICY_KEY_GEN } else { 0 };
         let dirs = [
             (enforce, POLICY_DIR_INGRESS, rules),
             (enforce_egress, POLICY_DIR_EGRESS, egress_rules),
@@ -472,16 +486,19 @@ impl Dataplane {
                         identity,
                         port: util::port_to_map(port),
                         proto,
-                        dir,
+                        dir: dir | gen_bit,
                     },
                     1u8,
                     0,
                 )?;
             }
         }
-        let flags =
-            if enforce { EP_F_INGRESS } else { 0 } | if enforce_egress { EP_F_EGRESS } else { 0 };
+        let flags = if enforce { EP_F_INGRESS } else { 0 }
+            | if enforce_egress { EP_F_EGRESS } else { 0 }
+            | if audit { EP_F_AUDIT } else { 0 }
+            | new_gen;
         self.ep_policy.insert(ep, flags, 0)?;
+        sweep(&mut self.policy, Some(gen_bit));
         Ok(())
     }
 

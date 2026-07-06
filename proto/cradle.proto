@@ -309,6 +309,10 @@ message CniEndpoint {
   // the CiliumEndpoint CRD publication; empty outside Kubernetes.
   string pod_name = 8;
   string pod_namespace = 9;
+  // Per-endpoint policy revision: bumped on every SetEndpointPolicy that
+  // touches this endpoint (0 = never programmed). Published into the
+  // CiliumEndpoint CRD by cradle-k8s.
+  uint64 policy_revision = 12;
   // Pod IPv6 address (dual-stack); empty for a v4-only pod.
   string ip6 = 11;
   // CNI-chained deployment (e.g. Cilium generic-veth on top): cradle skips
@@ -367,6 +371,9 @@ message EndpointPolicy {
   repeated PolicyRule rules = 5;
   bool enforce_egress = 6;
   repeated PolicyRule egress_rules = 7;
+  // Audit mode: denied verdicts are counted (policy_audit) and reported as
+  // AUDITED Hubble flows, but the packet is forwarded.
+  bool audit = 8;
 }
 
 // ---- egress masquerade (docs/design/kube-proxy-dualstack.md) ----

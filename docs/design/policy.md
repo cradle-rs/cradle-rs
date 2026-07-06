@@ -1,7 +1,10 @@
 # Network policy in the cradle datapath (story 2 / M8)
 
-Status: **Phase 1 of [`policy-multitenant.md`](policy-multitenant.md)
-implemented** — Kubernetes `NetworkPolicy` ingress **and egress**, IPv4 and
+Status: **Phases 1–2 of [`policy-multitenant.md`](policy-multitenant.md)
+implemented** — atomic per-endpoint policy replacement (A/B generation
+flip), audit mode, per-endpoint policy revisions (CiliumEndpoint
+`status.policy.revision`), Hubble policy verdicts carrying the peer
+identity, plus the full phase-1 surface: Kubernetes `NetworkPolicy` ingress **and egress**, IPv4 and
 IPv6, `ipBlock` CIDR peers (with `except`), and named ports, in native
 (non-chained) CNI mode. L7 rules, `matchExpressions` selectors, and
 `CiliumNetworkPolicy` extensions are follow-ups (phases 3+).
@@ -80,13 +83,25 @@ See [`tailcall-vs-monolithic.md`](tailcall-vs-monolithic.md).
 | `IDENTITY6` | Hash | pod/node IPv6 → identity (u32) |
 | `CIDR_ID` | LpmTrie | peer CIDR (v4) → identity, on `IDENTITY` miss |
 | `CIDR_ID6` | LpmTrie | peer CIDR (v6) → identity, on `IDENTITY6` miss |
-| `EP_POLICY` | Hash | endpoint host-veth ifindex → `EP_F_INGRESS \| EP_F_EGRESS` |
-| `POLICY` | Hash | `PolicyKey{ep, identity, proto, port, dir}` → allow (u8) |
+| `EP_POLICY` | Hash | endpoint host-veth ifindex → `EP_F_INGRESS \| EP_F_EGRESS \| EP_F_AUDIT \| EP_F_GEN` |
+| `POLICY` | Hash | `PolicyKey{ep, identity, proto, port, dir\|gen}` → allow (u8) |
 | `PCT` / `PCT6` | LruHash | 5-tuple → `PCT_POD_INITIATED` / `PCT_INBOUND` |
 | `POL6_SCRATCH` | PerCpuArray | policy lookup keys (off-stack scratch) |
 
-`STAT_POLICY_DROP` counts enforcement drops (both directions); v4 drops
-also emit Hubble `DROPPED` flows with the direction.
+`STAT_POLICY_DROP` counts enforcement drops, `STAT_POLICY_AUDIT` audit-mode
+verdicts (denied but forwarded); v4 verdicts emit Hubble `DROPPED`/`AUDITED`
+flows carrying the direction and the peer identity the rules matched
+against.
+
+**Atomic replacement (phase 2)**: `SetEndpointPolicy` performs an A/B
+generation flip — the new rule set lands in `POLICY` under the inactive
+generation (`PolicyKey.dir` bit 1), one `EP_POLICY` word update switches the
+endpoint (`EP_F_GEN`), and the stale generation is swept afterwards. Packets
+never observe a half-replaced table. The map-in-map inner-swap design is
+deferred until aya-ebpf can declare BTF maps (the aya 0.14 loader supports
+`HashOfMaps`, but legacy `bpf_map_def` declarations cannot carry the inner
+map spec). Each replacement bumps the endpoint's policy revision, published
+via `ListEndpoints` into the CiliumEndpoint CRD.
 
 ## Control plane
 

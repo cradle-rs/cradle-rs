@@ -40,25 +40,26 @@ use cradle_common::{
     FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry,
     MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey,
     PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
-    AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, EP_F_EGRESS, EP_F_INGRESS,
-    FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL,
-    FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
-    IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP,
-    NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    STAT_NH_BACKUP, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2,
-    STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT,
-    STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE,
-    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY, XDP_META_MAGIC,
-    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
+    AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN,
+    EP_F_INGRESS, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP,
+    FIB_F_LOCAL, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
+    FLOW_TRANSLATED, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP,
+    MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PCT_INBOUND,
+    PCT_POD_INITIATED, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT,
+    PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U,
+    SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
+    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
+    STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
+    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
+    STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT,
+    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
+    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
+    STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY, XDP_META_MAGIC, XDP_META_MAGIC_DX,
+    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
 
@@ -247,6 +248,9 @@ struct PolicyScratch6 {
     lpm: Lpm6,
     key4: CtKey,
     lpm4: Lpm4,
+    /// The peer identity the last `policy_denied*` resolved — read by the
+    /// verdict emitters for Hubble policy-verdict flows.
+    peer_id: u32,
     /// `l2_xmit`'s v6 neighbor key — not policy state, but its 20 bytes sit
     /// at the bottom of the same over-budget frame; scratch use is strictly
     /// sequential within one invocation (policy verdict, then transmit).
@@ -398,11 +402,17 @@ fn ingress_policy(ctx: &TcContext) -> Result<i32, ()> {
     match u16::from_be(ethertype) {
         ETH_P_IP => {
             if ep_flags & EP_F_INGRESS != 0
-                && policy_denied(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
+                && policy_denied(ctx, oif, dir_gen(ep_flags, POLICY_DIR_INGRESS)).unwrap_or(true)
             {
-                stat_inc(STAT_POLICY_DROP);
-                emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif);
-                return Ok(TC_ACT_SHOT as i32);
+                if ep_flags & EP_F_AUDIT != 0 {
+                    // Audit mode: report the verdict, forward the packet.
+                    stat_inc(STAT_POLICY_AUDIT);
+                    emit_flow_v4(ctx, FLOW_AUDITED, FLOW_DIR_INGRESS, oif, scratch_peer_id());
+                } else {
+                    stat_inc(STAT_POLICY_DROP);
+                    emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_INGRESS, oif, scratch_peer_id());
+                    return Ok(TC_ACT_SHOT as i32);
+                }
             }
             // Egress statefulness: record the admitted inbound flow so the
             // pod's replies bypass its egress rules.
@@ -412,10 +422,14 @@ fn ingress_policy(ctx: &TcContext) -> Result<i32, ()> {
         }
         ETH_P_IPV6 => {
             if ep_flags & EP_F_INGRESS != 0
-                && policy_denied_v6(ctx, oif, POLICY_DIR_INGRESS).unwrap_or(true)
+                && policy_denied_v6(ctx, oif, dir_gen(ep_flags, POLICY_DIR_INGRESS)).unwrap_or(true)
             {
-                stat_inc(STAT_POLICY_DROP);
-                return Ok(TC_ACT_SHOT as i32);
+                if ep_flags & EP_F_AUDIT != 0 {
+                    stat_inc(STAT_POLICY_AUDIT);
+                } else {
+                    stat_inc(STAT_POLICY_DROP);
+                    return Ok(TC_ACT_SHOT as i32);
+                }
             }
             if ep_flags & EP_F_EGRESS != 0 {
                 let _ = pct_track6(ctx, PCT_INBOUND);
@@ -772,6 +786,27 @@ fn pct_track6(ctx: &TcContext, val: u8) -> Result<(), ()> {
     Ok(())
 }
 
+/// The peer identity resolved by the last `policy_denied*` call (0 when
+/// the scratch is unavailable).
+#[inline(always)]
+fn scratch_peer_id() -> u32 {
+    match POL6_SCRATCH.get_ptr_mut(0) {
+        Some(s) => unsafe { (*s).peer_id },
+        None => 0,
+    }
+}
+
+/// The `PolicyKey.dir` byte for an enforcement check: the direction bit
+/// plus the endpoint's active A/B generation (`EP_F_GEN` → `POLICY_KEY_GEN`).
+#[inline(always)]
+fn dir_gen(ep_flags: u8, dir: u8) -> u8 {
+    dir | if ep_flags & EP_F_GEN != 0 {
+        POLICY_KEY_GEN
+    } else {
+        0
+    }
+}
+
 /// v6 sibling of `policy_denied` — same `POLICY` rules (identities are
 /// address-family-agnostic), v6 peer resolution and conntrack.
 ///
@@ -807,7 +842,8 @@ fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
 
         // The peer in the *reversed* key: egress peer = packet dst = key.src;
         // ingress peer = packet src = key.dst.
-        let peer: *const [u8; 16] = if dir == POLICY_DIR_EGRESS {
+        // Mask the generation bit — `dir` carries `POLICY_KEY_GEN` too.
+        let peer: *const [u8; 16] = if dir & POLICY_DIR_EGRESS != 0 {
             &(*s).key.src
         } else {
             &(*s).key.dst
@@ -824,6 +860,7 @@ fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
                 }
             }
         };
+        (*s).peer_id = identity;
         // Wildcard patterns, most specific first (`POLICY_PATS`).
         for &pat in POLICY_PATS.iter() {
             let k = PolicyKey {
@@ -885,7 +922,12 @@ fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
     // The peer whose identity the rules match: the remote end of the flow.
     // Exact (pod/node) binding first, then the CIDR LPM (ipBlock peers);
     // the LPM key is built in scratch.
-    let peer = if dir == POLICY_DIR_EGRESS { dst } else { src };
+    // Mask the generation bit — `dir` carries `POLICY_KEY_GEN` too.
+    let peer = if dir & POLICY_DIR_EGRESS != 0 {
+        dst
+    } else {
+        src
+    };
     let identity = match unsafe { IDENTITY.get(&peer) } {
         Some(id) => *id,
         None => unsafe {
@@ -898,6 +940,7 @@ fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
             }
         },
     };
+    unsafe { (*s).peer_id = identity };
     // Most-specific-first allow probes, keys built from scalars per pattern
     // (no probe array on the stack).
     for &pat in POLICY_PATS.iter() {
@@ -981,7 +1024,7 @@ fn masq_v4(
     );
     // Hubble: masquerade is a TRANSLATED flow (pod → outside, captured before
     // the SNAT rewrites the source to the node IP).
-    emit_flow_v4(ctx, FLOW_TRANSLATED, FLOW_DIR_EGRESS, 0);
+    emit_flow_v4(ctx, FLOW_TRANSLATED, FLOW_DIR_EGRESS, 0, 0);
     snat(ctx, proto, src_ip, sport, node, sport)?;
     stat_inc(STAT_MASQ);
     Ok(())
@@ -992,7 +1035,7 @@ fn masq_v4(
 /// user-space enrichment). Never affects forwarding.
 ///
 #[inline(always)]
-fn emit_flow_v4(ctx: &TcContext, verdict: u8, dir: u8, ep: u32) {
+fn emit_flow_v4(ctx: &TcContext, verdict: u8, dir: u8, ep: u32, peer_identity: u32) {
     let (Ok(saddr), Ok(daddr), Ok(proto)) = (
         ctx.load::<[u8; 4]>(IP_SRC_OFF),
         ctx.load::<[u8; 4]>(IP_DST_OFF),
@@ -1023,6 +1066,7 @@ fn emit_flow_v4(ctx: &TcContext, verdict: u8, dir: u8, ep: u32) {
         verdict,
         dir,
         _pad: 0,
+        peer_identity,
     });
     slot.submit(0);
 }
@@ -1155,7 +1199,7 @@ fn l4_nat_v4(ctx: &TcContext, masq_src: bool) -> Result<(), ()> {
 
     // Hubble: a service access is a TRANSLATED flow (client → VIP, captured
     // before the DNAT rewrites the destination to the backend).
-    emit_flow_v4(ctx, FLOW_TRANSLATED, FLOW_DIR_INGRESS, 0);
+    emit_flow_v4(ctx, FLOW_TRANSLATED, FLOW_DIR_INGRESS, 0, 0);
     dnat(ctx, proto, dst_ip, dport, be.addr, be.port)
 }
 
@@ -1602,12 +1646,30 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     // verdict must not depend on route presence). docs/design/policy.md.
     if from_ep != 0 {
         if let Some(ep_flags) = EP_POLICY.get_ptr(&from_ep) {
-            if unsafe { *ep_flags } & EP_F_EGRESS != 0
-                && policy_denied(ctx, from_ep, POLICY_DIR_EGRESS).unwrap_or(true)
+            let ep_flags = unsafe { *ep_flags };
+            if ep_flags & EP_F_EGRESS != 0
+                && policy_denied(ctx, from_ep, dir_gen(ep_flags, POLICY_DIR_EGRESS)).unwrap_or(true)
             {
-                stat_inc(STAT_POLICY_DROP);
-                emit_flow_v4(ctx, FLOW_DROPPED, FLOW_DIR_EGRESS, from_ep);
-                return Ok(TC_ACT_SHOT as i32);
+                if ep_flags & EP_F_AUDIT != 0 {
+                    stat_inc(STAT_POLICY_AUDIT);
+                    emit_flow_v4(
+                        ctx,
+                        FLOW_AUDITED,
+                        FLOW_DIR_EGRESS,
+                        from_ep,
+                        scratch_peer_id(),
+                    );
+                } else {
+                    stat_inc(STAT_POLICY_DROP);
+                    emit_flow_v4(
+                        ctx,
+                        FLOW_DROPPED,
+                        FLOW_DIR_EGRESS,
+                        from_ep,
+                        scratch_peer_id(),
+                    );
+                    return Ok(TC_ACT_SHOT as i32);
+                }
             }
         }
     }
@@ -1716,7 +1778,7 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     } else {
         (FLOW_DIR_INGRESS, oif)
     };
-    emit_flow_v4(ctx, FLOW_FORWARDED, dir, ep);
+    emit_flow_v4(ctx, FLOW_FORWARDED, dir, ep, 0);
     let mut params = bpf_redir_neigh {
         nh_family: AF_INET,
         __bindgen_anon_1: bpf_redir_neigh__bindgen_ty_1 {
@@ -1765,11 +1827,17 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     // flow record: v6 flow export doesn't exist yet.)
     if from_ep != 0 {
         if let Some(ep_flags) = EP_POLICY.get_ptr(&from_ep) {
-            if unsafe { *ep_flags } & EP_F_EGRESS != 0
-                && policy_denied_v6(ctx, from_ep, POLICY_DIR_EGRESS).unwrap_or(true)
+            let ep_flags = unsafe { *ep_flags };
+            if ep_flags & EP_F_EGRESS != 0
+                && policy_denied_v6(ctx, from_ep, dir_gen(ep_flags, POLICY_DIR_EGRESS))
+                    .unwrap_or(true)
             {
-                stat_inc(STAT_POLICY_DROP);
-                return Ok(TC_ACT_SHOT as i32);
+                if ep_flags & EP_F_AUDIT != 0 {
+                    stat_inc(STAT_POLICY_AUDIT);
+                } else {
+                    stat_inc(STAT_POLICY_DROP);
+                    return Ok(TC_ACT_SHOT as i32);
+                }
             }
         }
     }

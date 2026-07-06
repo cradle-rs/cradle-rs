@@ -5,7 +5,13 @@
 > (VRFs, overlapping pod CIDRs, SRv6/EVPN slices) underneath, with
 > Cilium's CRD/API surface on top so its ecosystem carries over.
 
-Status: **PLAN (no implementation yet).** Builds on the implemented
+Status: **Phases 1–2 implemented** (see [`policy.md`](policy.md) for the
+as-built shape). Phase 2 note: the map-in-map spike found aya 0.14's
+*userspace* `HashOfMaps` complete but aya-ebpf 0.2 unable to declare the
+outer map (legacy `bpf_map_def` carries no inner spec — BTF maps only), so
+the atomic swap ships as an A/B **generation flip** in the existing `POLICY`
+map; the inner-map design remains the target once aya-ebpf emits BTF maps.
+Phases 3+ remain plan. Builds on the implemented
 ingress-only IPv4 NetworkPolicy engine ([`policy.md`](policy.md)), the
 Cilium-compat groundwork ([`cni-cilium.md`](cni-cilium.md) story 2), and
 the program-structure analysis

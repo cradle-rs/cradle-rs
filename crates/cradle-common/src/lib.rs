@@ -535,11 +535,23 @@ pub const IDENTITY_WORLD: u32 = 2;
 pub const POLICY_DIR_INGRESS: u8 = 0;
 /// Policy rule direction: traffic initiated *by* the endpoint.
 pub const POLICY_DIR_EGRESS: u8 = 1;
+/// `PolicyKey.dir` bit 1: the rule's A/B generation. Policy replacement
+/// inserts the new rule set under the flipped generation, then atomically
+/// switches the endpoint via the `EP_F_GEN` bit — packets never see a
+/// half-replaced table. (The map-in-map inner-swap design is deferred until
+/// aya-ebpf can declare BTF maps; see docs/design/policy-multitenant.md.)
+pub const POLICY_KEY_GEN: u8 = 1 << 1;
 
 /// `EP_POLICY` value bit: enforce ingress rules for this endpoint.
 pub const EP_F_INGRESS: u8 = 1 << 0;
 /// `EP_POLICY` value bit: enforce egress rules for this endpoint.
 pub const EP_F_EGRESS: u8 = 1 << 1;
+/// `EP_POLICY` value bit: audit mode — denied verdicts are counted and
+/// reported (Hubble) but the packet is forwarded.
+pub const EP_F_AUDIT: u8 = 1 << 2;
+/// `EP_POLICY` value bit: the endpoint's active rule generation
+/// (`POLICY_KEY_GEN` in the keys that apply).
+pub const EP_F_GEN: u8 = 1 << 3;
 
 /// `PCT` value: flow initiated by the local pod (recorded at pod egress,
 /// pre-NAT) — its replies bypass the pod's ingress policy.
@@ -564,7 +576,7 @@ pub struct PolicyKey {
     pub port: u16,
     /// IP protocol (0 = any).
     pub proto: u8,
-    /// `POLICY_DIR_*`.
+    /// Bit 0: `POLICY_DIR_*`; bit 1: `POLICY_KEY_GEN` (A/B generation).
     pub dir: u8,
 }
 
@@ -785,8 +797,11 @@ pub const STAT_SRV6_DX2: u32 = 37;
 pub const STAT_POLICY_DROP: u32 = 38;
 /// Egress masquerade: a pod→outside-the-cluster flow SNAT'd to the node IP.
 pub const STAT_MASQ: u32 = 39;
+/// Policy verdicts that would have dropped but the endpoint is in audit
+/// mode (`EP_F_AUDIT`) — the packet was forwarded.
+pub const STAT_POLICY_AUDIT: u32 = 40;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 40;
+pub const STAT_MAX: u32 = 41;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -794,6 +809,8 @@ pub const STAT_MAX: u32 = 40;
 pub const FLOW_FORWARDED: u8 = 1;
 pub const FLOW_DROPPED: u8 = 2;
 pub const FLOW_TRANSLATED: u8 = 3;
+/// Denied by policy but forwarded — the endpoint is in audit mode.
+pub const FLOW_AUDITED: u8 = 4;
 
 /// Traffic direction (Hubble `TrafficDirection`).
 pub const FLOW_DIR_UNKNOWN: u8 = 0;
@@ -816,11 +833,16 @@ pub struct FlowRecord {
     pub sport: u16,
     pub dport: u16,
     pub proto: u8,
-    /// `FLOW_FORWARDED` / `FLOW_DROPPED` / `FLOW_TRANSLATED`.
+    /// `FLOW_FORWARDED` / `FLOW_DROPPED` / `FLOW_TRANSLATED` / `FLOW_AUDITED`.
     pub verdict: u8,
     /// `FLOW_DIR_*`.
     pub dir: u8,
     pub _pad: u8,
+    /// Policy verdicts (`FLOW_DROPPED`/`FLOW_AUDITED` from the policy
+    /// engine): the peer identity the rules were matched against (source
+    /// identity for ingress, destination for egress). 0 = not a policy
+    /// verdict / unknown.
+    pub peer_identity: u32,
 }
 
 // ============================== L7 proxy ===================================

@@ -298,6 +298,9 @@ pub struct PolicyCfg {
     pub enforce_egress: bool,
     #[serde(default)]
     pub egress_rules: Vec<PolicyRuleCfg>,
+    /// Audit mode: report denied verdicts, forward the packets.
+    #[serde(default)]
+    pub audit: bool,
 }
 
 fn default_true() -> bool {
@@ -685,8 +688,15 @@ impl Config {
             };
             let rules = as_tuples(&pol.rules)?;
             let egress_rules = as_tuples(&pol.egress_rules)?;
-            ctl.set_endpoint_policy(ep, pol.enforce, pol.enforce_egress, &rules, &egress_rules)
-                .await?;
+            ctl.set_endpoint_policy(
+                ep,
+                pol.enforce,
+                pol.enforce_egress,
+                pol.audit,
+                &rules,
+                &egress_rules,
+            )
+            .await?;
         }
 
         for svc in &self.l7_services {

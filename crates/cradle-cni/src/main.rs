@@ -460,6 +460,7 @@ async fn plumb(
     }
 
     cl.create_endpoint(pb::CniEndpoint {
+        policy_revision: 0, // server-owned; ignored on create
         container_id: env.container_id.clone(),
         ifname: env.ifname.clone(),
         netns: env.netns.clone(),
