@@ -217,6 +217,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                                 identity: r.identity,
                                 proto: config::rule_proto(&r.proto)? as u32,
                                 port: r.port as u32,
+                                deny: r.deny,
                             })
                         })
                         .collect()

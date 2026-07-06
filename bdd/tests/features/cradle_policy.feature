@@ -83,6 +83,14 @@ Feature: Network policy in the eBPF datapath
     Then ping from "pod1" to "10.244.0.3" should succeed
     And ping from "host1" to "10.244.0.3" should fail
 
+  Scenario: Deny rule wins over a wildcard allow
+    Given the test topology exists
+    # pod2 allows any peer (identity 0) but denies pod1's identity — the
+    # deny wins at any specificity (Cilium deny semantics).
+    When I apply cradle config "policy-deny.json" to namespace "node" via gRPC as "ctl"
+    Then ping from "host1" to "10.244.0.3" should eventually succeed
+    And ping from "pod1" to "10.244.0.3" should fail
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop HTTP in namespace "pod1"

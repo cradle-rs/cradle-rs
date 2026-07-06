@@ -1,7 +1,7 @@
 # Network policy in the cradle datapath (story 2 / M8)
 
-Status: **Phases 1–2 of [`policy-multitenant.md`](policy-multitenant.md)
-implemented** — atomic per-endpoint policy replacement (A/B generation
+Status: **Phases 1–2 plus phase-3 deny rules and enforcement modes of
+[`policy-multitenant.md`](policy-multitenant.md) implemented** — atomic per-endpoint policy replacement (A/B generation
 flip), audit mode, per-endpoint policy revisions (CiliumEndpoint
 `status.policy.revision`), Hubble policy verdicts carrying the peer
 identity, plus the full phase-1 surface: Kubernetes `NetworkPolicy` ingress **and egress**, IPv4 and
@@ -49,7 +49,13 @@ bounded wildcard fallback, most-specific first — six probes per direction:
 ```
 
 The peer whose identity is matched is the *remote* end: the source for
-ingress rules, the destination for egress rules.
+ingress rules, the destination for egress rules. Rules carry a verdict
+value (`POLICY_ALLOW`/`POLICY_DENY`): the datapath walks all six probes
+and a **deny at any specificity wins over any allow** (Cilium deny-rule
+semantics) — allow requires at least one allow hit and no deny hit.
+`cradle-k8s --policy-enforcement default|always|never` selects the
+enforcement mode (`always` = default-deny endpoints nothing selects, host
+allow only; `never` = translate but don't apply).
 
 **Statefulness**: Kubernetes policy is stateful in both directions, tracked
 in `PCT`/`PCT6` (an LRU conntrack for policy, separate from the NAT `CT`):

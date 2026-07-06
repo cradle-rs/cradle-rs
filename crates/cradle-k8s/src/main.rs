@@ -65,6 +65,12 @@ struct Args {
     /// this node's endpoints (docs/design/policy.md).
     #[arg(long)]
     enforce_policy: bool,
+    /// Policy enforcement mode: `default` = Kubernetes semantics (enforce
+    /// only endpoints a policy selects), `always` = default-deny every
+    /// endpoint (host allow only when nothing selects it), `never` =
+    /// enforcement off (policies still translated but not applied).
+    #[arg(long, default_value = "default")]
+    policy_enforcement: String,
 }
 
 fn connect_uri(ep: &str) -> String {
@@ -111,7 +117,11 @@ async fn main() -> Result<()> {
     }
 
     if args.enforce_policy {
-        tokio::spawn(policy_task(client.clone(), args.grpc.clone()));
+        tokio::spawn(policy_task(
+            client.clone(),
+            args.grpc.clone(),
+            args.policy_enforcement.clone(),
+        ));
     }
 
     service_sync(client, &args.grpc, args.resync_secs, args.node_name.clone()).await
@@ -132,7 +142,7 @@ async fn node_internal_ip(client: &Client, node: &Option<String>) -> Option<std:
 /// NetworkPolicy enforcement loop: watch Pods/Namespaces/NetworkPolicies and,
 /// on any change (plus a periodic tick), push identities + per-endpoint
 /// ingress policy for this node's endpoints to the daemon.
-async fn policy_task(client: Client, grpc: String) {
+async fn policy_task(client: Client, grpc: String, mode: String) {
     use k8s_openapi::api::core::v1::{Namespace, Pod};
     use k8s_openapi::api::networking::v1::NetworkPolicy;
 
@@ -189,7 +199,7 @@ async fn policy_task(client: Client, grpc: String) {
                 continue;
             }
         };
-        if let Err(e) = push_policy(cl, &pl, &nl, &npl, &endpoints, &mut last_cidrs).await {
+        if let Err(e) = push_policy(cl, &pl, &nl, &npl, &endpoints, &mut last_cidrs, &mode).await {
             warn!("enforce-policy: {e:#}");
             cradle = None;
         }
@@ -203,6 +213,7 @@ async fn push_policy(
     policies: &[k8s_openapi::api::networking::v1::NetworkPolicy],
     endpoints: &[pb::CniEndpoint],
     last_cidrs: &mut Vec<(String, u32)>,
+    mode: &str,
 ) -> Result<()> {
     for (ip, id) in netpol::identities(pods) {
         cl.set_identity(pb::Identity { ip, identity: id }).await?;
@@ -232,7 +243,31 @@ async fn push_policy(
         if ep.pod_name.is_empty() {
             continue;
         }
-        let policy = netpol::endpoint_policy(ep, policies, pods, namespaces);
+        let mut policy = netpol::endpoint_policy(ep, policies, pods, namespaces);
+        match mode {
+            // Enforcement off: translated but not applied.
+            "never" => {
+                policy.enforce = false;
+                policy.enforce_egress = false;
+                policy.rules.clear();
+                policy.egress_rules.clear();
+            }
+            // Default-deny endpoints nothing selects (host allow only, so
+            // kubelet probes keep working).
+            "always" if !policy.enforce && !policy.enforce_egress => {
+                let host = pb::PolicyRule {
+                    identity: netpol::IDENTITY_HOST,
+                    proto: 0,
+                    port: 0,
+                    deny: false,
+                };
+                policy.enforce = true;
+                policy.enforce_egress = true;
+                policy.rules = vec![host];
+                policy.egress_rules = vec![host];
+            }
+            _ => {}
+        }
         cl.set_endpoint_policy(policy).await?;
     }
     Ok(())

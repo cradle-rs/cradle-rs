@@ -278,6 +278,7 @@ pub fn endpoint_policy(
         identity: IDENTITY_HOST,
         proto: 0,
         port: 0,
+        deny: false,
     };
     // Kubelet probes come from the node — always allowed inbound.
     let mut rules = vec![host_rule];
@@ -296,6 +297,7 @@ pub fn endpoint_policy(
                         identity,
                         proto: proto as u32,
                         port: port as u32,
+                        deny: false,
                     });
                 }
             }
@@ -316,6 +318,7 @@ pub fn endpoint_policy(
                         identity,
                         proto: proto as u32,
                         port: port as u32,
+                        deny: false,
                     });
                 }
             }

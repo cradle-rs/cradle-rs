@@ -11,7 +11,11 @@ as-built shape). Phase 2 note: the map-in-map spike found aya 0.14's
 outer map (legacy `bpf_map_def` carries no inner spec — BTF maps only), so
 the atomic swap ships as an A/B **generation flip** in the existing `POLICY`
 map; the inner-map design remains the target once aya-ebpf emits BTF maps.
-Phases 3+ remain plan. Builds on the implemented
+Phase 3 is partially implemented: deny rules with deny-over-allow
+precedence (`POLICY` values, walk-all-probes verdict — six lookups, not
+twelve) and enforcement modes (`--policy-enforcement`). Remaining:
+CiliumIdentity allocator, CiliumNetworkPolicy watcher, entities. Phases
+4+ remain plan. Builds on the implemented
 ingress-only IPv4 NetworkPolicy engine ([`policy.md`](policy.md)), the
 Cilium-compat groundwork ([`cni-cilium.md`](cni-cilium.md) story 2), and
 the program-structure analysis

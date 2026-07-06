@@ -1079,8 +1079,8 @@ impl Control {
         enforce: bool,
         enforce_egress: bool,
         audit: bool,
-        rules: &[(u32, u8, u16)],
-        egress_rules: &[(u32, u8, u16)],
+        rules: &[(u32, u8, u16, bool)],
+        egress_rules: &[(u32, u8, u16, bool)],
     ) -> Result<u64> {
         self.dp.lock().await.endpoint_policy_set(
             ep,
@@ -1905,9 +1905,9 @@ impl Cradle for GrpcService {
             .resolve_endpoint(&p.host_if, &p.pod_namespace, &p.pod_name)
             .await
             .map_err(st)?;
-        let as_tuples = |rs: &[pb::PolicyRule]| -> Vec<(u32, u8, u16)> {
+        let as_tuples = |rs: &[pb::PolicyRule]| -> Vec<(u32, u8, u16, bool)> {
             rs.iter()
-                .map(|r| (r.identity, r.proto as u8, r.port as u16))
+                .map(|r| (r.identity, r.proto as u8, r.port as u16, r.deny))
                 .collect()
         };
         let rules = as_tuples(&p.rules);
