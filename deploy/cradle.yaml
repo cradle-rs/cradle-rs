@@ -37,7 +37,7 @@ rules:
   resources: ["ciliumidentities"]
   verbs: ["get", "list", "watch", "create", "delete"]
 - apiGroups: ["cilium.io"]
-  resources: ["ciliumnetworkpolicies"]
+  resources: ["ciliumnetworkpolicies", "ciliumclusterwidenetworkpolicies"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["pods", "namespaces"]

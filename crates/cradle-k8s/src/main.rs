@@ -164,6 +164,7 @@ async fn policy_task(client: Client, grpc: String, mode: String) {
 
     let cid_api = identity::cilium_identity_api(&client);
     let cnp_api = cnp::cnp_api(&client);
+    let ccnp_api = cnp::ccnp_api(&client);
     let notify = Arc::new(Notify::new());
     tokio::spawn(watch_notify(pods.clone(), notify.clone()));
     tokio::spawn(watch_notify(policies.clone(), notify.clone()));
@@ -212,13 +213,19 @@ async fn policy_task(client: Client, grpc: String, mode: String) {
                 identity::Alloc::default()
             }
         };
-        let cnps = match cnp_api.list(&lp).await {
-            Ok(l) => cnp::parse(&l.items),
+        let mut cnps = match cnp_api.list(&lp).await {
+            Ok(l) => cnp::parse(&l.items, false),
             Err(e) => {
                 warn!("cnp list: {e} — CiliumNetworkPolicies skipped");
                 Vec::new()
             }
         };
+        // CiliumClusterwideNetworkPolicies apply across all namespaces; they
+        // merge into the same rule expansion (each carries clusterwide=true).
+        match ccnp_api.list(&lp).await {
+            Ok(l) => cnps.extend(cnp::parse(&l.items, true)),
+            Err(e) => warn!("ccnp list: {e} — clusterwide policies skipped"),
+        }
         let cl = cradle.as_mut().unwrap();
         // This node's endpoints from the daemon's store.
         let endpoints = match cl.list_endpoints(pb::Empty {}).await {
