@@ -39,26 +39,26 @@ use cradle_common::{
     BackendKey, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey,
     FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry,
     MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey,
-    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key,
-    AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN,
-    EP_F_INGRESS, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE, FIB_F_ECMP,
-    FIB_F_LOCAL, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
-    FLOW_TRANSLATED, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS, MPLS_OP_POP,
-    MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, PCT_INBOUND,
-    PCT_POD_INITIATED, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS,
-    POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
-    STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
-    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
-    STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY,
+    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key,
+    VrfIdKey, AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS,
+    EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
+    FIB_F_ECMP, FIB_F_LOCAL, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED,
+    FLOW_FORWARDED, FLOW_TRANSLATED, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
+    PCT_INBOUND, PCT_POD_INITIATED, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END,
+    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46,
+    SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
+    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
+    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD,
+    SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT,
+    STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD,
+    STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
+    STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH,
+    STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6,
+    STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM,
+    STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
+    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY,
     XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
 };
 use network_types::eth::EthHdr;
@@ -195,19 +195,19 @@ static AFFINITY: LruHashMap<AffinityKey, AffinityVal> = LruHashMap::with_max_ent
 static FLOWS: RingBuf = RingBuf::with_byte_size(1 << 22, 0);
 
 // --- network policy (docs/design/policy.md) ---
-/// Peer IPv4 (map-encoded) → identity. Miss = `CIDR_ID` LPM, then world.
+/// Peer `(vrf, IPv4)` → identity. Miss = `CIDR_ID` LPM, then world.
 #[map]
-static IDENTITY: HashMap<u32, u32> = HashMap::with_max_entries(65536, 0);
+static IDENTITY: HashMap<VrfIdKey, u32> = HashMap::with_max_entries(65536, 0);
 /// Peer CIDR → identity, consulted on `IDENTITY` miss (ipBlock peers; an
 /// `except` prefix is a more-specific entry mapping back to world).
 #[map]
-static CIDR_ID: LpmTrie<[u8; 4], u32> = LpmTrie::with_max_entries(4096, 0);
+static CIDR_ID: LpmTrie<Vrf4Key, u32> = LpmTrie::with_max_entries(4096, 0);
 /// Peer IPv6 → identity (v6 sibling of `IDENTITY`).
 #[map]
-static IDENTITY6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(65536, 0);
+static IDENTITY6: HashMap<VrfId6Key, u32> = HashMap::with_max_entries(65536, 0);
 /// Peer IPv6 CIDR → identity (v6 sibling of `CIDR_ID`).
 #[map]
-static CIDR_ID6: LpmTrie<[u8; 16], u32> = LpmTrie::with_max_entries(4096, 0);
+static CIDR_ID6: LpmTrie<Vrf6Key, u32> = LpmTrie::with_max_entries(4096, 0);
 /// Enforced endpoints: host-veth ifindex → `EP_F_*` direction bits.
 /// Miss = default-allow.
 #[map]
@@ -227,6 +227,7 @@ static PCT6: LruHashMap<CtKey6, u8> = LruHashMap::with_max_entries(65536, 0);
 #[repr(C)]
 struct Lpm6 {
     prefix_len: u32,
+    vrf_id: u32,
     data: [u8; 16],
 }
 
@@ -234,6 +235,7 @@ struct Lpm6 {
 #[repr(C)]
 struct Lpm4 {
     prefix_len: u32,
+    vrf_id: u32,
     data: [u8; 4],
 }
 
@@ -246,6 +248,8 @@ struct Lpm4 {
 struct PolicyScratch6 {
     key: CtKey6,
     lpm: Lpm6,
+    /// v6 exact-identity key (`IDENTITY6`), VRF-scoped.
+    id6key: VrfId6Key,
     key4: CtKey,
     lpm4: Lpm4,
     /// The peer identity the last `policy_denied*` resolved — read by the
@@ -398,11 +402,17 @@ fn ingress_policy(ctx: &TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE as i32);
     };
     let ep_flags = unsafe { *ep_flags };
+    // Identity scope: the endpoint port's VRF (tenants may reuse addresses).
+    let vrf = match PORTS.get_ptr(&oif) {
+        Some(p) => unsafe { (*p).vrf_id },
+        None => 0,
+    };
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).map_err(|_| ())?;
     match u16::from_be(ethertype) {
         ETH_P_IP => {
             if ep_flags & EP_F_INGRESS != 0
-                && policy_denied(ctx, oif, dir_gen(ep_flags, POLICY_DIR_INGRESS)).unwrap_or(true)
+                && policy_denied(ctx, oif, dir_gen(ep_flags, POLICY_DIR_INGRESS), vrf)
+                    .unwrap_or(true)
             {
                 if ep_flags & EP_F_AUDIT != 0 {
                     // Audit mode: report the verdict, forward the packet.
@@ -422,7 +432,8 @@ fn ingress_policy(ctx: &TcContext) -> Result<i32, ()> {
         }
         ETH_P_IPV6 => {
             if ep_flags & EP_F_INGRESS != 0
-                && policy_denied_v6(ctx, oif, dir_gen(ep_flags, POLICY_DIR_INGRESS)).unwrap_or(true)
+                && policy_denied_v6(ctx, oif, dir_gen(ep_flags, POLICY_DIR_INGRESS), vrf)
+                    .unwrap_or(true)
             {
                 if ep_flags & EP_F_AUDIT != 0 {
                     stat_inc(STAT_POLICY_AUDIT);
@@ -815,7 +826,7 @@ fn dir_gen(ep_flags: u8, dir: u8) -> u8 {
 /// read back out of it, and the six wildcard probes are built from scalars
 /// — no `CtKey6` or probe array on the stack.
 #[inline(always)]
-fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
+fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8, vrf: u32) -> Result<bool, ()> {
     let proto: u8 = ctx.load(IP6_NEXTHDR_OFF).map_err(|_| ())?;
     let (sport, dport) = if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
         (
@@ -848,12 +859,15 @@ fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
         } else {
             &(*s).key.dst
         };
-        let identity = match IDENTITY6.get(&*peer) {
+        (*s).id6key.vrf_id = vrf;
+        core::ptr::copy_nonoverlapping(peer as *const u8, (*s).id6key.addr.as_mut_ptr(), 16);
+        let identity = match IDENTITY6.get(&(*s).id6key) {
             Some(id) => *id,
             None => {
-                (*s).lpm.prefix_len = 128;
+                (*s).lpm.prefix_len = 32 + 128;
+                (*s).lpm.vrf_id = vrf;
                 core::ptr::copy_nonoverlapping(peer as *const u8, (*s).lpm.data.as_mut_ptr(), 16);
-                let lpm = core::ptr::addr_of!((*s).lpm) as *const Key<[u8; 16]>;
+                let lpm = core::ptr::addr_of!((*s).lpm) as *const Key<Vrf6Key>;
                 match CIDR_ID6.get(&*lpm) {
                     Some(&id) => id,
                     None => IDENTITY_WORLD,
@@ -893,7 +907,7 @@ fn policy_denied_v6(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
 /// the real peer, not a service VIP.
 ///
 #[inline(always)]
-fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
+fn policy_denied(ctx: &TcContext, ep: u32, dir: u8, vrf: u32) -> Result<bool, ()> {
     let proto: u8 = ctx.load(IP_PROTO_OFF).map_err(|_| ())?;
     let src: u32 = ctx.load(IP_SRC_OFF).map_err(|_| ())?;
     let dst: u32 = ctx.load(IP_DST_OFF).map_err(|_| ())?;
@@ -933,12 +947,18 @@ fn policy_denied(ctx: &TcContext, ep: u32, dir: u8) -> Result<bool, ()> {
     } else {
         src
     };
-    let identity = match unsafe { IDENTITY.get(&peer) } {
+    let identity = match unsafe {
+        IDENTITY.get(&VrfIdKey {
+            vrf_id: vrf,
+            addr: peer,
+        })
+    } {
         Some(id) => *id,
         None => unsafe {
-            (*s).lpm4.prefix_len = 32;
+            (*s).lpm4.prefix_len = 32 + 32;
+            (*s).lpm4.vrf_id = vrf;
             (*s).lpm4.data = peer.to_ne_bytes();
-            let lpm = core::ptr::addr_of!((*s).lpm4) as *const Key<[u8; 4]>;
+            let lpm = core::ptr::addr_of!((*s).lpm4) as *const Key<Vrf4Key>;
             match CIDR_ID.get(&*lpm) {
                 Some(&id) => id,
                 None => IDENTITY_WORLD,
@@ -1658,7 +1678,8 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
         if let Some(ep_flags) = EP_POLICY.get_ptr(&from_ep) {
             let ep_flags = unsafe { *ep_flags };
             if ep_flags & EP_F_EGRESS != 0
-                && policy_denied(ctx, from_ep, dir_gen(ep_flags, POLICY_DIR_EGRESS)).unwrap_or(true)
+                && policy_denied(ctx, from_ep, dir_gen(ep_flags, POLICY_DIR_EGRESS), port_vrf)
+                    .unwrap_or(true)
             {
                 if ep_flags & EP_F_AUDIT != 0 {
                     stat_inc(STAT_POLICY_AUDIT);
@@ -1839,7 +1860,7 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
         if let Some(ep_flags) = EP_POLICY.get_ptr(&from_ep) {
             let ep_flags = unsafe { *ep_flags };
             if ep_flags & EP_F_EGRESS != 0
-                && policy_denied_v6(ctx, from_ep, dir_gen(ep_flags, POLICY_DIR_EGRESS))
+                && policy_denied_v6(ctx, from_ep, dir_gen(ep_flags, POLICY_DIR_EGRESS), port_vrf)
                     .unwrap_or(true)
             {
                 if ep_flags & EP_F_AUDIT != 0 {

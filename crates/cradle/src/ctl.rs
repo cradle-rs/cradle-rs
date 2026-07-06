@@ -197,6 +197,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     .set_identity(pb::Identity {
                         ip: i.ip.clone(),
                         identity: i.id,
+                        vrf_id: i.vrf,
                     })
                     .await?;
             }
@@ -206,6 +207,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         cidr: c.cidr.clone(),
                         identity: c.id,
                         del: false,
+                        vrf_id: c.vrf,
                     })
                     .await?;
             }

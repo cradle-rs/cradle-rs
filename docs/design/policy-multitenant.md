@@ -20,7 +20,17 @@ absent; GC is a follow-up), and a CiliumNetworkPolicy watcher
 toPorts, ingressDeny/egressDeny, entities all/host/world/cluster —
 cluster expands to host + all allocated identities). Remaining phase-3
 tails: identity GC, CEP identity status, `cilium connectivity test`
-slices. Phases 4+ remain plan. Builds on the implemented
+slices. Phase 4's core is implemented: identity is **`(vrf, ip)`** —
+`IDENTITY`/`IDENTITY6` key on `VrfIdKey`/`VrfId6Key`, the CIDR LPMs on
+`Vrf4Key`/`Vrf6Key`, the ingress check scopes by the endpoint port's VRF
+and the egress check by the source port's; `SetIdentity`/`SetCidrIdentity`
+carry `vrf_id` (0 = global, so single-tenant deployments and the k8s
+controller are unchanged). Overlapping-CIDR tenancy is BDD-proven
+(`cradle_policy_vrf`: the same client IP is identity 100 in VRF 1 and 200
+in VRF 2, giving opposite verdicts under identical rules). Remaining
+phase-4 tails: namespace→VRF tenant mapping in cradle-k8s/CNI,
+per-tenant EVPN/SRv6 slice documentation, CiliumClusterwideNetworkPolicy,
+host endpoint. Phases 5+ remain plan. Builds on the implemented
 ingress-only IPv4 NetworkPolicy engine ([`policy.md`](policy.md)), the
 Cilium-compat groundwork ([`cni-cilium.md`](cni-cilium.md) story 2), and
 the program-structure analysis

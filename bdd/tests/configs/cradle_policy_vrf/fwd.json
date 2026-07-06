@@ -1,0 +1,2 @@
+{ "ports": [ {"name":"t1c","l3":true,"vrf":1}, {"name":"t1s","l3":true,"vrf":1},
+             {"name":"t2c","l3":true,"vrf":2}, {"name":"t2s","l3":true,"vrf":2} ] }

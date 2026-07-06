@@ -560,6 +560,25 @@ pub const PCT_POD_INITIATED: u8 = 1;
 /// ingress delivery, post-NAT) — its replies bypass the pod's egress policy.
 pub const PCT_INBOUND: u8 = 2;
 
+/// VRF-scoped identity key: tenants may reuse addresses, so "who is
+/// talking" is `(vrf, ip)` (docs/design/policy-multitenant.md phase 4).
+/// VRF 0 is the global table — single-tenant deployments never see another.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VrfIdKey {
+    pub vrf_id: u32,
+    /// IPv4, map-encoded (`u32::from_be_bytes(octets)`).
+    pub addr: u32,
+}
+
+/// v6 sibling of `VrfIdKey`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VrfId6Key {
+    pub vrf_id: u32,
+    pub addr: [u8; 16],
+}
+
 /// `POLICY` value: allow the matched traffic.
 pub const POLICY_ALLOW: u8 = 1;
 /// `POLICY` value: deny the matched traffic. Deny wins over allow at *any*
@@ -883,6 +902,8 @@ mod user {
         NhGroupKey,
         MplsEntry,
         Vrf4Key,
+        VrfIdKey,
+        VrfId6Key,
         Vrf6Key,
         LocalSid,
         Srv6Encap,

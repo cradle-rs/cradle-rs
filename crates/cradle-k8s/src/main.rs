@@ -251,7 +251,12 @@ async fn push_policy(
     cnps: &[cnp::Cnp],
 ) -> Result<()> {
     for (ip, id) in netpol::identities(pods, alloc) {
-        cl.set_identity(pb::Identity { ip, identity: id }).await?;
+        cl.set_identity(pb::Identity {
+            ip,
+            identity: id,
+            vrf_id: 0,
+        })
+        .await?;
     }
     // ipBlock CIDR bindings: set the current ones, delete the vanished ones.
     let cidrs = netpol::cidr_bindings(policies);
@@ -260,6 +265,7 @@ async fn push_policy(
             cidr: cidr.clone(),
             identity: *id,
             del: false,
+            vrf_id: 0,
         })
         .await?;
     }
@@ -269,6 +275,7 @@ async fn push_policy(
                 cidr: cidr.clone(),
                 identity: *id,
                 del: true,
+                vrf_id: 0,
             })
             .await?;
         }

@@ -1,0 +1,10 @@
+{
+  "identities": [
+    { "ip": "10.9.0.2", "id": 100, "vrf": 1 },
+    { "ip": "10.9.0.2", "id": 200, "vrf": 2 }
+  ],
+  "policies": [
+    { "host_if": "t1s", "enforce": true, "rules": [ { "identity": 100 } ] },
+    { "host_if": "t2s", "enforce": true, "rules": [ { "identity": 100 } ] }
+  ]
+}

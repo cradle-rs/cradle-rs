@@ -85,10 +85,10 @@ See [`tailcall-vs-monolithic.md`](tailcall-vs-monolithic.md).
 
 | Map | Type | Key → Value |
 |---|---|---|
-| `IDENTITY` | Hash | pod/node IPv4 → identity (u32) |
-| `IDENTITY6` | Hash | pod/node IPv6 → identity (u32) |
-| `CIDR_ID` | LpmTrie | peer CIDR (v4) → identity, on `IDENTITY` miss |
-| `CIDR_ID6` | LpmTrie | peer CIDR (v6) → identity, on `IDENTITY6` miss |
+| `IDENTITY` | Hash | `(vrf, IPv4)` → identity (u32; vrf 0 = global) |
+| `IDENTITY6` | Hash | `(vrf, IPv6)` → identity (u32) |
+| `CIDR_ID` | LpmTrie | `(vrf, CIDR)` (v4) → identity, on `IDENTITY` miss |
+| `CIDR_ID6` | LpmTrie | `(vrf, CIDR)` (v6) → identity, on `IDENTITY6` miss |
 | `EP_POLICY` | Hash | endpoint host-veth ifindex → `EP_F_INGRESS \| EP_F_EGRESS \| EP_F_AUDIT \| EP_F_GEN` |
 | `POLICY` | Hash | `PolicyKey{ep, identity, proto, port, dir\|gen}` → allow (u8) |
 | `PCT` / `PCT6` | LruHash | 5-tuple → `PCT_POD_INITIATED` / `PCT_INBOUND` |

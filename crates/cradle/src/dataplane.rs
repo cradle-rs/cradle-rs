@@ -22,10 +22,10 @@ use cradle_common::{
     Backend, Backend6, BackendKey, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
     GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, Vrf4Key, Vrf6Key, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS,
-    EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE,
-    NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
+    Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
+    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW, POLICY_DENY,
+    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -80,10 +80,10 @@ pub struct Dataplane {
     services6: HashMap<MapData, ServiceKey6, ServiceInfo>,
     backends6: HashMap<MapData, BackendKey, Backend6>,
     /// Ingress network policy (docs/design/policy.md).
-    identity: HashMap<MapData, u32, u32>,
-    identity6: HashMap<MapData, [u8; 16], u32>,
-    cidr_id: LpmTrie<MapData, [u8; 4], u32>,
-    cidr_id6: LpmTrie<MapData, [u8; 16], u32>,
+    identity: HashMap<MapData, VrfIdKey, u32>,
+    identity6: HashMap<MapData, VrfId6Key, u32>,
+    cidr_id: LpmTrie<MapData, Vrf4Key, u32>,
+    cidr_id6: LpmTrie<MapData, Vrf6Key, u32>,
     ep_policy: HashMap<MapData, u32, u8>,
     policy: HashMap<MapData, PolicyKey, u8>,
     /// Egress masquerade (docs/design/kube-proxy-dualstack.md).
@@ -374,15 +374,24 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Bind `ip` to a policy identity (`docs/design/policy.md`).
-    pub fn identity_set(&mut self, ip: std::net::Ipv4Addr, identity: u32) -> Result<()> {
-        self.identity.insert(util::ipv4_to_map(ip), identity, 0)?;
+    /// Bind `(vrf, ip)` to a policy identity (`docs/design/policy.md`;
+    /// vrf 0 = global — tenants may reuse addresses across VRFs).
+    pub fn identity_set(&mut self, vrf: u32, ip: std::net::Ipv4Addr, identity: u32) -> Result<()> {
+        let key = VrfIdKey {
+            vrf_id: vrf,
+            addr: util::ipv4_to_map(ip),
+        };
+        self.identity.insert(key, identity, 0)?;
         Ok(())
     }
 
     /// Remove an identity binding (idempotent).
-    pub fn identity_del(&mut self, ip: std::net::Ipv4Addr) -> Result<()> {
-        let _ = self.identity.remove(&util::ipv4_to_map(ip));
+    pub fn identity_del(&mut self, vrf: u32, ip: std::net::Ipv4Addr) -> Result<()> {
+        let key = VrfIdKey {
+            vrf_id: vrf,
+            addr: util::ipv4_to_map(ip),
+        };
+        let _ = self.identity.remove(&key);
         Ok(())
     }
 
@@ -390,12 +399,19 @@ impl Dataplane {
     /// binding (`del`, idempotent).
     pub fn cidr_identity_set(
         &mut self,
+        vrf: u32,
         net: std::net::Ipv4Addr,
         prefix_len: u8,
         identity: u32,
         del: bool,
     ) -> Result<()> {
-        let key = Key::new(prefix_len as u32, net.octets());
+        let key = Key::new(
+            32 + prefix_len as u32,
+            Vrf4Key {
+                vrf_id: vrf,
+                addr: net.octets(),
+            },
+        );
         if del {
             let _ = self.cidr_id.remove(&key);
         } else {
@@ -405,11 +421,21 @@ impl Dataplane {
     }
 
     /// v6 sibling of `identity_set` / `identity_del`.
-    pub fn identity6_set(&mut self, ip: Ipv6Addr, identity: u32, del: bool) -> Result<()> {
+    pub fn identity6_set(
+        &mut self,
+        vrf: u32,
+        ip: Ipv6Addr,
+        identity: u32,
+        del: bool,
+    ) -> Result<()> {
+        let key = VrfId6Key {
+            vrf_id: vrf,
+            addr: ip.octets(),
+        };
         if del {
-            let _ = self.identity6.remove(&ip.octets());
+            let _ = self.identity6.remove(&key);
         } else {
-            self.identity6.insert(ip.octets(), identity, 0)?;
+            self.identity6.insert(key, identity, 0)?;
         }
         Ok(())
     }
@@ -417,12 +443,19 @@ impl Dataplane {
     /// v6 sibling of `cidr_identity_set`.
     pub fn cidr6_identity_set(
         &mut self,
+        vrf: u32,
         net: Ipv6Addr,
         prefix_len: u8,
         identity: u32,
         del: bool,
     ) -> Result<()> {
-        let key = Key::new(prefix_len as u32, net.octets());
+        let key = Key::new(
+            32 + prefix_len as u32,
+            Vrf6Key {
+                vrf_id: vrf,
+                addr: net.octets(),
+            },
+        );
         if del {
             let _ = self.cidr_id6.remove(&key);
         } else {
