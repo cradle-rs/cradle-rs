@@ -3,6 +3,7 @@
 //! Drains the `FLOWS` eBPF ring buffer — one [`FlowRecord`] per forwarding
 //! verdict the datapath reaches (FORWARDED / DROPPED) — enriches each record
 //! into a Hubble [`flow::Flow`] (pod identity from the CNI endpoint store),
+//! and records the transparent L7 proxy's HTTP requests as L7 (HTTP) flows,
 //! keeps the most recent ones in an in-memory ring, and serves the subset of
 //! the `observer.Observer` gRPC service the stock `hubble` CLI drives over a
 //! unix socket (`--hubble-sock`, typically `/var/run/cilium/hubble.sock`):
@@ -60,6 +61,20 @@ struct State {
     node_name: String,
 }
 
+impl State {
+    /// Record one flow: fan it to `--follow` subscribers and append it to the
+    /// bounded in-memory ring (dropping the oldest when full).
+    async fn push(&self, f: flow::Flow) {
+        self.seen.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(f.clone()); // ok if no followers
+        let mut q = self.flows.lock().await;
+        if q.len() >= RING_CAP {
+            q.pop_front();
+        }
+        q.push_back(f);
+    }
+}
+
 /// Serve the Hubble Observer (+ Peer) API until the process exits, draining
 /// `flows_map` (the `FLOWS` ring buffer taken from the loaded eBPF object) in
 /// the background.
@@ -90,9 +105,27 @@ pub async fn serve(
     // Background: drain the ring buffer into the in-memory flow ring.
     {
         let state = state.clone();
+        let control = control.clone();
         tokio::spawn(async move {
             if let Err(e) = drain_loop(ring, control, state).await {
                 warn!("hubble flow drain stopped: {e:#}");
+            }
+        });
+    }
+
+    // Background: L7 (HTTP) flows from the transparent proxy. The proxy sends
+    // an `L7Event` per policy-observed request; we enrich and record it in the
+    // same flow ring, so `hubble observe --type l7` sees them.
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::l7::L7Event>();
+        control.set_l7_hubble_sink(tx).await;
+        let state = state.clone();
+        let control = control.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                let index = control.cni_ip_index().await;
+                let f = build_l7_flow(&ev, &index, &state.node_name);
+                state.push(f).await;
             }
         });
     }
@@ -155,13 +188,7 @@ async fn drain_loop(ring: RingBuf<MapData>, control: Control, state: Arc<State>)
                 let rec: FlowRecord =
                     unsafe { std::ptr::read_unaligned(item.as_ptr() as *const FlowRecord) };
                 let f = build_flow(&rec, &index, &state.node_name);
-                state.seen.fetch_add(1, Ordering::Relaxed);
-                let _ = state.tx.send(f.clone()); // ok if no followers
-                let mut q = state.flows.lock().await;
-                if q.len() >= RING_CAP {
-                    q.pop_front();
-                }
-                q.push_back(f);
+                state.push(f).await;
             }
         }
         guard.clear_ready();
@@ -228,21 +255,7 @@ fn build_flow(rec: &FlowRecord, index: &HashMap<Ipv4Addr, EpInfo>, node: &str) -
         _ => None,
     };
 
-    // An endpoint is emitted when we know anything about the IP (pod identity
-    // or a bound security identity); otherwise it stays unset (e.g. "world").
-    let endpoint = |ip: &Ipv4Addr| -> Option<flow::Endpoint> {
-        let info = index.get(ip)?;
-        if info.namespace.is_empty() && info.pod_name.is_empty() && info.identity == 0 {
-            return None;
-        }
-        Some(flow::Endpoint {
-            identity: info.identity,
-            namespace: info.namespace.clone(),
-            pod_name: info.pod_name.clone(),
-            labels: endpoint_labels(info),
-            ..Default::default()
-        })
-    };
+    let endpoint = |ip: &Ipv4Addr| endpoint_of(ip, index);
 
     // Policy verdicts carry the peer identity the rules were matched
     // against (CIDR-derived identities have no ipcache entry, so the
@@ -277,6 +290,81 @@ fn build_flow(rec: &FlowRecord, index: &HashMap<Ipv4Addr, EpInfo>, node: &str) -
         r#type: flow::FlowType::L3L4 as i32,
         node_name: node.to_string(),
         traffic_direction,
+        ..Default::default()
+    }
+}
+
+/// An endpoint is emitted when we know anything about the IP (pod identity
+/// or a bound security identity); otherwise it stays unset (e.g. "world").
+fn endpoint_of(ip: &Ipv4Addr, index: &HashMap<Ipv4Addr, EpInfo>) -> Option<flow::Endpoint> {
+    let info = index.get(ip)?;
+    if info.namespace.is_empty() && info.pod_name.is_empty() && info.identity == 0 {
+        return None;
+    }
+    Some(flow::Endpoint {
+        identity: info.identity,
+        namespace: info.namespace.clone(),
+        pod_name: info.pod_name.clone(),
+        labels: endpoint_labels(info),
+        ..Default::default()
+    })
+}
+
+/// Build a Hubble L7 (HTTP) flow from a proxy [`L7Event`](crate::l7::L7Event).
+/// The verdict maps allow→FORWARDED, deny→DROPPED; direction is INGRESS (the
+/// proxy enforces ingress L7). Endpoints are enriched from the CNI index.
+fn build_l7_flow(
+    ev: &crate::l7::L7Event,
+    index: &HashMap<Ipv4Addr, EpInfo>,
+    node: &str,
+) -> flow::Flow {
+    let (src, dst) = (
+        match ev.client.ip() {
+            std::net::IpAddr::V4(v4) => v4,
+            _ => Ipv4Addr::UNSPECIFIED,
+        },
+        match ev.dst.ip() {
+            std::net::IpAddr::V4(v4) => v4,
+            _ => Ipv4Addr::UNSPECIFIED,
+        },
+    );
+    let verdict = if ev.allowed {
+        flow::Verdict::Forwarded
+    } else {
+        flow::Verdict::Dropped
+    } as i32;
+    flow::Flow {
+        time: Some(now_ts()),
+        verdict,
+        ip: Some(flow::Ip {
+            source: src.to_string(),
+            destination: dst.to_string(),
+            ip_version: flow::IpVersion::IPv4 as i32,
+            ..Default::default()
+        }),
+        l4: Some(flow::Layer4 {
+            protocol: Some(flow::layer4::Protocol::Tcp(flow::Tcp {
+                source_port: ev.client.port() as u32,
+                destination_port: ev.dst.port() as u32,
+                flags: None,
+            })),
+        }),
+        l7: Some(flow::Layer7 {
+            r#type: flow::L7FlowType::Request as i32,
+            latency_ns: 0,
+            record: Some(flow::layer7::Record::Http(flow::Http {
+                code: 0,
+                method: ev.method.clone(),
+                url: ev.path.clone(),
+                protocol: "HTTP/1.1".into(),
+                headers: Vec::new(),
+            })),
+        }),
+        source: endpoint_of(&src, index),
+        destination: endpoint_of(&dst, index),
+        r#type: flow::FlowType::L7 as i32,
+        node_name: node.to_string(),
+        traffic_direction: flow::TrafficDirection::Ingress as i32,
         ..Default::default()
     }
 }
@@ -695,5 +783,53 @@ impl Peer for PeerSvc {
             Result<peer::ChangeNotification, Status>,
         >());
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::l7::L7Event;
+
+    #[test]
+    fn l7_flow_shape_and_verdict() {
+        let mut index = HashMap::new();
+        index.insert(
+            Ipv4Addr::new(10, 244, 0, 3),
+            EpInfo {
+                namespace: "default".into(),
+                pod_name: "web".into(),
+                identity: 200,
+            },
+        );
+        let ev = L7Event {
+            client: "10.244.0.2:44444".parse().unwrap(),
+            dst: "10.244.0.3:8080".parse().unwrap(),
+            method: "GET".into(),
+            path: "/api".into(),
+            allowed: true,
+        };
+        let f = build_l7_flow(&ev, &index, "node1");
+        assert_eq!(f.r#type, flow::FlowType::L7 as i32);
+        assert_eq!(f.verdict, flow::Verdict::Forwarded as i32);
+        let l7 = f.l7.expect("l7");
+        match l7.record {
+            Some(flow::layer7::Record::Http(h)) => {
+                assert_eq!(h.method, "GET");
+                assert_eq!(h.url, "/api");
+            }
+            _ => panic!("expected HTTP record"),
+        }
+        // Destination enriched from the index; a 403 maps to DROPPED.
+        assert_eq!(f.destination.as_ref().unwrap().identity, 200);
+        let denied = build_l7_flow(
+            &L7Event {
+                allowed: false,
+                ..ev
+            },
+            &index,
+            "node1",
+        );
+        assert_eq!(denied.verdict, flow::Verdict::Dropped as i32);
     }
 }

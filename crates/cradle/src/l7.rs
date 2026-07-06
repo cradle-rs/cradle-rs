@@ -35,6 +35,21 @@ pub struct L7PolicyRule {
     pub path: String,
 }
 
+/// An HTTP request the proxy handled under an L7 policy — emitted to Hubble
+/// as an L7 (HTTP) flow record. `allowed` is the policy verdict (false = the
+/// empty-403).
+#[derive(Clone, Debug)]
+pub struct L7Event {
+    pub client: SocketAddr,
+    pub dst: SocketAddr,
+    pub method: String,
+    pub path: String,
+    pub allowed: bool,
+}
+
+/// Sink the proxy pushes [`L7Event`]s into (Hubble registers the receiver).
+pub type L7Sink = tokio::sync::mpsc::UnboundedSender<L7Event>;
+
 /// A precompiled allow-rule: `path` full-matches the request path. A rule
 /// whose regex failed to compile falls back to `exact` string equality
 /// (fail closed toward the literal, never silently open).
@@ -85,12 +100,21 @@ pub struct RouteTable {
     /// original destination transparently (docs/design/policy.md phase 5).
     policies: std::collections::HashMap<SocketAddr, Vec<CompiledRule>>,
     services: HashMap<(IpAddr, u16), Vec<L7Route>>,
+    /// Where the proxy reports handled requests for Hubble L7 flows; `None`
+    /// until the Hubble server registers it.
+    hubble_sink: Option<L7Sink>,
 }
 
 impl RouteTable {
     pub fn set_policy(&mut self, dst: SocketAddr, rules: Vec<L7PolicyRule>) {
         self.policies
             .insert(dst, rules.iter().map(CompiledRule::compile).collect());
+    }
+
+    /// Register the Hubble L7 flow sink (called once when the Hubble API
+    /// starts).
+    pub fn set_hubble_sink(&mut self, sink: L7Sink) {
+        self.hubble_sink = Some(sink);
     }
 
     pub fn del_policy(&mut self, dst: &SocketAddr) {
@@ -162,6 +186,7 @@ pub async fn spawn_proxy(routes: SharedRoutes) -> Result<()> {
 async fn handle(mut client: TcpStream, routes: SharedRoutes) -> Result<()> {
     // Transparent accept: the socket's local address is the original VIP:port.
     let orig = client.local_addr().context("original destination")?;
+    let peer = client.peer_addr().ok();
 
     // Read the request head (request line + headers) to route on path/host.
     let mut head = vec![0u8; 8192];
@@ -169,7 +194,24 @@ async fn handle(mut client: TcpStream, routes: SharedRoutes) -> Result<()> {
     head.truncate(n);
     let (method, path, host) = parse_request(&head);
     // Ingress L7 policy: enforce the allow-list before any routing.
-    match routes.lock().await.policy_verdict(&orig, &method, &path) {
+    let (verdict, sink) = {
+        let rt = routes.lock().await;
+        (
+            rt.policy_verdict(&orig, &method, &path),
+            rt.hubble_sink.clone(),
+        )
+    };
+    // Report the HTTP request to Hubble as an L7 flow (policy-observed only).
+    if let (Some(allowed), Some(sink), Some(peer)) = (verdict, &sink, peer) {
+        let _ = sink.send(L7Event {
+            client: peer,
+            dst: orig,
+            method: method.clone(),
+            path: path.clone(),
+            allowed,
+        });
+    }
+    match verdict {
         Some(true) => {
             info!("L7 policy allow {method} {path} -> {orig}");
             return splice_to(client, orig, &head).await;

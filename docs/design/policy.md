@@ -128,8 +128,9 @@ destination; its onward connection is node-originated, so the L4 ingress
 verdict at delivery sees the host identity. CiliumNetworkPolicy
 `toPorts.rules.http` translates to the same surface (`path` is a
 regex full-matched against the request path, Cilium semantics — an
-invalid regex falls back to exact match). Egress L7 and Hubble L7
-records are follow-ups.
+invalid regex falls back to exact match). Each request the proxy handles is
+reported to Hubble as an L7 (HTTP) flow (`hubble observe --type l7` —
+method, path, verdict). Egress L7 is a follow-up.
 
 ## Control plane
 
