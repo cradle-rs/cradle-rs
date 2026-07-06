@@ -354,7 +354,10 @@ async fn push_policy(
 /// Missing CRDs (or an unreachable daemon) warn and retry — publication
 /// starts working as soon as both are available.
 async fn publish_crds_task(client: Client, node: String, grpc: String) {
+    use k8s_openapi::api::core::v1::Pod;
     let nodes: Api<Node> = Api::all(client.clone());
+    let pods: Api<Pod> = Api::all(client.clone());
+    let cid_api = identity::cilium_identity_api(&client);
     let mut cradle: Option<CradleClient<tonic::transport::Channel>> = None;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -402,10 +405,54 @@ async fn publish_crds_task(client: Client, node: String, grpc: String) {
                 continue;
             }
         };
-        if let Err(e) = cep::publish(&client, &node, &node_ip, &pod_cidr, &endpoints).await {
+        // Resolve each endpoint's security identity for status.identity —
+        // adopt existing CiliumIdentities read-only (the enforce-policy loop
+        // owns creation), FNV fallback otherwise. Best-effort: a listing
+        // failure just publishes CEPs without the identity field.
+        let identities = build_cep_identities(&pods, &cid_api, &endpoints).await;
+        if let Err(e) =
+            cep::publish(&client, &node, &node_ip, &pod_cidr, &endpoints, &identities).await
+        {
             warn!("publish-crds: {e:#} (are the cilium.io CRDs installed?)");
         }
     }
+}
+
+/// Resolve each Kubernetes endpoint's security identity (id + label list)
+/// for `CiliumEndpoint.status.identity`. Read-only against the pods and the
+/// CiliumIdentity CRDs; any listing failure yields an empty map (CEPs
+/// publish without the identity field rather than failing).
+async fn build_cep_identities(
+    pods: &Api<k8s_openapi::api::core::v1::Pod>,
+    cid_api: &Api<kube::core::DynamicObject>,
+    endpoints: &[pb::CniEndpoint],
+) -> std::collections::BTreeMap<(String, String), cep::CepIdentity> {
+    use kube::ResourceExt as _;
+    let Ok(pod_list) = pods.list(&kube::api::ListParams::default()).await else {
+        return Default::default();
+    };
+    let pod_list = pod_list.items;
+    let alloc = identity::resolve_only(cid_api, &pod_list)
+        .await
+        .unwrap_or_default();
+    endpoints
+        .iter()
+        .filter(|ep| !ep.pod_name.is_empty() && !ep.pod_namespace.is_empty())
+        .filter_map(|ep| {
+            let pod = pod_list.iter().find(|p| {
+                p.namespace().as_deref() == Some(ep.pod_namespace.as_str())
+                    && p.name_any() == ep.pod_name
+            })?;
+            let labels = pod.metadata.labels.clone().unwrap_or_default();
+            Some((
+                (ep.pod_namespace.clone(), ep.pod_name.clone()),
+                cep::CepIdentity {
+                    id: alloc.resolve(&ep.pod_namespace, &labels),
+                    labels: identity::label_list(&ep.pod_namespace, &labels),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Watch a resource kind purely as a change signal.

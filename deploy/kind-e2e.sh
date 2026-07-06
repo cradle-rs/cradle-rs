@@ -52,6 +52,11 @@ check_crds() {
             kubectl get ciliumnode "$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')" \
                 -o jsonpath='{.metadata.name} podCIDRs={.spec.ipam.podCIDRs}{"\n"}'
             echo "✓ $CEPS CiliumEndpoints published for $PODS running pods"
+            # Every published CEP carries a security identity (FNV fallback
+            # here, since this cluster runs without --enforce-policy).
+            IDS=$(kubectl get ciliumendpoints -o jsonpath='{range .items[*]}{.status.identity.id}{"\n"}{end}' 2>/dev/null | grep -c '[1-9]' || true)
+            [ "${IDS:-0}" -ge "$PODS" ] || { echo "✗ CEPs missing status.identity.id (got ${IDS:-0} for $PODS)" >&2; exit 1; }
+            echo "✓ all $IDS CiliumEndpoints carry a security identity"
             return 0
         fi
         sleep 2

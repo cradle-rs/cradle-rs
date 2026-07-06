@@ -25,6 +25,15 @@ use crate::pb;
 /// Label scoping the objects this node's publisher owns.
 pub const NODE_LABEL: &str = "cradle.io/node";
 
+/// The security identity for a CEP's `status.identity`: the numeric id the
+/// datapath enforces on (allocated or FNV-hashed) plus the label set in
+/// Cilium's `k8s:` list form.
+#[derive(Clone, Default)]
+pub struct CepIdentity {
+    pub id: u32,
+    pub labels: Vec<String>,
+}
+
 pub fn cep_resource() -> ApiResource {
     ApiResource::from_gvk(&GroupVersionKind::gvk("cilium.io", "v2", "CiliumEndpoint"))
 }
@@ -37,12 +46,30 @@ pub fn cilium_node_resource() -> ApiResource {
 /// tooling reads are filled: `status.state`, `status.networking.addressing`
 /// (the `kubectl get cep` IPv4 column), `status.networking.node`, and the
 /// endpoint id (the host ifindex — stable while the veth lives).
-pub fn cep_object(node: &str, node_ip: &str, ep: &pb::CniEndpoint) -> Value {
+pub fn cep_object(
+    node: &str,
+    node_ip: &str,
+    ep: &pb::CniEndpoint,
+    identity: Option<&CepIdentity>,
+) -> Value {
     let mut networking = json!({
         "addressing": [ { "ipv4": ep.ip } ],
     });
     if !node_ip.is_empty() {
         networking["node"] = json!(node_ip);
+    }
+    let mut status = json!({
+        "id": ep.host_ifindex,
+        "state": "ready",
+        "networking": networking,
+        // The daemon's per-endpoint policy revision (0 = never
+        // programmed) — the observable for "policy realized".
+        "policy": { "revision": ep.policy_revision },
+    });
+    // The security identity the datapath enforces on — `kubectl get cep`'s
+    // SECURITY IDENTITY column, and what ties a CEP to its CiliumIdentity.
+    if let Some(id) = identity {
+        status["identity"] = json!({ "id": id.id, "labels": id.labels });
     }
     json!({
         "apiVersion": "cilium.io/v2",
@@ -52,14 +79,7 @@ pub fn cep_object(node: &str, node_ip: &str, ep: &pb::CniEndpoint) -> Value {
             "namespace": ep.pod_namespace,
             "labels": { NODE_LABEL: node },
         },
-        "status": {
-            "id": ep.host_ifindex,
-            "state": "ready",
-            "networking": networking,
-            // The daemon's per-endpoint policy revision (0 = never
-            // programmed) — the observable for "policy realized".
-            "policy": { "revision": ep.policy_revision },
-        },
+        "status": status,
     })
 }
 
@@ -89,15 +109,15 @@ pub fn desired_ceps(
     node: &str,
     node_ip: &str,
     endpoints: &[pb::CniEndpoint],
+    identities: &BTreeMap<(String, String), CepIdentity>,
 ) -> BTreeMap<(String, String), Value> {
     endpoints
         .iter()
         .filter(|ep| !ep.pod_name.is_empty() && !ep.pod_namespace.is_empty())
         .map(|ep| {
-            (
-                (ep.pod_namespace.clone(), ep.pod_name.clone()),
-                cep_object(node, node_ip, ep),
-            )
+            let key = (ep.pod_namespace.clone(), ep.pod_name.clone());
+            let obj = cep_object(node, node_ip, ep, identities.get(&key));
+            (key, obj)
         })
         .collect()
 }
@@ -111,11 +131,12 @@ pub async fn publish(
     node_ip: &str,
     pod_cidr: &str,
     endpoints: &[pb::CniEndpoint],
+    identities: &BTreeMap<(String, String), CepIdentity>,
 ) -> Result<()> {
     let ssapply = PatchParams::apply("cradle").force();
     let cep_ar = cep_resource();
 
-    let desired = desired_ceps(node, node_ip, endpoints);
+    let desired = desired_ceps(node, node_ip, endpoints, identities);
     for ((ns, name), obj) in &desired {
         let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &cep_ar);
         api.patch(name, &ssapply, &Patch::Apply(obj))
@@ -174,6 +195,7 @@ mod tests {
             "node1",
             "10.1.1.1",
             &ep("web-abc", "default", "10.244.0.2", 42),
+            None,
         );
         assert_eq!(obj["status"]["state"], "ready");
         assert_eq!(
@@ -184,6 +206,27 @@ mod tests {
         assert_eq!(obj["status"]["id"], 42);
         assert_eq!(obj["metadata"]["namespace"], "default");
         assert_eq!(obj["metadata"]["labels"][NODE_LABEL], "node1");
+        // No identity resolver → no status.identity (avoid a misleading 0).
+        assert!(obj["status"]["identity"].is_null());
+    }
+
+    #[test]
+    fn cep_carries_security_identity() {
+        let id = CepIdentity {
+            id: 12345,
+            labels: vec![
+                "k8s:app=web".into(),
+                "k8s:io.kubernetes.pod.namespace=default".into(),
+            ],
+        };
+        let obj = cep_object(
+            "node1",
+            "10.1.1.1",
+            &ep("web-abc", "default", "10.244.0.2", 42),
+            Some(&id),
+        );
+        assert_eq!(obj["status"]["identity"]["id"], 12345);
+        assert_eq!(obj["status"]["identity"]["labels"][0], "k8s:app=web");
     }
 
     #[test]
@@ -192,7 +235,7 @@ mod tests {
             ep("web-abc", "default", "10.244.0.2", 40),
             ep("", "", "10.244.0.3", 41), // no pod identity: BDD/manual attach
         ];
-        let desired = desired_ceps("node1", "", &eps);
+        let desired = desired_ceps("node1", "", &eps, &BTreeMap::new());
         assert_eq!(desired.len(), 1);
         assert!(desired.contains_key(&("default".to_string(), "web-abc".to_string())));
     }

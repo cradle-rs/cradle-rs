@@ -109,7 +109,10 @@ never observe a half-replaced table. The map-in-map inner-swap design is
 deferred until aya-ebpf can declare BTF maps (the aya 0.14 loader supports
 `HashOfMaps`, but legacy `bpf_map_def` declarations cannot carry the inner
 map spec). Each replacement bumps the endpoint's policy revision, published
-via `ListEndpoints` into the CiliumEndpoint CRD.
+via `ListEndpoints` into the CiliumEndpoint CRD, alongside
+`status.identity` (the endpoint's security identity id + label list,
+resolved read-only against the CiliumIdentity CRDs with the FNV
+fallback).
 
 **Ingress L7 policy (phase 5)**: `EndpointPolicy.l7` attaches per-port
 HTTP allow-lists (`L7Rule{method, path_prefix}`, empty = any). The
