@@ -6,8 +6,10 @@ flip), audit mode, per-endpoint policy revisions (CiliumEndpoint
 `status.policy.revision`), Hubble policy verdicts carrying the peer
 identity, plus the full phase-1 surface: Kubernetes `NetworkPolicy` ingress **and egress**, IPv4 and
 IPv6, `ipBlock` CIDR peers (with `except`), and named ports, in native
-(non-chained) CNI mode. L7 rules, `matchExpressions` selectors, and
-`CiliumNetworkPolicy` extensions are follow-ups (phases 3+).
+(non-chained) CNI mode. Ingress L7 (HTTP) policy is
+implemented (phase 5): per-port allow-lists steered through the
+transparent proxy. `matchExpressions` selectors, egress L7, and Hubble
+L7 flow records are follow-ups.
 
 ## Model
 
@@ -108,6 +110,18 @@ deferred until aya-ebpf can declare BTF maps (the aya 0.14 loader supports
 `HashOfMaps`, but legacy `bpf_map_def` declarations cannot carry the inner
 map spec). Each replacement bumps the endpoint's policy revision, published
 via `ListEndpoints` into the CiliumEndpoint CRD.
+
+**Ingress L7 policy (phase 5)**: `EndpointPolicy.l7` attaches per-port
+HTTP allow-lists (`L7Rule{method, path_prefix}`, empty = any). The
+control plane steers each `(pod-ip, port)` through the transparent proxy
+by inserting it into `L7_SERVICES` — the same `bpf_sk_assign` path the
+L7 load balancer uses, no new datapath code — and installs the
+allow-list in the proxy's route table. The proxy answers non-matching
+requests with an empty 403 and splices matches to the original
+destination; its onward connection is node-originated, so the L4 ingress
+verdict at delivery sees the host identity. CiliumNetworkPolicy
+`toPorts.rules.http` translates to the same surface (path as prefix;
+regex is a follow-up, as are egress L7 and Hubble L7 records).
 
 ## Control plane
 

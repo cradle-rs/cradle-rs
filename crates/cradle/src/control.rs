@@ -107,6 +107,9 @@ pub struct EpInfo {
 }
 
 /// Shared, cheaply-cloneable handle to the data plane.
+/// Per-endpoint (pod-ip, port)s currently steered through the L7 proxy.
+type L7Programmed = HashMap<u32, Vec<(Ipv4Addr, u16)>>;
+
 #[derive(Clone)]
 pub struct Control {
     bpf: Arc<Mutex<Ebpf>>,
@@ -130,7 +133,7 @@ pub struct Control {
     /// (0 = never programmed). Published via ListEndpoints → CiliumEndpoint.
     policy_revisions: Arc<Mutex<HashMap<u32, u64>>>,
     /// L7-steered (ip, port)s programmed per endpoint — replace semantics.
-    l7_policies: Arc<Mutex<HashMap<u32, Vec<(Ipv4Addr, u16)>>>>,
+    l7_policies: Arc<Mutex<L7Programmed>>,
 }
 
 impl Control {
@@ -1089,6 +1092,7 @@ impl Control {
     }
 
     /// Replace an endpoint's policy (see `Dataplane::endpoint_policy_set`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_endpoint_policy(
         &self,
         ep: u32,
@@ -1145,6 +1149,10 @@ impl Control {
         let mut new_set = Vec::new();
         if let Some(ip) = ip {
             for (port, rules) in l7 {
+                info!(
+                    "endpoint {ep}: L7 policy steer {ip}:{port} ({} rule(s))",
+                    rules.len()
+                );
                 self.dp.lock().await.l7_service_add(ip, *port)?;
                 self.routes
                     .lock()

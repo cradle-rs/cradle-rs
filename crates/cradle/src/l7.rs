@@ -178,3 +178,28 @@ fn parse_request(head: &[u8]) -> (String, String, Option<String>) {
         .map(|l| l[5..].trim().to_string());
     (method, path, host)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_verdict_matches_method_and_prefix() {
+        let mut rt = RouteTable::default();
+        let dst: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        rt.set_policy(
+            dst,
+            vec![L7PolicyRule {
+                method: "GET".into(),
+                path_prefix: "/allowed".into(),
+            }],
+        );
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed/x"), Some(true));
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/secret"), Some(false));
+        assert_eq!(rt.policy_verdict(&dst, "POST", "/allowed"), Some(false));
+        let other: SocketAddr = "10.0.0.3:8080".parse().unwrap();
+        assert_eq!(rt.policy_verdict(&other, "GET", "/allowed"), None);
+        rt.del_policy(&dst);
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed"), None);
+    }
+}
