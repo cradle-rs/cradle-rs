@@ -60,6 +60,77 @@ pub fn cilium_identity_api(client: &Client) -> Api<DynamicObject> {
     Api::all_with(client.clone(), &ApiResource::from_gvk(&gvk))
 }
 
+/// The CID `security-labels` join key for a label set (matches how existing
+/// CiliumIdentities are keyed on read).
+fn cid_key(namespace: &str, labels: &BTreeMap<String, String>) -> String {
+    security_labels(namespace, labels)
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// List every CiliumIdentity as `cid_key → id` (adoption table).
+async fn list_cids(api: &Api<DynamicObject>) -> Result<HashMap<String, u32>> {
+    use kube::ResourceExt as _;
+    let mut out = HashMap::new();
+    for cid in api.list(&ListParams::default()).await?.items {
+        let Ok(id) = cid.name_any().parse::<u32>() else {
+            continue;
+        };
+        let labels: BTreeMap<String, String> = cid
+            .data
+            .get("security-labels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let key = labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        out.insert(key, id);
+    }
+    Ok(out)
+}
+
+/// Re-key an adoption table by the canonical `labels_key` form `resolve`
+/// uses, for the label sets the given pods carry.
+fn rekey_for_pods(
+    cids: &HashMap<String, u32>,
+    pods: &[k8s_openapi::api::core::v1::Pod],
+) -> HashMap<String, u32> {
+    use kube::ResourceExt as _;
+    pods.iter()
+        .filter_map(|pod| {
+            let ns = pod.namespace().unwrap_or_default();
+            let labels = pod.metadata.labels.clone().unwrap_or_default();
+            cids.get(&cid_key(&ns, &labels))
+                .map(|id| (labels_key(&ns, &labels), *id))
+        })
+        .collect()
+}
+
+/// Read-only allocation table: adopt existing CiliumIdentities without
+/// creating any (the enforce-policy loop owns creation). Pods whose set has
+/// no CID fall back to the FNV hash via `Alloc::resolve`. Used by the CRD
+/// publisher, which must not race the allocator on creation.
+pub async fn resolve_only(
+    api: &Api<DynamicObject>,
+    pods: &[k8s_openapi::api::core::v1::Pod],
+) -> Result<Alloc> {
+    let cids = list_cids(api).await?;
+    Ok(Alloc(rekey_for_pods(&cids, pods)))
+}
+
+/// A label set in Cilium's `["k8s:key=value", ...]` list form — the shape
+/// `CiliumEndpoint.status.identity.labels` uses.
+pub fn label_list(namespace: &str, labels: &BTreeMap<String, String>) -> Vec<String> {
+    security_labels(namespace, labels)
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect()
+}
+
 /// Reconcile the allocation table against the CiliumIdentity CRDs: adopt
 /// every existing CID, then create one for each pod label set that has
 /// none. Never deletes (GC is a follow-up; a stale CID only wastes a
@@ -71,35 +142,19 @@ pub async fn ensure_identities(
 ) -> Result<Alloc> {
     use kube::ResourceExt as _;
 
-    let mut alloc = HashMap::new();
-    let mut max_id = FIRST_ID - 1;
-    for cid in api.list(&ListParams::default()).await?.items {
-        let Ok(id) = cid.name_any().parse::<u32>() else {
-            continue;
-        };
-        max_id = max_id.max(id);
-        let labels: BTreeMap<String, String> = cid
-            .data
-            .get("security-labels")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let key = labels
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(";");
-        alloc.insert(key, id);
-    }
+    let mut cids = list_cids(api).await?;
+    let mut max_id = cids
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(FIRST_ID - 1)
+        .max(FIRST_ID - 1);
 
     for pod in pods {
         let ns = pod.namespace().unwrap_or_default();
         let labels = pod.metadata.labels.clone().unwrap_or_default();
-        let key = security_labels(&ns, &labels)
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(";");
-        if alloc.contains_key(&key) {
+        let key = cid_key(&ns, &labels);
+        if cids.contains_key(&key) {
             continue;
         }
         max_id += 1;
@@ -118,7 +173,7 @@ pub async fn ensure_identities(
             .await
         {
             Ok(_) => {
-                alloc.insert(key, id);
+                cids.insert(key, id);
             }
             Err(e) => {
                 tracing::warn!("identity: creating CiliumIdentity {id}: {e}");
@@ -127,23 +182,7 @@ pub async fn ensure_identities(
         }
     }
 
-    // Re-key by the canonical labels_key form used by resolve().
-    let table = pods
-        .iter()
-        .filter_map(|pod| {
-            let ns = pod.namespace().unwrap_or_default();
-            let labels = pod.metadata.labels.clone().unwrap_or_default();
-            let cid_key = security_labels(&ns, &labels)
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(";");
-            alloc
-                .get(&cid_key)
-                .map(|id| (labels_key(&ns, &labels), *id))
-        })
-        .collect();
-    Ok(Alloc(table))
+    Ok(Alloc(rekey_for_pods(&cids, pods)))
 }
 
 /// The CRD's `security-labels` map for a pod label set (Cilium `k8s:` form).
