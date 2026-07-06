@@ -35,7 +35,7 @@ rules:
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["cilium.io"]
   resources: ["ciliumidentities"]
-  verbs: ["get", "list", "watch", "create"]
+  verbs: ["get", "list", "watch", "create", "delete"]
 - apiGroups: ["cilium.io"]
   resources: ["ciliumnetworkpolicies"]
   verbs: ["get", "list", "watch"]
@@ -110,6 +110,7 @@ spec:
         - --write-cni-conf=/host/etc/cni/net.d/05-cradle.conflist
         - --publish-crds
         - --enforce-policy
+        - --gc-identities
         env:
         - name: NODE_NAME
           valueFrom:

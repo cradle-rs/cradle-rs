@@ -22,7 +22,10 @@ with no identity). `0` is the wildcard in policy keys, never assigned.
 `ipBlock` peers get a derived CIDR identity (`cidr_identity()`), bound via
 the `CIDR_ID`/`CIDR_ID6` LPM maps and consulted on exact-identity miss; an
 `except` prefix is a more-specific binding back to world. The collision-free
-allocator is the phase-3 CiliumIdentity work.
+allocator is the phase-3 CiliumIdentity work; unreferenced identities
+are garbage-collected (`cradle-k8s --gc-identities`: mark-and-sweep
+against the cluster-wide CiliumEndpoint `status.identity` set, with a
+grace period so a fresh identity survives until its CEP is published).
 
 **Enforcement points** — one per direction, both on the pod's host-veth:
 

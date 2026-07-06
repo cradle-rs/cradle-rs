@@ -12,10 +12,10 @@
 //! allocator is disabled or a set isn't (yet) allocated, so non-Kubernetes
 //! deployments and the BDD gRPC path are unchanged.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
-use kube::api::{Api, DynamicObject, ListParams, PostParams};
+use kube::api::{Api, DeleteParams, DynamicObject, ListParams, PostParams};
 use kube::core::{ApiResource, GroupVersionKind};
 use kube::Client;
 use serde_json::json;
@@ -122,6 +122,46 @@ pub async fn resolve_only(
     Ok(Alloc(rekey_for_pods(&cids, pods)))
 }
 
+/// Every allocated CiliumIdentity id (all label sets, not just current pods').
+pub async fn all_cid_ids(api: &Api<DynamicObject>) -> Result<Vec<u32>> {
+    Ok(list_cids(api).await?.into_values().collect())
+}
+
+/// Mark-and-sweep GC plan. Given every CID id, the cluster-wide in-use id
+/// set, and prior consecutive-unreferenced strike counts, return the new
+/// strike counts and the ids to delete. Reserved ids (`< FIRST_ID`) are
+/// never touched; a referenced id clears its strikes; an id unreferenced
+/// for `grace` consecutive rounds is deleted. The grace period absorbs the
+/// lag between a CID's creation and its CEP appearing, and brief pod churn.
+pub fn gc_plan(
+    cids: &[u32],
+    in_use: &HashSet<u32>,
+    prev: &HashMap<u32, u32>,
+    grace: u32,
+) -> (HashMap<u32, u32>, Vec<u32>) {
+    let mut counts = HashMap::new();
+    let mut del = Vec::new();
+    for &id in cids {
+        if id < FIRST_ID || in_use.contains(&id) {
+            continue; // reserved or live → no strike
+        }
+        let n = prev.get(&id).copied().unwrap_or(0) + 1;
+        if n >= grace {
+            del.push(id);
+        } else {
+            counts.insert(id, n);
+        }
+    }
+    (counts, del)
+}
+
+/// Delete a CiliumIdentity by numeric id (idempotent; errors are logged).
+pub async fn delete_cid(api: &Api<DynamicObject>, id: u32) {
+    if let Err(e) = api.delete(&id.to_string(), &DeleteParams::default()).await {
+        tracing::warn!("identity GC: deleting CiliumIdentity {id}: {e}");
+    }
+}
+
 /// A label set in Cilium's `["k8s:key=value", ...]` list form — the shape
 /// `CiliumEndpoint.status.identity.labels` uses.
 pub fn label_list(namespace: &str, labels: &BTreeMap<String, String>) -> Vec<String> {
@@ -201,6 +241,24 @@ fn security_labels(namespace: &str, labels: &BTreeMap<String, String>) -> BTreeM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gc_reserved_and_grace() {
+        let cids = vec![1, 2, 256, 300, 301];
+        let in_use: HashSet<u32> = [256].into_iter().collect();
+        // Round 1: 300 and 301 unreferenced (1 strike); reserved (1,2) and
+        // in-use (256) untouched; nothing deleted at grace 2.
+        let (c1, d1) = gc_plan(&cids, &in_use, &HashMap::new(), 2);
+        assert!(d1.is_empty());
+        assert_eq!(c1.get(&300), Some(&1));
+        assert_eq!(c1.get(&301), Some(&1));
+        assert!(!c1.contains_key(&1) && !c1.contains_key(&256));
+        // Round 2: 301 comes back into use → clears; 300 hits grace → deleted.
+        let in_use2: HashSet<u32> = [256, 301].into_iter().collect();
+        let (c2, d2) = gc_plan(&cids, &in_use2, &c1, 2);
+        assert_eq!(d2, vec![300]);
+        assert!(!c2.contains_key(&301));
+    }
 
     #[test]
     fn resolve_prefers_allocation_over_hash() {

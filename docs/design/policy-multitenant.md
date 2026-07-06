@@ -19,8 +19,9 @@ absent; GC is a follow-up), and a CiliumNetworkPolicy watcher
 (L3/L4 subset: endpointSelector/fromEndpoints/toEndpoints matchLabels,
 toPorts, ingressDeny/egressDeny, entities all/host/world/cluster —
 cluster expands to host + all allocated identities). Remaining phase-3
-tails: identity GC, `cilium connectivity test` slices (CEP
-`status.identity` now published). Phase 4's core is implemented: identity is **`(vrf, ip)`** —
+tail: `cilium connectivity test` slices (CEP `status.identity`
+published; CiliumIdentity GC done — mark-and-sweep vs cluster-wide CEPs,
+`--gc-identities`). Phase 4's core is implemented: identity is **`(vrf, ip)`** —
 `IDENTITY`/`IDENTITY6` key on `VrfIdKey`/`VrfId6Key`, the CIDR LPMs on
 `Vrf4Key`/`Vrf6Key`, the ingress check scopes by the endpoint port's VRF
 and the egress check by the source port's; `SetIdentity`/`SetCidrIdentity`
