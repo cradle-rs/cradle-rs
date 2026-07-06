@@ -8,8 +8,11 @@
 //! `fromEntities`/`toEntities`: `all` → wildcard peer, `host` → reserved 1,
 //! `world` → reserved 2, `cluster` → the host plus every *allocated*
 //! identity (requires the CiliumIdentity allocator; without it the
-//! expansion degrades to host-only with a warning). L7 rules and
-//! `matchExpressions` are out of scope (phase 5 / follow-ups).
+//! expansion degrades to host-only with a warning). Ingress L7 HTTP rules
+//! (`toPorts.rules.http`) translate to per-port allow-lists. Both the
+//! namespaced `CiliumNetworkPolicy` and the cluster-scoped
+//! `CiliumClusterwideNetworkPolicy` (matches across all namespaces) are
+//! handled. `matchExpressions` is out of scope (follow-up).
 
 use std::collections::BTreeMap;
 
@@ -76,8 +79,9 @@ pub struct PortL7Rules {
     pub http: Vec<HttpRule>,
 }
 
-/// One allowed HTTP request shape (empty field = any). `path` is a prefix
-/// (Cilium uses regex; prefix is the phase-5 subset).
+/// One allowed HTTP request shape (empty field = any). `path` is a regex
+/// full-matched against the request path (Cilium semantics; enforced by the
+/// L7 proxy).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpRule {
@@ -97,8 +101,11 @@ pub struct Port {
 }
 
 /// A parsed CNP: its namespace, endpoint selector, and rule sets.
+/// `clusterwide` = a `CiliumClusterwideNetworkPolicy` (no namespace): its
+/// endpointSelector and peer selectors match across *all* namespaces.
 pub struct Cnp {
     pub namespace: String,
+    pub clusterwide: bool,
     pub spec: CnpSpec,
 }
 
@@ -107,9 +114,14 @@ pub fn cnp_api(client: &Client) -> Api<DynamicObject> {
     Api::all_with(client.clone(), &ApiResource::from_gvk(&gvk))
 }
 
-/// Parse the dynamic objects a CNP list call returns (unparseable specs are
-/// skipped with a warning — never fail the whole reconcile).
-pub fn parse(objs: &[DynamicObject]) -> Vec<Cnp> {
+pub fn ccnp_api(client: &Client) -> Api<DynamicObject> {
+    let gvk = GroupVersionKind::gvk("cilium.io", "v2", "CiliumClusterwideNetworkPolicy");
+    Api::all_with(client.clone(), &ApiResource::from_gvk(&gvk))
+}
+
+/// Parse the dynamic objects a (C)CNP list call returns (unparseable specs
+/// are skipped with a warning — never fail the whole reconcile).
+pub fn parse(objs: &[DynamicObject], clusterwide: bool) -> Vec<Cnp> {
     use kube::ResourceExt as _;
     objs.iter()
         .filter_map(|o| {
@@ -117,6 +129,7 @@ pub fn parse(objs: &[DynamicObject]) -> Vec<Cnp> {
             match serde_json::from_value::<CnpSpec>(spec.clone()) {
                 Ok(spec) => Some(Cnp {
                     namespace: o.namespace().unwrap_or_default(),
+                    clusterwide,
                     spec,
                 }),
                 Err(e) => {
@@ -141,6 +154,7 @@ fn peer_ids(
     peers: &[Selector],
     entities: &[String],
     policy_ns: &str,
+    clusterwide: bool,
     pods: &[k8s_openapi::api::core::v1::Pod],
     alloc: &Alloc,
 ) -> Vec<u32> {
@@ -149,8 +163,10 @@ fn peer_ids(
     for sel in peers {
         for pod in pods {
             let ns = pod.namespace().unwrap_or_default();
-            if ns != policy_ns {
-                continue; // namespace-scoped like fromEndpoints without a ns selector
+            // Namespaced CNP: fromEndpoints without a ns selector is same-
+            // namespace. Clusterwide: matches pods across all namespaces.
+            if !clusterwide && ns != policy_ns {
+                continue;
             }
             let labels = pod.metadata.labels.clone().unwrap_or_default();
             if selector_matches(sel, &labels) {
@@ -235,16 +251,22 @@ pub fn endpoint_rules(
     let mut l7 = Vec::new();
     let (mut any_in, mut any_eg) = (false, false);
     for cnp in cnps {
-        if cnp.namespace != ns || !selector_matches(&cnp.spec.endpoint_selector, pod_labels) {
+        // Namespaced CNP selects only its own namespace's endpoints;
+        // clusterwide CNP selects any namespace (endpointSelector still
+        // decides by labels).
+        if (!cnp.clusterwide && cnp.namespace != ns)
+            || !selector_matches(&cnp.spec.endpoint_selector, pod_labels)
+        {
             continue;
         }
+        let cw = cnp.clusterwide;
         let expand = |rules: &[Rule],
                       peers_of: for<'r> fn(&'r Rule) -> (&'r [Selector], &'r [String]),
                       deny: bool| {
             let mut out = Vec::new();
             for rule in rules {
                 let (peers, entities) = peers_of(rule);
-                for id in peer_ids(peers, entities, ns, pods, alloc) {
+                for id in peer_ids(peers, entities, ns, cw, pods, alloc) {
                     for (proto, port) in rule_ports(rule) {
                         out.push(pb::PolicyRule {
                             identity: id,
@@ -314,6 +336,7 @@ mod tests {
         .unwrap();
         let cnps = vec![Cnp {
             namespace: "default".into(),
+            clusterwide: false,
             spec,
         }];
         let (ing, eg, any_in, any_eg, _) = endpoint_rules(
@@ -340,6 +363,7 @@ mod tests {
         .unwrap();
         let cnps = vec![Cnp {
             namespace: "default".into(),
+            clusterwide: false,
             spec,
         }];
         let (_, _, any_in, _, l7) = endpoint_rules(
@@ -365,6 +389,7 @@ mod tests {
         .unwrap();
         let cnps = vec![Cnp {
             namespace: "default".into(),
+            clusterwide: false,
             spec,
         }];
         let (ing, _, any_in, _, _) = endpoint_rules(
@@ -375,5 +400,49 @@ mod tests {
             &Alloc::default(),
         );
         assert!(!any_in && ing.is_empty());
+    }
+
+    #[test]
+    fn clusterwide_ignores_namespace() {
+        let spec: CnpSpec = serde_json::from_value(serde_json::json!({
+            "endpointSelector": { "matchLabels": { "app": "web" } },
+            "ingress": [ { "fromEntities": ["world"] } ]
+        }))
+        .unwrap();
+        // No namespace; clusterwide selects the endpoint in any namespace.
+        let cnps = vec![Cnp {
+            namespace: String::new(),
+            clusterwide: true,
+            spec,
+        }];
+        let (ing, _, any_in, _, _) = endpoint_rules(
+            &cnps,
+            "kube-system", // an endpoint namespace ≠ the (empty) policy ns
+            &labels(&[("app", "web")]),
+            &[],
+            &Alloc::default(),
+        );
+        assert!(any_in);
+        assert!(ing.iter().any(|r| r.identity == IDENTITY_WORLD));
+
+        // A namespaced CNP with an empty namespace would NOT select it.
+        let spec2: CnpSpec = serde_json::from_value(serde_json::json!({
+            "endpointSelector": { "matchLabels": { "app": "web" } },
+            "ingress": [ { "fromEntities": ["world"] } ]
+        }))
+        .unwrap();
+        let ns_cnps = vec![Cnp {
+            namespace: String::new(),
+            clusterwide: false,
+            spec: spec2,
+        }];
+        let (_, _, any_in2, _, _) = endpoint_rules(
+            &ns_cnps,
+            "kube-system",
+            &labels(&[("app", "web")]),
+            &[],
+            &Alloc::default(),
+        );
+        assert!(!any_in2);
     }
 }
