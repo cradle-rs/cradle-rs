@@ -113,5 +113,6 @@ also emit Hubble `DROPPED` flows with the direction.
   world denied, and ipBlock CIDR with an `except` override.
 - BDD `cradle_policy_v6.feature`: v6 ingress on a plain L3 topology —
   deny, allow via a CIDR binding, allow via an exact v6 identity.
-- kind e2e: a `NetworkPolicy` phase in `deploy/kind-e2e.sh` — deny-then-allow
-  against the nginx ClusterIP, enforced by cradle (no Cilium installed).
+- kind e2e: two `NetworkPolicy` phases in `deploy/kind-e2e.sh` — ingress
+  deny-then-restore against a web pod, and egress default-deny-then-allow
+  on the client pod — both enforced by cradle (no Cilium installed).

@@ -116,6 +116,54 @@ EOF
     echo "✓ deleting the NetworkPolicy restores connectivity"
 }
 
+# Egress NetworkPolicy: default-deny-egress on the client must block its
+# curl to the web pod IP; adding an allow-to-web rule must restore it —
+# enforced at the client's veth hook in cradle's eBPF (policy Phase 1,
+# docs/design/policy.md). Direct pod IP: DNS to kube-dns would also be
+# denied under default-deny egress and mask the real signal.
+check_egress_policy() {
+    echo "==> checking egress NetworkPolicy enforcement"
+    local pod_ip
+    pod_ip=$(kubectl get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: deny-client-egress, namespace: default }
+spec:
+  podSelector: { matchLabels: { run: client } }
+  policyTypes: [ Egress ]
+EOF
+    local blocked=0
+    for i in $(seq 1 30); do
+        if ! kubectl exec client -- curl -s --max-time 3 "http://$pod_ip/" 2>/dev/null | grep -q nginx; then
+            blocked=1; break
+        fi
+        sleep 2
+    done
+    [ "$blocked" = 1 ] || { echo "✗ egress policy did not block client->web pod $pod_ip" >&2; exit 1; }
+    echo "✓ default-deny egress blocks client -> web ($pod_ip)"
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: deny-client-egress, namespace: default }
+spec:
+  podSelector: { matchLabels: { run: client } }
+  policyTypes: [ Egress ]
+  egress:
+  - to: [ { podSelector: { matchLabels: { app: web } } } ]
+EOF
+    local allowed=0
+    for i in $(seq 1 30); do
+        if kubectl exec client -- curl -s --max-time 3 "http://$pod_ip/" 2>/dev/null | grep -q nginx; then
+            allowed=1; break
+        fi
+        sleep 2
+    done
+    [ "$allowed" = 1 ] || { echo "✗ egress allow-to-web did not restore client->web" >&2; exit 1; }
+    echo "✓ egress allow-to-web restores client -> web, enforced in cradle eBPF"
+    kubectl delete networkpolicy deny-client-egress
+}
+
 VIP=$(kubectl get svc web -o jsonpath='{.spec.clusterIP}')
 echo "==> curling ClusterIP $VIP from the client pod"
 for i in $(seq 1 30); do
@@ -130,6 +178,7 @@ for i in $(seq 1 30); do
             check_crds
             check_nodeport
             check_policy
+            check_egress_policy
             exit 0
         fi
         echo "✗ VIP answered but l4_dnat=0 — served by kube-proxy, not eBPF" >&2
