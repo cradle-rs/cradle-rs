@@ -1178,6 +1178,144 @@ impl Control {
         Ok(())
     }
 
+    /// Resolve a hypothetical flow against the live policy maps — the
+    /// operator's "why" tool (`cradle ctl policy-trace`). Mirrors the
+    /// datapath's resolution order exactly: endpoint lookup, L7 steering,
+    /// PCT statefulness aside (not simulated — flows are), identity
+    /// (exact → CIDR LPM → world), then the six wildcard probes with
+    /// deny-over-allow.
+    pub async fn policy_trace(
+        &self,
+        src: IpAddr,
+        dst: IpAddr,
+        vrf: u32,
+        proto: u8,
+        port: u16,
+    ) -> Result<(Vec<String>, String)> {
+        use cradle_common::{
+            EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, IDENTITY_WORLD, POLICY_DENY,
+            POLICY_DIR_INGRESS, POLICY_KEY_GEN,
+        };
+        let mut lines = Vec::new();
+        // The enforced endpoint: dst resolved through the CNI store.
+        let ep = self
+            .cni
+            .lock()
+            .await
+            .list_endpoints()?
+            .iter()
+            .find(|e| IpAddr::V4(e.ip) == dst || e.ip6.map(IpAddr::V6) == Some(dst))
+            .map(|e| e.host_ifindex);
+        let Some(ep) = ep else {
+            lines.push(format!("dst {dst}: no policy endpoint (not a CNI pod)"));
+            return Ok((lines, "DEFAULT-ALLOW".into()));
+        };
+        lines.push(format!("dst {dst}: endpoint ifindex {ep}"));
+        let dp = self.dp.lock().await;
+        let Some(flags) = dp.ep_policy_get(ep) else {
+            lines.push("EP_POLICY: no entry — endpoint not enforced".into());
+            return Ok((lines, "DEFAULT-ALLOW".into()));
+        };
+        let gen_bit = if flags & EP_F_GEN != 0 {
+            POLICY_KEY_GEN
+        } else {
+            0
+        };
+        lines.push(format!(
+            "EP_POLICY: ingress={} egress={} audit={} generation={}",
+            flags & EP_F_INGRESS != 0,
+            flags & EP_F_EGRESS != 0,
+            flags & EP_F_AUDIT != 0,
+            (flags & EP_F_GEN != 0) as u8,
+        ));
+        if flags & EP_F_INGRESS == 0 {
+            lines.push("ingress not enforced".into());
+            return Ok((lines, "DEFAULT-ALLOW".into()));
+        }
+        // L7 steering pre-empts the L4 verdict for its ports.
+        if let (IpAddr::V4(d), true) = (dst, port != 0) {
+            if self
+                .l7_policies
+                .lock()
+                .await
+                .values()
+                .any(|v| v.contains(&(d, port)))
+            {
+                lines.push(format!(
+                    "L7_SERVICES: {d}:{port} steered to the transparent proxy \
+                     (HTTP allow-list enforced there)"
+                ));
+                return Ok((lines, "L7".into()));
+            }
+        }
+        // Peer identity, exactly as the datapath resolves it.
+        let identity = match src {
+            IpAddr::V4(s) => dp
+                .identity_get(vrf, s)
+                .inspect(|id| lines.push(format!("IDENTITY: (vrf {vrf}, {s}) = {id}")))
+                .or_else(|| {
+                    dp.cidr_identity_get(vrf, s)
+                        .inspect(|id| lines.push(format!("CIDR_ID: (vrf {vrf}, {s}) = {id}")))
+                }),
+            IpAddr::V6(s) => dp
+                .identity6_get(vrf, s)
+                .inspect(|id| lines.push(format!("IDENTITY6: (vrf {vrf}, {s}) = {id}")))
+                .or_else(|| {
+                    dp.cidr6_identity_get(vrf, s)
+                        .inspect(|id| lines.push(format!("CIDR_ID6: (vrf {vrf}, {s}) = {id}")))
+                }),
+        }
+        .unwrap_or_else(|| {
+            lines.push(format!("identity: (vrf {vrf}, {src}) unbound = world (2)"));
+            IDENTITY_WORLD
+        });
+        // The six wildcard probes, most specific first; deny wins anywhere.
+        let dport = u16::to_be(port);
+        let mut allowed = false;
+        let mut denied = false;
+        for pat in [0u8, 4, 6, 1, 5, 7] {
+            let key = cradle_common::PolicyKey {
+                ep,
+                identity: if pat & 1 != 0 { 0 } else { identity },
+                port: if pat & 4 != 0 { 0 } else { dport },
+                proto: if pat & 2 != 0 { 0 } else { proto },
+                dir: POLICY_DIR_INGRESS | gen_bit,
+            };
+            if let Some(v) = dp.policy_get(&key) {
+                let what = if v == POLICY_DENY { "DENY" } else { "allow" };
+                lines.push(format!(
+                    "POLICY: (identity {}, proto {}, port {}) = {what}",
+                    key.identity,
+                    key.proto,
+                    u16::from_be(key.port),
+                ));
+                if v == POLICY_DENY {
+                    denied = true;
+                    break;
+                }
+                allowed = true;
+            }
+        }
+        let verdict = if denied || !allowed {
+            if !denied && !allowed {
+                lines.push("POLICY: no probe matched — default deny".into());
+            }
+            if flags & EP_F_AUDIT != 0 {
+                "AUDIT".into()
+            } else {
+                "DENY".into()
+            }
+        } else {
+            "ALLOW".into()
+        };
+        Ok((lines, verdict))
+    }
+
+    /// Live policy-map entry counts (`cradle ctl policy-summary`).
+    pub async fn policy_summary(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+        self.dp.lock().await.policy_counts()
+    }
+
     /// Snapshot of all per-endpoint policy revisions.
     pub async fn policy_revisions_snapshot(&self) -> HashMap<u32, u64> {
         self.policy_revisions.lock().await.clone()
@@ -1970,6 +2108,44 @@ impl Cradle for GrpcService {
                 .map_err(st)?;
         }
         Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn policy_trace(
+        &self,
+        req: Request<pb::PolicyTraceRequest>,
+    ) -> Result<Response<pb::PolicyTraceReply>, Status> {
+        let r = req.into_inner();
+        let src = r.src.parse::<IpAddr>().map_err(st)?;
+        let dst = r.dst.parse::<IpAddr>().map_err(st)?;
+        let proto = match r.proto.as_str() {
+            "udp" => 17,
+            "" | "any" => 0,
+            _ => 6,
+        };
+        let (lines, verdict) = self
+            .control
+            .policy_trace(src, dst, r.vrf_id, proto, r.port as u16)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::PolicyTraceReply { lines, verdict }))
+    }
+
+    async fn get_policy_summary(
+        &self,
+        _req: Request<pb::PolicySummaryRequest>,
+    ) -> Result<Response<pb::PolicySummary>, Status> {
+        let (identities, identities6, cidrs, cidrs6, endpoints, rules, pct, pct6) =
+            self.control.policy_summary().await;
+        Ok(Response::new(pb::PolicySummary {
+            identities,
+            identities6,
+            cidrs,
+            cidrs6,
+            endpoints,
+            rules,
+            pct,
+            pct6,
+        }))
     }
 
     async fn set_endpoint_policy(

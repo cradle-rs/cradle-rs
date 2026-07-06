@@ -278,6 +278,46 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
             }
             println!("applied {} to {uri} via gRPC", config.display());
         }
+        CtlOp::PolicyTrace {
+            from,
+            to,
+            port,
+            proto,
+            vrf,
+        } => {
+            let reply = client
+                .policy_trace(pb::PolicyTraceRequest {
+                    src: from,
+                    dst: to,
+                    port: port as u32,
+                    proto,
+                    vrf_id: vrf,
+                })
+                .await?
+                .into_inner();
+            for line in reply.lines {
+                println!("{line}");
+            }
+            println!("verdict: {}", reply.verdict);
+        }
+        CtlOp::PolicySummary => {
+            let s = client
+                .get_policy_summary(pb::PolicySummaryRequest {})
+                .await?
+                .into_inner();
+            for (name, v) in [
+                ("identities", s.identities),
+                ("identities6", s.identities6),
+                ("cidrs", s.cidrs),
+                ("cidrs6", s.cidrs6),
+                ("endpoints", s.endpoints),
+                ("rules", s.rules),
+                ("pct", s.pct),
+                ("pct6", s.pct6),
+            ] {
+                println!("{name:<14} {v}");
+            }
+        }
         CtlOp::Stats => {
             let reply = client.get_stats(pb::StatsRequest {}).await?.into_inner();
             for e in reply.entries {

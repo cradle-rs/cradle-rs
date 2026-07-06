@@ -804,6 +804,52 @@ async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String,
     panic!("cradle stat {} did not become nonzero in {}", stat, scoped);
 }
 
+/// Resolve a hypothetical flow against the live policy maps and assert the
+/// trace output (verdict line included) contains `expect`. Args string:
+/// "<src> <dst> <port>" (proto tcp, vrf 0).
+#[then(
+    expr = "the cradle policy trace {string} in namespace {string} via gRPC as {string} should contain {string}"
+)]
+async fn cradle_policy_trace_contains(
+    world: &mut World,
+    args: String,
+    namespace: String,
+    sock: String,
+    expect: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let (src, dst, port) = (parts[0], parts[1], parts.get(2).copied().unwrap_or("0"));
+    let out = netns::exec_in_netns(
+        &scoped,
+        &cradle,
+        &[
+            "ctl",
+            "--grpc",
+            &ep,
+            "policy-trace",
+            "--from",
+            src,
+            "--to",
+            dst,
+            "--port",
+            port,
+        ],
+    )
+    .await
+    .expect("policy-trace failed");
+    assert!(
+        out.contains(&expect),
+        "policy trace {args} in {scoped}: expected {expect:?} in:\n{out}"
+    );
+    println!(
+        "✓ policy trace {} contains {:?} in {}",
+        args, expect, scoped
+    );
+}
+
 /// Generate and bulk-install a synthetic DFZ-shaped route table via
 /// `cradle ctl gen-routes` (deterministic per seed; see large-fib.md).
 #[when(

@@ -35,8 +35,13 @@ host endpoint. Phase 5's ingress half is implemented: per-port HTTP allow-lists
 steered through the existing TPROXY proxy via `L7_SERVICES` — no new
 datapath code — with 403-on-miss enforcement in the proxy
 (`cradle_policy` L7 BDD scenario). Remaining phase-5 tails: egress L7,
-path regex, Hubble L7 flow records, visibility annotations. Phase 6
-remains plan. Builds on the implemented
+path regex, Hubble L7 flow records, visibility annotations. Phase 6 is
+implemented: `cradle ctl policy-trace` (live-map flow resolution with
+per-step explanation), `cradle ctl policy-summary` (map-pressure
+gauges), and `cradle policy-bench` (generation-flip churn: ~450
+replaces/s at 64 endpoints x 128 rules on the dev box; the sweep's full
+key scan is the known hot spot, per-endpoint key index the optimization
+if needed). Builds on the implemented
 ingress-only IPv4 NetworkPolicy engine ([`policy.md`](policy.md)), the
 Cilium-compat groundwork ([`cni-cilium.md`](cni-cilium.md) story 2), and
 the program-structure analysis

@@ -19,13 +19,14 @@ use aya::{
     Ebpf,
 };
 use cradle_common::{
-    Backend, Backend6, BackendKey, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr,
-    GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM, MAX_LABELS,
-    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW, POLICY_DENY,
-    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
+    Backend, Backend6, BackendKey, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey, FibEntry, FibWord,
+    GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry,
+    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo,
+    ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, DIR24_TBL8_GROUPS,
+    DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM,
+    MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW,
+    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX,
+    SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -86,6 +87,8 @@ pub struct Dataplane {
     cidr_id6: LpmTrie<MapData, Vrf6Key, u32>,
     ep_policy: HashMap<MapData, u32, u8>,
     policy: HashMap<MapData, PolicyKey, u8>,
+    pct: HashMap<MapData, CtKey, u8>,
+    pct6: HashMap<MapData, CtKey6, u8>,
     /// Egress masquerade (docs/design/kube-proxy-dualstack.md).
     masq_cfg: Array<MapData, u32>,
     non_masq: LpmTrie<MapData, [u8; 4], u8>,
@@ -173,6 +176,8 @@ impl Dataplane {
                 bpf.take_map("EP_POLICY").context("map EP_POLICY missing")?,
             )?,
             policy: HashMap::try_from(bpf.take_map("POLICY").context("map POLICY missing")?)?,
+            pct: HashMap::try_from(bpf.take_map("PCT").context("map PCT missing")?)?,
+            pct6: HashMap::try_from(bpf.take_map("PCT6").context("map PCT6 missing")?)?,
             masq_cfg: Array::try_from(bpf.take_map("MASQ_CFG").context("map MASQ_CFG missing")?)?,
             non_masq: LpmTrie::try_from(bpf.take_map("NON_MASQ").context("map NON_MASQ missing")?)?,
             backends6: HashMap::try_from(
@@ -448,6 +453,71 @@ impl Dataplane {
             self.identity6.insert(key, identity, 0)?;
         }
         Ok(())
+    }
+
+    /// Read-side accessors for `cradle ctl policy-trace` / `policy-summary`
+    /// — resolve exactly the way the datapath does.
+    pub fn identity_get(&self, vrf: u32, ip: std::net::Ipv4Addr) -> Option<u32> {
+        let key = VrfIdKey {
+            vrf_id: vrf,
+            addr: util::ipv4_to_map(ip),
+        };
+        self.identity.get(&key, 0).ok()
+    }
+
+    /// Longest-prefix CIDR identity for `(vrf, ip)` (userspace LPM lookup).
+    pub fn cidr_identity_get(&self, vrf: u32, ip: std::net::Ipv4Addr) -> Option<u32> {
+        let key = Key::new(
+            64,
+            Vrf4Key {
+                vrf_id: vrf,
+                addr: ip.octets(),
+            },
+        );
+        self.cidr_id.get(&key, 0).ok()
+    }
+
+    pub fn identity6_get(&self, vrf: u32, ip: Ipv6Addr) -> Option<u32> {
+        let key = VrfId6Key {
+            vrf_id: vrf,
+            addr: ip.octets(),
+        };
+        self.identity6.get(&key, 0).ok()
+    }
+
+    pub fn cidr6_identity_get(&self, vrf: u32, ip: Ipv6Addr) -> Option<u32> {
+        let key = Key::new(
+            32 + 128,
+            Vrf6Key {
+                vrf_id: vrf,
+                addr: ip.octets(),
+            },
+        );
+        self.cidr_id6.get(&key, 0).ok()
+    }
+
+    pub fn ep_policy_get(&self, ep: u32) -> Option<u8> {
+        self.ep_policy.get(&ep, 0).ok()
+    }
+
+    pub fn policy_get(&self, key: &PolicyKey) -> Option<u8> {
+        self.policy.get(key, 0).ok()
+    }
+
+    /// Entry counts across the policy maps (map-pressure gauges):
+    /// (identities, identities6, cidrs, cidrs6, endpoints, rules, pct, pct6).
+    #[allow(clippy::type_complexity)]
+    pub fn policy_counts(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+        (
+            self.identity.keys().count() as u64,
+            self.identity6.keys().count() as u64,
+            self.cidr_id.keys().count() as u64,
+            self.cidr_id6.keys().count() as u64,
+            self.ep_policy.keys().count() as u64,
+            self.policy.keys().count() as u64,
+            self.pct.keys().count() as u64,
+            self.pct6.keys().count() as u64,
+        )
     }
 
     /// v6 sibling of `cidr_identity_set`.

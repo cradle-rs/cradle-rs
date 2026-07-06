@@ -47,9 +47,24 @@ enum Cmd {
     /// FIB lookup-latency harness (BPF_PROG_TEST_RUN; root, no attach) —
     /// large-fib.md's LPM vs DIR-24-8 numbers. Not CI-gating.
     FibBench(FibBenchArgs),
+    /// Policy replacement (generation-flip) churn benchmark (root).
+    PolicyBench(PolicyBenchArgs),
 }
 
 #[derive(Debug, Parser)]
+struct PolicyBenchArgs {
+    /// Enforced endpoints to simulate.
+    #[arg(long, default_value_t = 64)]
+    endpoints: u32,
+    /// Rules per direction per endpoint.
+    #[arg(long, default_value_t = 64)]
+    rules: usize,
+    /// Full-fleet replace rounds to time.
+    #[arg(long, default_value_t = 10)]
+    repeat: u32,
+}
+
+#[derive(Debug, clap::Args)]
 struct FibBenchArgs {
     /// Routes to populate (DFZ-shaped distribution, deterministic per seed).
     #[arg(long, default_value_t = 1_000_000)]
@@ -134,6 +149,26 @@ pub enum CtlOp {
     },
     /// Dump the data-plane packet counters.
     Stats,
+    /// Resolve a hypothetical flow against the live policy maps.
+    PolicyTrace {
+        /// Peer / client IP (v4 or v6).
+        #[arg(long)]
+        from: String,
+        /// Endpoint (pod) IP.
+        #[arg(long)]
+        to: String,
+        /// Destination L4 port (0 = any).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// IP protocol: tcp, udp, or any.
+        #[arg(long, default_value = "tcp")]
+        proto: String,
+        /// Identity scope (0 = global).
+        #[arg(long, default_value_t = 0)]
+        vrf: u32,
+    },
+    /// Show live policy-map entry counts.
+    PolicySummary,
     /// Show the IPv4 FIB engine summary (mode, routes, TBL8 groups).
     Fib,
     /// Delete one IPv4 route.
@@ -182,6 +217,7 @@ async fn main() -> Result<()> {
         Cmd::Serve(args) => serve(args).await,
         Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
         Cmd::FibBench(args) => bench::run(args.mode, args.routes, args.seed, args.repeat),
+        Cmd::PolicyBench(args) => bench::run_policy(args.endpoints, args.rules, args.repeat),
     }
 }
 

@@ -248,6 +248,54 @@ pub fn run(mode: Option<crate::Fib4Mode>, routes: u64, seed: u64, repeat: u32) -
     }
 }
 
+/// `cradle policy-bench` — policy replacement (generation flip) churn:
+/// loads the eBPF object (no attach), then times `endpoint_policy_set`
+/// replaces at a chosen scale. The replace is the per-endpoint hot path at
+/// reconcile time (docs/design/policy-multitenant.md phase 6): every rule
+/// inserted under the flipped generation, one EP_POLICY word switch, stale
+/// generation swept — cost is O(rules + endpoint's stale keys) per call
+/// plus one full POLICY key scan for the sweep.
+pub fn run_policy(endpoints: u32, rules: usize, repeat: u32) -> Result<()> {
+    let mut loader = aya::EbpfLoader::new();
+    // Room for two generations of every endpoint's rules during a flip.
+    let cap = (endpoints as usize * rules * 2 + 1024) as u32;
+    loader.map_max_entries("POLICY", cap);
+    let mut bpf = loader
+        .load(aya::include_bytes_aligned!(concat!(
+            env!("OUT_DIR"),
+            "/cradle-ebpf"
+        )))
+        .context("loading eBPF object (root needed)")?;
+    let mut dp = Dataplane::from_ebpf(&mut bpf)?;
+
+    let ruleset: Vec<(u32, u8, u16, bool)> = (0..rules)
+        .map(|i| (1000 + i as u32, 6u8, 8000 + (i as u16 % 1000), i % 8 == 0))
+        .collect();
+
+    // Populate every endpoint once (generation A), then time full-fleet
+    // replaces (B, A, B, ... — each flip inserts + sweeps).
+    for ep in 1..=endpoints {
+        dp.endpoint_policy_set(ep, true, true, false, &ruleset, &ruleset)?;
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..repeat {
+        for ep in 1..=endpoints {
+            dp.endpoint_policy_set(ep, true, true, false, &ruleset, &ruleset)?;
+        }
+    }
+    let elapsed = start.elapsed();
+    let replaces = endpoints as u64 * repeat as u64;
+    let per = elapsed / replaces.max(1) as u32;
+    println!("policy-bench: {endpoints} endpoints x {rules} rules(x2 dir) x {repeat} rounds");
+    println!(
+        "  {replaces} replaces in {:.2?}: {per:.2?}/replace, {:.0} replaces/s, {:.0} rules/s",
+        elapsed,
+        replaces as f64 / elapsed.as_secs_f64(),
+        (replaces as f64 * (rules * 2) as f64) / elapsed.as_secs_f64(),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

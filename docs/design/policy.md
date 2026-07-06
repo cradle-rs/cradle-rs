@@ -140,6 +140,27 @@ regex is a follow-up, as are egress L7 and Hubble L7 records).
   containers (ingress) or the peer pods' (egress) — unresolvable named
   ports yield no rule (fail closed).
 
+## Operations
+
+- **`cradle ctl policy-trace --from <ip> --to <ip> [--port N] [--proto
+  tcp|udp|any] [--vrf N]`** — resolves a hypothetical flow against the
+  live maps exactly the way the datapath does and prints each step:
+  endpoint lookup, `EP_POLICY` flags (directions/audit/generation), L7
+  steering, identity resolution (exact → CIDR LPM → world), and every
+  `POLICY` probe hit, ending in a verdict (`ALLOW`/`DENY`/`AUDIT`/`L7`/
+  `DEFAULT-ALLOW`). PCT statefulness is not simulated — replies of live
+  flows may pass where the trace says deny.
+- **`cradle ctl policy-summary`** — live entry counts across the policy
+  maps (identities v4/v6, CIDR bindings, enforced endpoints, rules
+  including both generations, PCT entries): the map-pressure gauges.
+- **`cradle policy-bench --endpoints N --rules M --repeat K`** (root) —
+  times full-fleet policy replacement (the generation flip). Measured on
+  the dev box: 64 endpoints × 64 rules/direction ≈ **2.2 ms/replace
+  (~450 replaces/s, ~57k rules/s)**. The cost is dominated by the sweep's
+  full `POLICY` key scan (O(fleet rules) per replace), so whole-fleet
+  reconcile is quadratic in rules — fine at hundreds of endpoints; a
+  per-endpoint key index is the noted optimization if profiles demand it.
+
 ## Testing
 
 - BDD `cradle_policy.feature` (no Kubernetes): identities + policies pushed
@@ -148,6 +169,8 @@ regex is a follow-up, as are egress L7 and Hubble L7 records).
   world denied, and ipBlock CIDR with an `except` override.
 - BDD `cradle_policy_v6.feature`: v6 ingress on a plain L3 topology —
   deny, allow via a CIDR binding, allow via an exact v6 identity.
+- BDD policy-trace scenario: verdict + resolution lines asserted against
+  the live maps over the `cradle_policy` topology.
 - kind e2e: two `NetworkPolicy` phases in `deploy/kind-e2e.sh` — ingress
   deny-then-restore against a web pod, and egress default-deny-then-allow
   on the client pod — both enforced by cradle (no Cilium installed).
