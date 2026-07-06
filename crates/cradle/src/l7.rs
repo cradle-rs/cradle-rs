@@ -26,28 +26,71 @@ pub struct L7Route {
     pub backend: SocketAddr,
 }
 
-/// One allowed HTTP request shape (empty method/prefix = any).
+/// One allowed HTTP request shape (empty method/path = any). `path` is a
+/// regex matched against the whole request path (Cilium semantics). This is
+/// the wire/config form; the proxy precompiles it into a [`CompiledRule`].
 #[derive(Clone, Debug)]
 pub struct L7PolicyRule {
     pub method: String,
-    pub path_prefix: String,
+    pub path: String,
 }
 
-/// Maps an L7 VIP:port to its ordered path-prefix routes. Shared between the
+/// A precompiled allow-rule: `path` full-matches the request path. A rule
+/// whose regex failed to compile falls back to `exact` string equality
+/// (fail closed toward the literal, never silently open).
+struct CompiledRule {
+    method: String,
+    path: Option<regex::Regex>,
+    exact: String,
+}
+
+impl CompiledRule {
+    fn compile(r: &L7PolicyRule) -> Self {
+        let path = if r.path.is_empty() {
+            None
+        } else {
+            match regex::Regex::new(&format!("^(?:{})$", r.path)) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!("L7 policy: bad path regex {:?}: {e} (exact match)", r.path);
+                    None
+                }
+            }
+        };
+        Self {
+            method: r.method.clone(),
+            path,
+            exact: r.path.clone(),
+        }
+    }
+
+    fn matches(&self, method: &str, path: &str) -> bool {
+        let method_ok = self.method.is_empty() || self.method == method;
+        let path_ok = match &self.path {
+            _ if self.exact.is_empty() => true,
+            Some(re) => re.is_match(path),
+            None => path == self.exact, // regex failed to compile
+        };
+        method_ok && path_ok
+    }
+}
+
+/// Maps an L7 VIP:port to its ordered path routes. Shared between the
 /// control plane (which populates it) and the proxy (which reads it).
 #[derive(Default)]
 pub struct RouteTable {
     /// Ingress L7 policy allow-lists keyed by the *original* destination
-    /// (the pod ip:port). A steered flow matching no rule is answered with
-    /// an empty 403 and closed; a match proxies to the original
-    /// destination transparently (docs/design/policy.md phase 5).
-    policies: std::collections::HashMap<SocketAddr, Vec<L7PolicyRule>>,
+    /// (the pod ip:port), precompiled. A steered flow matching no rule is
+    /// answered with an empty 403 and closed; a match proxies to the
+    /// original destination transparently (docs/design/policy.md phase 5).
+    policies: std::collections::HashMap<SocketAddr, Vec<CompiledRule>>,
     services: HashMap<(IpAddr, u16), Vec<L7Route>>,
 }
 
 impl RouteTable {
     pub fn set_policy(&mut self, dst: SocketAddr, rules: Vec<L7PolicyRule>) {
-        self.policies.insert(dst, rules);
+        self.policies
+            .insert(dst, rules.iter().map(CompiledRule::compile).collect());
     }
 
     pub fn del_policy(&mut self, dst: &SocketAddr) {
@@ -58,10 +101,7 @@ impl RouteTable {
     /// (fall through to routing), Some(true) = allowed, Some(false) = 403.
     fn policy_verdict(&self, dst: &SocketAddr, method: &str, path: &str) -> Option<bool> {
         let rules = self.policies.get(dst)?;
-        Some(rules.iter().any(|r| {
-            (r.method.is_empty() || r.method == method)
-                && (r.path_prefix.is_empty() || path.starts_with(&r.path_prefix))
-        }))
+        Some(rules.iter().any(|r| r.matches(method, path)))
     }
 
     pub fn add(&mut self, vip: IpAddr, port: u16, routes: Vec<L7Route>) {
@@ -184,22 +224,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_verdict_matches_method_and_prefix() {
+    fn policy_verdict_matches_method_and_path_regex() {
         let mut rt = RouteTable::default();
         let dst: SocketAddr = "10.0.0.2:8080".parse().unwrap();
         rt.set_policy(
             dst,
             vec![L7PolicyRule {
                 method: "GET".into(),
-                path_prefix: "/allowed".into(),
+                // Full-match regex: exact `/allowed`, or anything under it.
+                path: "/allowed(/.*)?".into(),
             }],
         );
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed"), Some(true));
         assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed/x"), Some(true));
+        // Full match: `/allowedfoo` is NOT under `/allowed(/.*)?`.
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/allowedfoo"), Some(false));
         assert_eq!(rt.policy_verdict(&dst, "GET", "/secret"), Some(false));
         assert_eq!(rt.policy_verdict(&dst, "POST", "/allowed"), Some(false));
         let other: SocketAddr = "10.0.0.3:8080".parse().unwrap();
         assert_eq!(rt.policy_verdict(&other, "GET", "/allowed"), None);
         rt.del_policy(&dst);
         assert_eq!(rt.policy_verdict(&dst, "GET", "/allowed"), None);
+    }
+
+    #[test]
+    fn bad_regex_falls_back_to_exact() {
+        let mut rt = RouteTable::default();
+        let dst: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        rt.set_policy(
+            dst,
+            vec![L7PolicyRule {
+                method: String::new(),
+                path: "/a[".into(), // invalid regex
+            }],
+        );
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/a["), Some(true));
+        assert_eq!(rt.policy_verdict(&dst, "GET", "/a"), Some(false));
     }
 }

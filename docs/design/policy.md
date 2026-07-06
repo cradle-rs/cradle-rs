@@ -126,8 +126,10 @@ allow-list in the proxy's route table. The proxy answers non-matching
 requests with an empty 403 and splices matches to the original
 destination; its onward connection is node-originated, so the L4 ingress
 verdict at delivery sees the host identity. CiliumNetworkPolicy
-`toPorts.rules.http` translates to the same surface (path as prefix;
-regex is a follow-up, as are egress L7 and Hubble L7 records).
+`toPorts.rules.http` translates to the same surface (`path` is a
+regex full-matched against the request path, Cilium semantics — an
+invalid regex falls back to exact match). Egress L7 and Hubble L7
+records are follow-ups.
 
 ## Control plane
 

@@ -2174,7 +2174,7 @@ impl Cradle for GrpcService {
                             .iter()
                             .map(|r| crate::l7::L7PolicyRule {
                                 method: r.method.clone(),
-                                path_prefix: r.path_prefix.clone(),
+                                path: r.path.clone(),
                             })
                             .collect(),
                     )

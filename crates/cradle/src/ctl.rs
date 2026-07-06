@@ -244,7 +244,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                                     .iter()
                                     .map(|r| pb::L7Rule {
                                         method: r.method.clone(),
-                                        path_prefix: r.path.clone(),
+                                        path: r.path.clone(),
                                     })
                                     .collect(),
                             })

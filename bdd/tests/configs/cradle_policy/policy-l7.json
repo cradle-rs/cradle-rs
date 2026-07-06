@@ -4,6 +4,6 @@
     { "namespace": "default", "pod": "pod2", "enforce": true,
       "rules": [ { "identity": 0 } ],
       "l7": [ { "port": 8080,
-                "rules": [ { "method": "GET", "path": "/allowed" } ] } ] }
+                "rules": [ { "method": "GET", "path": "/api/v[0-9]/.*" } ] } ] }
   ]
 }

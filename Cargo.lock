@@ -515,6 +515,7 @@ dependencies = [
  "nix",
  "prost",
  "prost-types",
+ "regex",
  "serde",
  "serde_json",
  "socket2 0.5.10",

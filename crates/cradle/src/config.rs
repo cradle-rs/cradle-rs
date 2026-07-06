@@ -726,7 +726,7 @@ impl Config {
                             .iter()
                             .map(|r| crate::l7::L7PolicyRule {
                                 method: r.method.clone(),
-                                path_prefix: r.path.clone(),
+                                path: r.path.clone(),
                             })
                             .collect(),
                     )

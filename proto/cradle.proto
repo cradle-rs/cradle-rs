@@ -383,10 +383,12 @@ message EndpointPolicy {
   repeated L7PortPolicy l7 = 9;
 }
 
-// One allowed HTTP request shape (empty field = any).
+// One allowed HTTP request shape (empty field = any). `path` is a regular
+// expression matched against the whole request path (Cilium HTTP-rule
+// semantics), e.g. "/api/.*"; an invalid regex falls back to exact match.
 message L7Rule {
   string method = 1;
-  string path_prefix = 2;
+  string path = 2;
 }
 
 message L7PortPolicy {
