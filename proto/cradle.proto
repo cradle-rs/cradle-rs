@@ -394,6 +394,35 @@ message L7PortPolicy {
   repeated L7Rule rules = 2;
 }
 
+// Resolve a hypothetical flow against the live policy maps — the
+// operator's "why is this allowed/denied" tool (cradle ctl policy-trace).
+message PolicyTraceRequest {
+  string src = 1;    // peer IP (v4 or v6)
+  string dst = 2;    // endpoint IP (v4 or v6)
+  uint32 port = 3;   // destination L4 port (0 = any)
+  string proto = 4;  // "tcp" | "udp" | "" (any)
+  uint32 vrf_id = 5; // identity scope (0 = global)
+}
+
+message PolicyTraceReply {
+  repeated string lines = 1; // resolution steps, human-readable
+  string verdict = 2;        // ALLOW | DENY | AUDIT | L7 | DEFAULT-ALLOW
+}
+
+// Live policy-map pressure (cradle ctl policy-summary).
+message PolicySummaryRequest {}
+
+message PolicySummary {
+  uint64 identities = 1;   // exact identity bindings (v4)
+  uint64 identities6 = 2;  // (v6)
+  uint64 cidrs = 3;        // CIDR identity bindings (v4)
+  uint64 cidrs6 = 4;       // (v6)
+  uint64 endpoints = 5;    // enforced endpoints (EP_POLICY entries)
+  uint64 rules = 6;        // POLICY entries (all generations)
+  uint64 pct = 7;          // policy conntrack entries (v4)
+  uint64 pct6 = 8;         // (v6)
+}
+
 // ---- egress masquerade (docs/design/kube-proxy-dualstack.md) ----
 
 message MasqNode {
@@ -470,6 +499,8 @@ service Cradle {
   rpc SetIdentity(Identity) returns (Empty);
   rpc DelIdentity(IdentityDel) returns (Empty);
   rpc SetCidrIdentity(CidrIdentity) returns (Empty);
+  rpc PolicyTrace(PolicyTraceRequest) returns (PolicyTraceReply);
+  rpc GetPolicySummary(PolicySummaryRequest) returns (PolicySummary);
   rpc SetEndpointPolicy(EndpointPolicy) returns (Empty);
   rpc AllocIp(AllocIpRequest) returns (AllocIpReply);
   rpc ReleaseIp(ReleaseIpRequest) returns (Empty);

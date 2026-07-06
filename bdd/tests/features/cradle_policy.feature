@@ -91,6 +91,17 @@ Feature: Network policy in the eBPF datapath
     Then ping from "host1" to "10.244.0.3" should eventually succeed
     And ping from "pod1" to "10.244.0.3" should fail
 
+  Scenario: policy trace explains verdicts from the live maps
+    Given the test topology exists
+    When I apply cradle config "policy-on.json" to namespace "node" via gRPC as "ctl"
+    # pod1 (identity 100) is allowed into pod2; world (host1) is not.
+    Then the cradle policy trace "10.244.0.2 10.244.0.3 0" in namespace "node" via gRPC as "ctl" should contain "verdict: ALLOW"
+    # host1 resolves to identity 2 (world) — exact or via a leftover CIDR
+    # binding from the ipBlock scenario, the trace shows the actual path.
+    And the cradle policy trace "10.1.1.2 10.244.0.3 0" in namespace "node" via gRPC as "ctl" should contain "(vrf 0, 10.1.1.2)"
+    And the cradle policy trace "10.1.1.2 10.244.0.3 0" in namespace "node" via gRPC as "ctl" should contain "verdict: DENY"
+    And the cradle policy trace "10.1.1.2 10.244.0.2 0" in namespace "node" via gRPC as "ctl" should contain "verdict: DEFAULT-ALLOW"
+
   Scenario: L7 policy filters HTTP by method and path via the proxy
     Given the test topology exists
     # pod2's port 8080 is steered through the transparent proxy, which
