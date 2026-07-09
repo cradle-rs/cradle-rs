@@ -160,8 +160,9 @@ struct DumpArgs {
     /// Per-VRF FIB filter for ipv4/ipv6 (0 = global table).
     #[arg(long, default_value_t = 0)]
     vrf: u32,
-    /// Resolve each nexthop id to its gateway / oif / label stack.
-    #[arg(long)]
+    /// Skip resolving each nexthop id to its gateway / oif / label stack
+    /// (resolution is on by default).
+    #[arg(long = "no-resolve", action = clap::ArgAction::SetFalse)]
     resolve: bool,
 }
 
