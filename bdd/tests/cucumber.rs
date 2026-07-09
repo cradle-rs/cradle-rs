@@ -804,6 +804,43 @@ async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String,
     panic!("cradle stat {} did not become nonzero in {}", stat, scoped);
 }
 
+/// Run `cradle dump <table>` over gRPC and assert its output contains
+/// `expect`. Polls a few times so control-plane programming has settled.
+#[then(
+    expr = "the cradle dump {string} in namespace {string} via gRPC as {string} should contain {string}"
+)]
+async fn cradle_dump_contains(
+    world: &mut World,
+    table: String,
+    namespace: String,
+    sock: String,
+    expect: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let mut last = String::new();
+    for _ in 0..15 {
+        if let Ok(out) =
+            netns::exec_in_netns(&scoped, &cradle, &["dump", "--grpc", &ep, &table]).await
+        {
+            if out.contains(&expect) {
+                println!(
+                    "✓ cradle dump {} contains {:?} in {}",
+                    table, expect, scoped
+                );
+                return;
+            }
+            last = out;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!(
+        "cradle dump {} in {} never contained {:?}; last output:\n{}",
+        table, scoped, expect, last
+    );
+}
+
 /// Resolve a hypothetical flow against the live policy maps and assert the
 /// trace output (verdict line included) contains `expect`. Args string:
 /// "<src> <dst> <port>" (proto tcp, vrf 0).

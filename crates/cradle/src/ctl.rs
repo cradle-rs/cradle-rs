@@ -4,11 +4,15 @@
 
 use anyhow::{Context as _, Result};
 
+use cradle_common::{
+    FDB_F_LOCAL, FDB_F_REMOTE, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP, FIB_F_LOCAL,
+};
+
 use crate::{
     config::{self, Config},
     grpc::GrpcEndpoint,
     pb::{self, cradle_client::CradleClient},
-    CtlOp,
+    CtlOp, DumpTable,
 };
 
 pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
@@ -399,4 +403,170 @@ async fn gen_routes(
         prefixes.len() as f64 / elapsed.as_secs_f64()
     );
     Ok(())
+}
+
+/// `cradle dump <table>` — stream a forwarding table's contents over the gRPC
+/// control API and print them in aligned columns.
+pub async fn run_dump(
+    endpoint: GrpcEndpoint,
+    table: DumpTable,
+    vrf: u32,
+    resolve: bool,
+) -> Result<()> {
+    let channel = endpoint.connect().await?;
+    let mut client = CradleClient::new(channel);
+    let pb_table = match table {
+        DumpTable::L2 => pb::DumpTable::DumpL2,
+        DumpTable::Ipv4 => pb::DumpTable::DumpIpv4,
+        DumpTable::Ipv6 => pb::DumpTable::DumpIpv6,
+        DumpTable::Mpls => pb::DumpTable::DumpMpls,
+        DumpTable::Srv6 => pb::DumpTable::DumpSrv6,
+    };
+    let mut stream = client
+        .dump(pb::DumpRequest {
+            table: pb_table as i32,
+            vrf,
+            resolve,
+        })
+        .await?
+        .into_inner();
+
+    let mut header = false;
+    let mut count = 0u64;
+    while let Some(entry) = stream.message().await? {
+        let Some(e) = entry.entry else { continue };
+        match e {
+            pb::dump_entry::Entry::Fdb(f) => {
+                if !header {
+                    println!(
+                        "{:<18} {:>5} {:>8} {:<8} {:>9} remote_sid",
+                        "mac", "vlan", "oif", "flags", "age_ms"
+                    );
+                    header = true;
+                }
+                println!(
+                    "{:<18} {:>5} {:>8} {:<8} {:>9} {}",
+                    f.mac,
+                    f.vlan,
+                    f.oif,
+                    fdb_flags(f.flags),
+                    f.age_ms,
+                    f.remote_sid
+                );
+            }
+            pb::dump_entry::Entry::Fib(r) => {
+                if !header {
+                    println!(
+                        "{:<20} {:>4} {:>7} {:<10} nexthop",
+                        "prefix", "vrf", "nh_id", "flags"
+                    );
+                    header = true;
+                }
+                println!(
+                    "{:<20} {:>4} {:>7} {:<10} {}",
+                    r.prefix,
+                    r.vrf,
+                    r.nexthop_id,
+                    fib_flags(r.flags),
+                    nh_str(&r.nh)
+                );
+            }
+            pb::dump_entry::Entry::Mpls(m) => {
+                if !header {
+                    println!(
+                        "{:>8} {:<7} {:>7} {:>4} nexthop",
+                        "label", "op", "nh_id", "vrf"
+                    );
+                    header = true;
+                }
+                println!(
+                    "{:>8} {:<7} {:>7} {:>4} {}",
+                    m.label,
+                    m.op,
+                    m.nexthop_id,
+                    m.vrf,
+                    nh_str(&m.nh)
+                );
+            }
+            pb::dump_entry::Entry::Srv6Localsid(s) => {
+                println!(
+                    "localsid {}/{:<3} {:<14} flavors={} vrf={} nh_id={} {}",
+                    s.sid,
+                    s.prefix_len,
+                    s.behavior,
+                    s.flavors,
+                    s.vrf,
+                    s.nexthop_id,
+                    nh_str(&s.nh)
+                );
+            }
+            pb::dump_entry::Entry::Srv6Encap(en) => {
+                println!(
+                    "encap    nh_id={} mode={} segs=[{}]",
+                    en.nexthop_id,
+                    en.mode,
+                    en.segs.join(", ")
+                );
+            }
+        }
+        count += 1;
+    }
+    if count == 0 {
+        println!("(empty)");
+    }
+    Ok(())
+}
+
+/// Human-readable `FDB_F_*` flag summary.
+fn fdb_flags(flags: u32) -> String {
+    let mut v = Vec::new();
+    if flags & FDB_F_LOCAL != 0 {
+        v.push("local");
+    }
+    if flags & FDB_F_REMOTE != 0 {
+        v.push("remote");
+    }
+    if v.is_empty() {
+        "learned".to_string()
+    } else {
+        v.join(",")
+    }
+}
+
+/// Human-readable `FIB_F_*` flag summary.
+fn fib_flags(flags: u32) -> String {
+    let mut v = Vec::new();
+    if flags & FIB_F_BLACKHOLE != 0 {
+        v.push("blackhole");
+    }
+    if flags & FIB_F_LOCAL != 0 {
+        v.push("local");
+    }
+    if flags & FIB_F_CONNECTED != 0 {
+        v.push("connected");
+    }
+    if flags & FIB_F_ECMP != 0 {
+        v.push("ecmp");
+    }
+    if v.is_empty() {
+        "-".to_string()
+    } else {
+        v.join(",")
+    }
+}
+
+/// Format a resolved nexthop (`--resolve`) as `via <gw> dev if<oif> [labels …]`.
+fn nh_str(nh: &Option<pb::NexthopInfo>) -> String {
+    let Some(n) = nh else {
+        return String::new();
+    };
+    let mut s = String::new();
+    if !n.gateway.is_empty() {
+        s.push_str(&format!("via {} ", n.gateway));
+    }
+    s.push_str(&format!("dev if{}", n.oif));
+    if !n.labels.is_empty() {
+        s.push_str(&format!(" labels {:?}", n.labels));
+    }
+    s
 }

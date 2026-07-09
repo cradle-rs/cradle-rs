@@ -8,7 +8,7 @@
 //! The `FDB` map is intentionally *not* taken here: it is populated by the eBPF
 //! data plane via MAC learning, not by user space.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context as _, Result};
 use aya::{
@@ -23,16 +23,75 @@ use cradle_common::{
     GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry, MirrorKey, MplsEntry,
     Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo,
     ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, DIR24_TBL8_GROUPS,
-    DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, LB_ALGO_RANDOM,
-    MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW,
-    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX,
-    SVC_F_AFFINITY,
+    DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIB_F_ECMP,
+    LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
+    POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
+    STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
 };
 
 use crate::{
     dir24::{Dir24Engine, SlotWrite},
     util,
 };
+
+/// Which forwarding table `Dataplane::dump` walks (`cradle dump`).
+#[derive(Clone, Copy, Debug)]
+pub enum DumpTable {
+    L2,
+    Ipv4,
+    Ipv6,
+    Mpls,
+    Srv6,
+}
+
+/// One row of a forwarding-table dump — the plain domain form. `control.rs`
+/// renders these into the wire `pb::DumpEntry`; `nh` is `Some` only when the
+/// caller asked to resolve `nexthop_id` against `NEXTHOPS`.
+pub enum DumpRow {
+    Fdb {
+        mac: [u8; 6],
+        vlan: u16,
+        oif: u32,
+        flags: u32,
+        remote_sid: [u8; 16],
+        age_ms: u64,
+    },
+    Fib {
+        addr: IpAddr,
+        prefix_len: u8,
+        vrf: u32,
+        nexthop_id: u32,
+        flags: u32,
+        nh: Option<NextHop>,
+    },
+    Mpls {
+        label: u32,
+        op: u8,
+        nexthop_id: u32,
+        vrf: u32,
+        nh: Option<NextHop>,
+    },
+    Srv6LocalSid {
+        sid: Ipv6Addr,
+        prefix_len: u8,
+        behavior: u8,
+        flavors: u8,
+        vrf: u32,
+        nexthop_id: u32,
+        nh: Option<NextHop>,
+    },
+    Srv6Encap {
+        nexthop_id: u32,
+        encap: Srv6Encap,
+    },
+}
+
+/// `CLOCK_MONOTONIC` in nanoseconds — the same clock the eBPF datapath stamps
+/// `FdbEntry::last_seen` with (`bpf_ktime_get_ns`), so ages compare directly.
+fn monotonic_ns() -> Result<u64> {
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)?;
+    Ok(now.tv_sec() as u64 * 1_000_000_000 + now.tv_nsec() as u64)
+}
 
 pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
@@ -930,8 +989,7 @@ impl Dataplane {
     /// control planes) are left alone. `WatchFdb` subscribers observe the
     /// disappearance in their next scan and report an age event upstream.
     pub fn fdb_age_sweep(&mut self, max_idle: std::time::Duration) -> Result<usize> {
-        let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)?;
-        let now_ns = now.tv_sec() as u64 * 1_000_000_000 + now.tv_nsec() as u64;
+        let now_ns = monotonic_ns()?;
         let max_idle_ns = max_idle.as_nanos() as u64;
         let mut stale = Vec::new();
         for item in self.fdb.iter() {
@@ -979,6 +1037,170 @@ impl Dataplane {
             out.push((k.mac, k.vlan));
         }
         out
+    }
+
+    /// Snapshot a forwarding table for `cradle dump`. Rows come back in map
+    /// order (unordered). `vrf` filters the IPv4/IPv6 FIB (0 = global table) and
+    /// is ignored for the other tables; `resolve` joins each `nexthop_id`
+    /// against `NEXTHOPS` (skipped for ECMP group ids, which aren't nexthops).
+    pub fn dump(&self, table: DumpTable, vrf: u32, resolve: bool) -> Result<Vec<DumpRow>> {
+        match table {
+            DumpTable::L2 => self.fdb_dump(),
+            DumpTable::Ipv4 => self.fib4_dump(vrf, resolve),
+            DumpTable::Ipv6 => self.fib6_dump(vrf, resolve),
+            DumpTable::Mpls => self.mpls_dump(resolve),
+            DumpTable::Srv6 => self.srv6_dump(resolve),
+        }
+    }
+
+    /// Resolve a single `nexthop_id`; `None` for ECMP group ids or misses.
+    fn nh_resolve(&self, resolve: bool, nexthop_id: u32, flags: u32) -> Option<NextHop> {
+        if !resolve || flags & FIB_F_ECMP != 0 {
+            return None;
+        }
+        self.nexthops.get(&nexthop_id, 0).ok()
+    }
+
+    /// The full FDB (`cradle dump l2`) — both locally-learned and
+    /// control-plane / overlay (`FDB_F_REMOTE`) entries, with the idle age of
+    /// each local entry.
+    fn fdb_dump(&self) -> Result<Vec<DumpRow>> {
+        let now_ns = monotonic_ns()?;
+        let mut out = Vec::new();
+        for item in self.fdb.iter() {
+            let Ok((k, v)) = item else { continue };
+            let age_ms = if v.last_seen == 0 {
+                0
+            } else {
+                now_ns.saturating_sub(v.last_seen) / 1_000_000
+            };
+            out.push(DumpRow::Fdb {
+                mac: k.mac,
+                vlan: k.vlan,
+                oif: v.oif,
+                flags: v.flags,
+                remote_sid: v.remote_sid,
+                age_ms,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Build a `DumpRow::Fib` row, resolving the nexthop when asked.
+    fn fib_row(
+        &self,
+        addr: IpAddr,
+        prefix_len: u8,
+        vrf: u32,
+        e: FibEntry,
+        resolve: bool,
+    ) -> DumpRow {
+        DumpRow::Fib {
+            addr,
+            prefix_len,
+            vrf,
+            nexthop_id: e.nexthop_id,
+            flags: e.flags,
+            nh: self.nh_resolve(resolve, e.nexthop_id, e.flags),
+        }
+    }
+
+    /// The IPv4 FIB (`cradle dump ipv4`). For the global table this reads
+    /// the DIR-24-8 shadow when that engine is active, else the LPM trie; a
+    /// non-zero `vrf` reads the per-VRF trie.
+    fn fib4_dump(&self, vrf: u32, resolve: bool) -> Result<Vec<DumpRow>> {
+        let mut out = Vec::new();
+        if vrf == 0 {
+            if let Some(eng) = &self.dir24 {
+                for (net, len, e) in eng.routes() {
+                    out.push(self.fib_row(IpAddr::V4(Ipv4Addr::from(net)), len, 0, e, resolve));
+                }
+            } else {
+                for item in self.fib4.iter() {
+                    let Ok((k, e)) = item else { continue };
+                    let addr = Ipv4Addr::from(k.data());
+                    out.push(self.fib_row(IpAddr::V4(addr), k.prefix_len() as u8, 0, e, resolve));
+                }
+            }
+        } else {
+            for item in self.fib4_vrf.iter() {
+                let Ok((k, e)) = item else { continue };
+                let key = k.data();
+                if key.vrf_id != vrf {
+                    continue;
+                }
+                // Per-VRF keys are inserted at `32 + route_len` (the VRF bits).
+                let len = (k.prefix_len().saturating_sub(32)) as u8;
+                out.push(self.fib_row(IpAddr::V4(Ipv4Addr::from(key.addr)), len, vrf, e, resolve));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The IPv6 FIB (`cradle dump ipv6`); a non-zero `vrf` reads the
+    /// per-VRF trie.
+    fn fib6_dump(&self, vrf: u32, resolve: bool) -> Result<Vec<DumpRow>> {
+        let mut out = Vec::new();
+        if vrf == 0 {
+            for item in self.fib6.iter() {
+                let Ok((k, e)) = item else { continue };
+                let addr = Ipv6Addr::from(k.data());
+                out.push(self.fib_row(IpAddr::V6(addr), k.prefix_len() as u8, 0, e, resolve));
+            }
+        } else {
+            for item in self.fib6_vrf.iter() {
+                let Ok((k, e)) = item else { continue };
+                let key = k.data();
+                if key.vrf_id != vrf {
+                    continue;
+                }
+                let len = (k.prefix_len().saturating_sub(32)) as u8;
+                out.push(self.fib_row(IpAddr::V6(Ipv6Addr::from(key.addr)), len, vrf, e, resolve));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The MPLS ILM (`cradle dump mpls`): incoming label → operation.
+    fn mpls_dump(&self, resolve: bool) -> Result<Vec<DumpRow>> {
+        let mut out = Vec::new();
+        for item in self.mpls_fib.iter() {
+            let Ok((label, e)) = item else { continue };
+            out.push(DumpRow::Mpls {
+                label,
+                op: e.op,
+                nexthop_id: e.nexthop_id,
+                vrf: e.vrf_id,
+                nh: self.nh_resolve(resolve, e.nexthop_id, 0),
+            });
+        }
+        Ok(out)
+    }
+
+    /// SRv6 tables (`cradle dump srv6`): the local SID table (My-SID)
+    /// followed by the transit encap side-table (imposed segment lists).
+    fn srv6_dump(&self, resolve: bool) -> Result<Vec<DumpRow>> {
+        let mut out = Vec::new();
+        for item in self.srv6_localsid.iter() {
+            let Ok((k, v)) = item else { continue };
+            out.push(DumpRow::Srv6LocalSid {
+                sid: Ipv6Addr::from(k.data()),
+                prefix_len: k.prefix_len() as u8,
+                behavior: v.behavior,
+                flavors: v.flavors,
+                vrf: v.vrf_id,
+                nexthop_id: v.nexthop_id,
+                nh: self.nh_resolve(resolve, v.nexthop_id, 0),
+            });
+        }
+        for item in self.srv6_encap.iter() {
+            let Ok((id, enc)) = item else { continue };
+            out.push(DumpRow::Srv6Encap {
+                nexthop_id: id,
+                encap: enc,
+            });
+        }
+        Ok(out)
     }
 
     /// Install/replace a nexthop. `gateway == None` means an on-link/connected
