@@ -34,6 +34,7 @@ An endpoint is written in one of four forms, understood identically by server
 | `AddService` | L4 | Add a VIP:port load-balancing service (v4/v6). |
 | `AddL7Service` | L7 | Add an HTTP VIP with path-prefix routes. |
 | `GetStats` | ops | Read the datapath packet counters. |
+| `Dump` | ops | Stream a forwarding table's entries (L2/IPv4/IPv6/MPLS/SRv6). |
 
 Routes carry a `flags` field (`FIB_F_*`) — for example `FIB_F_ECMP` to mark the
 `nexthop_id` as a group id. Nexthops carry a `v6` flag and can be addressed by
@@ -52,6 +53,11 @@ and prints the result.
 cradle ctl apply services.json
 cradle ctl stats
 ```
+
+The read side of the API is also exposed by the top-level `cradle dump`
+command, which calls the server-streaming `Dump` RPC to print a forwarding
+table's entries — see [Command Line Options](ch-00-03-command-line-options.md)
+and [Observability and Counters](ch-03-01-observability.md).
 
 The JSON schema `ctl apply` consumes is the one documented in
 [Configuration Model](ch-01-00-configuration.md). Fields not expressible in that
