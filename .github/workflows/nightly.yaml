@@ -1,0 +1,80 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
+  workflow_dispatch:
+
+permissions:
+  contents: write           # Required to push the nightly tag and release
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-debs.yaml
+    with:
+      nightly: true
+
+  # =====================================================================
+  # Single 'nightly' release: all six .debs for direct download
+  # =====================================================================
+  release:
+    name: Publish Nightly Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # Needed to move tags
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: List collected .deb files
+        run: ls -la artifacts/
+
+      - name: Force-move nightly tag to current commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly
+          git push -f origin nightly
+
+      # The nightly release accumulates one dated set of six .debs per run: the
+      # build date is baked into each filename (cradle-rs_0.9.1~nightlyYYYYMMDD-...),
+      # so old names are never overwritten by the publish step below and pile up
+      # 6-per-day. Delete every existing asset first so only the freshly-built six
+      # remain. Tolerate the first run, when no nightly release exists yet.
+      - name: Remove stale .deb assets from nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view nightly --json assets --jq '.assets[].name' 2>/dev/null \
+            | while read -r asset; do
+                echo "Deleting stale asset: $asset"
+                gh release delete-asset nightly "$asset" --yes
+              done || echo "No existing nightly release yet; nothing to clean."
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Nightly Build"
+          prerelease: true
+          body: |
+            Nightly build from commit ${{ github.sha }}
+
+            ## Downloads
+
+            Choose the file matching your Ubuntu version and architecture:
+
+            | Ubuntu             | x86_64                   | ARM64                    |
+            |--------------------|--------------------------|--------------------------|
+            | 22.04 (jammy)      | `*-jammy_amd64.deb`      | `*-jammy_arm64.deb`      |
+            | 24.04 (noble)      | `*-noble_amd64.deb`      | `*-noble_arm64.deb`      |
+            | 26.04 (resolute)   | `*-resolute_amd64.deb`   | `*-resolute_arm64.deb`   |
+          files: artifacts/*.deb

@@ -502,7 +502,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cradle"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "aya",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "cradle-bdd"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "cucumber",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "cradle-cni"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "prost",
@@ -555,14 +555,14 @@ dependencies = [
 
 [[package]]
 name = "cradle-common"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "aya",
 ]
 
 [[package]]
 name = "cradle-ebpf"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "aya-ebpf",
  "cradle-common",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "cradle-k8s"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "clap",
