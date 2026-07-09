@@ -4,7 +4,8 @@
 # locator route. The static route is the plain-IPv6 return path
 # toward c1, also teed.
 system:
-  cradle-grpc: "unix:/tmp/cradle_replace_zebra_ctl2.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:

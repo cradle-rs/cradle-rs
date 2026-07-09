@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_l3vpn_zebra_ctl1.sock"
+  cradle:
+    enabled: true
 # PE1 — provider edge 1 (AS 65000). Two IS-IS instances: the GLOBAL core
 # (IS-IS L2 + SR-MPLS underlay to PE2 via P) and a per-VRF IS-IS in
 # vrf-cust for the PE-CE link to CE1. iBGP VPNv4 to PE2. Two-way

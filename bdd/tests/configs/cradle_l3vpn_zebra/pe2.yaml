@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_l3vpn_zebra_ctl3.sock"
+  cradle:
+    enabled: true
 # PE2 — provider edge 2 (AS 65000). Mirror of PE1: core IS-IS+SR-MPLS
 # (Prefix-SID index 3), iBGP VPNv4 to PE1, per-VRF IS-IS to CE2 with
 # two-way redistribution (redistribute isis -> VPNv4 up, redistribute bgp

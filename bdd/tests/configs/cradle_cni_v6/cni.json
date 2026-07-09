@@ -2,6 +2,6 @@
   "cniVersion": "1.1.0",
   "name": "cradle",
   "type": "cradle-cni",
-  "grpcEndpoint": "unix:/tmp/cradle_cni_v6_ctl.sock",
+  "grpcEndpoint": "unix:cradle/grpc",
   "ipam": { "type": "cradle", "subnet": "10.244.0.0/24", "subnet6": "fd00:244::/64" }
 }

@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_mpls_zebra_ctl2.sock"
+  cradle:
+    enabled: true
 router:
   static:
     mpls:

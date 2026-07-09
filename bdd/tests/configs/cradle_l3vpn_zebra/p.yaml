@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_l3vpn_zebra_ctl2.sock"
+  cradle:
+    enabled: true
 # P — provider core transit LSR (runs no BGP). Pure IS-IS L2 + SR-MPLS;
 # performs the SR label swap / PHP between PE1 (sid 1 -> 16001) and PE2
 # (sid 3 -> 16003).

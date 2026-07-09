@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_vpws_zebra_ctl1.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:

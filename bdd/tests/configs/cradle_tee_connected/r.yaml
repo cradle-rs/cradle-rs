@@ -3,7 +3,8 @@
 # members) and neighbors resolve via redirect_neigh-driven kernel
 # ND/ARP. No static routes, no pinned neighbors, no IGP.
 system:
-  cradle-grpc: "unix:/tmp/cradle_tee_connected_ctl1.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: ra
   ipv4:

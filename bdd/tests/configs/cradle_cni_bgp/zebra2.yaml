@@ -1,7 +1,8 @@
 # passive-mode on this side avoids the simultaneous-open collision two
 # rapidly-started eBGP speakers otherwise race into (see cradle_bgp).
 system:
-  cradle-grpc: "unix:/tmp/cradle_cni_bgp_ctl2.sock"
+  cradle:
+    enabled: true
 router:
   bgp:
     global:

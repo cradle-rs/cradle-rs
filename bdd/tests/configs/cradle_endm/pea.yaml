@@ -4,7 +4,8 @@
 # VPNv6 with its per-VRF End.DT46 SID. Stopping this node's daemons mid-
 # test is the egress node failure the Mirror SID protects against.
 system:
-  cradle-grpc: "unix:/tmp/cradle_endm_ctl2.sock"
+  cradle:
+    enabled: true
 vrf:
 - name: vrf-cust
   ipv6:

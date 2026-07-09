@@ -3,7 +3,7 @@
 Feature: Cross-node pod networking over BGP-learned routes
   Two CNI nodes each run cradle + zebra-rs. eBGP between the nodes exchanges
   the per-node pod CIDRs, zebra-rs tees each learned route into its node's
-  eBPF FIB (`system cradle-grpc`), and pods on different nodes reach each
+  eBPF FIB (`system cradle enabled`), and pods on different nodes reach each
   other with kernel forwarding disabled on both nodes — every inter-node hop
   is forwarded by the eBPF data plane over a route learned from BGP. This is
   the seam Cilium leaves open: its BGP control plane only advertises, learned

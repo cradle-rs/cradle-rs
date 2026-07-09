@@ -962,9 +962,14 @@ fn config_in(world: &World, file: &str) -> String {
     )
 }
 
-/// Per-feature unix socket path for the cradle gRPC control API.
-fn grpc_sock(world: &World, name: &str) -> String {
-    format!("unix:/tmp/{}_{}.sock", world.feature_tag, name)
+/// The cradle gRPC control endpoint. Every cradle runs in its own network
+/// namespace, so they all share cradle's default endpoint `unix:cradle/grpc`
+/// — a Linux abstract socket, scoped per netns, with no filesystem path to
+/// coordinate or clean up. `serve`/`ctl` always run inside the target netns
+/// (`ip netns exec`), so the name resolves to that netns's cradle. The
+/// `name` argument is now vestigial (kept so call sites need no change).
+fn grpc_sock(_world: &World, _name: &str) -> String {
+    "unix:cradle/grpc".to_string()
 }
 
 fn zebra_bin() -> String {
@@ -1092,9 +1097,10 @@ async fn start_zebra_tee(world: &mut World, namespace: String, config: String, s
     let log = format!("logs/{}.zebra.log", scoped);
     let cfg = config_in(world, &config);
     let ep = grpc_sock(world, &sock);
-    // The tee endpoint comes from the `system cradle-grpc` config leaf in the
-    // YAML (cfg), not the CRADLE_GRPC env — so this exercises the config-leaf
-    // path. `ep` is the endpoint the YAML must point at (asserted by reaching it).
+    // The tee is driven by `system cradle enabled true` in the YAML (cfg),
+    // not the CRADLE_GRPC env — so this exercises the config path. With no
+    // `system cradle-grpc` override, the endpoint defaults to `unix:cradle/grpc`
+    // (which is `ep`), the same per-netns abstract socket cradle serves on.
     netns::spawn_in_netns_env(
         &scoped,
         &[("RUST_LOG", "info")],

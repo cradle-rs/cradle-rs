@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_evpn_srv6_zebra_multi_ctl2.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:
