@@ -45,6 +45,9 @@ enum Cmd {
     Serve(ServeArgs),
     /// Control-plane client: push configuration to a running cradle.
     Ctl(CtlArgs),
+    /// Dump the data-plane packet counters from a running cradle over its gRPC
+    /// control API.
+    Stats(StatsArgs),
     /// Dump the contents of a forwarding table (L2/IPv4/IPv6/MPLS/SRv6) from a
     /// running cradle over its gRPC control API.
     Dump(DumpArgs),
@@ -148,6 +151,15 @@ struct CtlArgs {
 }
 
 #[derive(Debug, Parser)]
+struct StatsArgs {
+    /// gRPC server endpoint: `unix:NAME` (a Linux abstract socket),
+    /// `unix:/path/to.sock` (a filesystem socket), or `tcp:127.0.0.1:50151`.
+    /// Defaults to the daemon's default, `unix:cradle/grpc`.
+    #[arg(short, long, default_value = "unix:cradle/grpc")]
+    grpc: String,
+}
+
+#[derive(Debug, Parser)]
 struct DumpArgs {
     /// gRPC server endpoint: `unix:NAME` (a Linux abstract socket),
     /// `unix:/path/to.sock` (a filesystem socket), or `tcp:127.0.0.1:50151`.
@@ -188,8 +200,6 @@ pub enum CtlOp {
         /// Path to the JSON config.
         config: PathBuf,
     },
-    /// Dump the data-plane packet counters.
-    Stats,
     /// Resolve a hypothetical flow against the live policy maps.
     PolicyTrace {
         /// Peer / client IP (v4 or v6).
@@ -257,6 +267,7 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve(args) => serve(args).await,
         Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
+        Cmd::Stats(args) => ctl::run_stats(GrpcEndpoint::parse(&args.grpc)?).await,
         Cmd::Dump(args) => {
             ctl::run_dump(
                 GrpcEndpoint::parse(&args.grpc)?,

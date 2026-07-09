@@ -46,7 +46,7 @@ sudo ./target/debug/cradle serve --config fwd.json
 ./target/debug/cradle ctl apply more.json
 
 # Dump the datapath packet counters.
-./target/debug/cradle ctl stats
+./target/debug/cradle stats
 ```
 
 Both the bootstrap `--config` and `ctl apply` consume the **same JSON config

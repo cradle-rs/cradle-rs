@@ -224,7 +224,7 @@ STAT_VXLAN_DECAP   // core → access disposition
 STAT_VXLAN_FLOOD   // BUM ingress replication
 ```
 
-Surfaced through `GetStats` / `cradle ctl stats`, and used by the BDD suite to
+Surfaced through `GetStats` / `cradle stats`, and used by the BDD suite to
 assert which VXLAN action handled a packet.
 
 ## Control-plane API (gRPC)

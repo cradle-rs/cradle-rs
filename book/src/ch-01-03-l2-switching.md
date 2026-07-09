@@ -35,7 +35,7 @@ frames are unicast to the single correct port.
   members being enumerated from the per-VLAN membership map.
 
 The `l2_forward` and `l2_flood` counters record these two paths and are visible
-through `cradle ctl stats` — see
+through `cradle stats` — see
 [Observability and Counters](ch-03-01-observability.md).
 
 ## Mixing L2 and L3

@@ -2,7 +2,7 @@
 @cradle_stats
 Feature: data-plane observability counters
   cradle keeps per-CPU packet counters at each forwarding decision point and
-  exposes them over its gRPC control API; `cradle ctl stats` dumps them.
+  exposes them over its gRPC control API; `cradle stats` dumps them.
 
   Scenario: L3 forwarding increments the eBPF stat counters
     Given a clean test environment
