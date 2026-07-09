@@ -8,11 +8,15 @@ routing FIB's operations.
 
 ## Endpoint addressing
 
-An endpoint is written in one of three forms, understood identically by server
-(`serve --grpc`) and client (`ctl --grpc`, and the zebra-rs leaf):
+An endpoint is written in one of four forms, understood identically by server
+(`serve --grpc`) and client (`ctl --grpc`, and the zebra-rs
+`system cradle grpc-endpoint` leaf). Both sides default to `unix:cradle/grpc`:
 
-- `unix:/path/to.sock` — a unix-domain socket (tonic serves and connects over
-  UDS natively; a stale socket file is cleared on bind).
+- `unix:NAME` — a Linux **abstract** socket (no leading `/`), scoped to the
+  network namespace. The default `unix:cradle/grpc` is this form; it needs no
+  filesystem path and is unique per netns.
+- `unix:/path/to.sock` — a filesystem unix-domain socket (a stale socket file is
+  cleared on bind).
 - `tcp:HOST:PORT` — a TCP endpoint.
 - a bare `HOST:PORT` — treated as TCP.
 
@@ -45,8 +49,8 @@ state as an in-process bootstrap of the same file. `ctl stats` calls `GetStats`
 and prints the result.
 
 ```sh
-cradle ctl --grpc unix:/run/cradle.sock apply services.json
-cradle ctl --grpc unix:/run/cradle.sock stats
+cradle ctl apply services.json
+cradle ctl stats
 ```
 
 The JSON schema `ctl apply` consumes is the one documented in

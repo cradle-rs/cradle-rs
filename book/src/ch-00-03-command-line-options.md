@@ -6,18 +6,18 @@ each option does.
 
 ```
 cradle serve [--config <FILE>] [--grpc <ENDPOINT>] [--pid-file <PATH>]
-cradle ctl   --grpc <ENDPOINT>  <apply <FILE> | stats>
+cradle ctl   [--grpc <ENDPOINT>]  <apply <FILE> | stats>
 ```
 
 ## `cradle serve`
 
-Loads the eBPF data plane, then optionally applies a bootstrap config and/or
+Loads the eBPF data plane, then optionally applies a bootstrap config and
 serves the gRPC control API.
 
 | Option | Short | Argument | Purpose |
 |---|---|---|---|
 | `--config` | `-c` | `FILE` | Bootstrap JSON config applied in-process at startup. |
-| `--grpc` | `-g` | `ENDPOINT` | Serve the gRPC control API on this endpoint. |
+| `--grpc` | `-g` | `ENDPOINT` | Serve the gRPC control API on this endpoint. Defaults to `unix:cradle/grpc`. |
 | `--pid-file` | | `PATH` | Write this process's PID to `PATH` at startup. |
 
 ### `-c`, `--config FILE`
@@ -30,16 +30,21 @@ data plane that can still be programmed over gRPC.
 ### `-g`, `--grpc ENDPOINT`
 
 Serves the gRPC control API — the seam the zebra-rs `FibHandle` backend drives,
-and the endpoint `cradle ctl` connects to. Three address forms are accepted:
+and the endpoint `cradle ctl` connects to. Defaults to `unix:cradle/grpc`, so
+`serve` serves the control API even when `--grpc` is omitted. Four address forms
+are accepted:
 
-- `unix:/path/to.sock` — a unix-domain socket. A stale socket file at that path
-  is removed first.
+- `unix:NAME` — a Linux **abstract** socket (no leading `/`), scoped to the
+  network namespace. The default `unix:cradle/grpc` is this form: it needs no
+  filesystem path and is unique per netns, so per-namespace daemons don't
+  collide.
+- `unix:/path/to.sock` — a filesystem unix-domain socket. A stale socket file at
+  that path is removed first.
 - `tcp:HOST:PORT` — a TCP endpoint.
 - a bare `HOST:PORT` — treated as TCP.
 
-Without `--grpc`, `serve` applies the bootstrap config (if any) and then simply
-waits for Ctrl-C. Running several daemons on one host — for example in test
-namespaces — requires giving each a distinct endpoint.
+Several daemons in the **same** network namespace need distinct endpoints;
+per-namespace daemons (the usual test layout) can all keep the default.
 
 ### `--pid-file PATH`
 
@@ -54,7 +59,7 @@ exercised across the wire.
 
 | Option | Short | Argument | Purpose |
 |---|---|---|---|
-| `--grpc` | `-g` | `ENDPOINT` | The server endpoint to connect to (same forms as above). |
+| `--grpc` | `-g` | `ENDPOINT` | The server endpoint to connect to (same forms as above). Defaults to `unix:cradle/grpc`. |
 
 ### `ctl apply FILE`
 
@@ -68,5 +73,5 @@ Fetches and prints the datapath packet counters — one line per counter, `name`
 and `packets`. See [Observability and Counters](ch-03-01-observability.md).
 
 ```sh
-cradle ctl --grpc unix:/run/cradle.sock stats
+cradle ctl stats
 ```

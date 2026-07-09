@@ -22,20 +22,33 @@ plane for free: multipath becomes ECMP nexthop groups in cradle, connected route
 and neighbors flow through the same API, and there is nothing protocol-specific in
 cradle itself.
 
-## Turning it on: the `cradle-grpc` leaf
+## Turning it on: `system cradle enabled`
 
-The tee is enabled by a single YANG config leaf in zebra-rs,
-`system cradle-grpc`, whose value is the gRPC endpoint of a running cradle:
+The tee is enabled by a single boolean under the `system cradle` container in
+zebra-rs:
 
 ```yaml
 system:
-  cradle-grpc: "unix:/run/cradle.sock"
+  cradle:
+    enabled: true
 ```
 
-With that leaf set, zebra-rs connects to cradle at the given endpoint (same
-`unix:` / `tcp:` address forms as everywhere else) and begins teeing FIB
-operations to it. Unset the leaf and zebra-rs behaves as it always did — the tee
-is entirely opt-in, gated by configuration rather than a build flag.
+With that set, zebra-rs connects to cradle at its default control socket,
+`unix:cradle/grpc` (a Linux abstract socket — the same default `cradle serve`
+listens on), and begins teeing FIB operations to it. To point the tee at a
+different endpoint, add the optional `grpc-endpoint` override (same `unix:` /
+`tcp:` address forms as everywhere else):
+
+```yaml
+system:
+  cradle:
+    enabled: true
+    grpc-endpoint: "unix:/run/cradle.sock"
+```
+
+`enabled` is the **sole switch** — `grpc-endpoint` on its own does not turn the
+tee on. Setting `enabled false` (or deleting it) disables the tee; it is
+entirely opt-in, gated by configuration rather than a build flag.
 
 ## End-to-end example
 
@@ -45,7 +58,8 @@ static route configured:
 
 ```yaml
 system:
-  cradle-grpc: "unix:/tmp/cradle_zebra_ctl.sock"
+  cradle:
+    enabled: true
 router:
   static:
     ipv4:

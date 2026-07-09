@@ -31,21 +31,22 @@ in.
 
 ## Running
 
-`cradle` has two subcommands: **`serve`** loads the data plane and (optionally)
-applies a bootstrap config and/or serves the gRPC control API; **`ctl`** is the
+`cradle` has two subcommands: **`serve`** loads the data plane, optionally
+applies a bootstrap config, and serves the gRPC control API; **`ctl`** is the
 client that pushes configuration to a running instance. Loading and attaching
 eBPF programs needs `CAP_BPF` and `CAP_NET_ADMIN`, so `serve` typically runs as
 root.
 
 ```sh
 # Load the data plane, apply a bootstrap config, and serve the control API.
-sudo ./target/debug/cradle serve --config fwd.json --grpc unix:/run/cradle.sock
+# --grpc defaults to unix:cradle/grpc, so it can be omitted.
+sudo ./target/debug/cradle serve --config fwd.json
 
-# From another shell, push more configuration over gRPC.
-./target/debug/cradle ctl --grpc unix:/run/cradle.sock apply more.json
+# From another shell, push more configuration over gRPC (same default endpoint).
+./target/debug/cradle ctl apply more.json
 
 # Dump the datapath packet counters.
-./target/debug/cradle ctl --grpc unix:/run/cradle.sock stats
+./target/debug/cradle ctl stats
 ```
 
 Both the bootstrap `--config` and `ctl apply` consume the **same JSON config
@@ -54,9 +55,9 @@ difference is only *where* it is applied: `serve --config` applies in-process at
 startup; `ctl apply` replays the identical operations over the wire against a
 running daemon.
 
-A `serve` with neither `--config` nor `--grpc` just loads the data plane and
-waits for Ctrl-C — useful for confirming the object loads and attaches on a given
-kernel.
+A `serve` with no `--config` loads the data plane and serves the control API on
+the default socket, waiting for Ctrl-C — useful for confirming the object loads
+and attaches on a given kernel, then programming it over gRPC.
 
 The full option reference is in
 [Command Line Options](ch-00-03-command-line-options.md).
