@@ -1,7 +1,4 @@
-<p align="center">
-  <img src="./images/cradle.png" alt="Logo" height="200" width="200">
-</p>
-
+<img src="./images/cradle.png" alt="Logo" height="200" width="200">
 # cradle-rs
 
 A Kubernetes **CNI plug-in** built on eBPF L2–L7 networking with real
