@@ -1,4 +1,4 @@
-# cradle-rs
+# Cradle 🪺
 
 A Kubernetes **CNI plug-in** built on eBPF L2–L7 networking with real
 routing-protocol integration — in Rust.
