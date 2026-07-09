@@ -18,6 +18,7 @@ Feature: dump forwarding-table contents
     Then the cradle dump "ipv4" in namespace "fwd" via gRPC as "ctl" should contain "10.9.9.0/24"
     And the cradle dump "ipv6" in namespace "fwd" via gRPC as "ctl" should contain "2001:db8:9::/64"
     And the cradle dump "mpls" in namespace "fwd" via gRPC as "ctl" should contain "swap"
+    And the cradle dump "mpls" in namespace "fwd" via gRPC as "ctl" should contain "pop"
     And the cradle dump "srv6" in namespace "fwd" via gRPC as "ctl" should contain "fc00:0:1::"
     And the cradle dump "l2" in namespace "fwd" via gRPC as "ctl" should contain "02:00:00:00:00:0b"
 

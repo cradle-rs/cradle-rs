@@ -17,7 +17,8 @@
     { "prefix": "2001:db8:9::/64", "nexthop": 1 }
   ],
   "ilm": [
-    { "in_label": 100, "nexthop": 2, "action": "swap" }
+    { "in_label": 100, "nexthop": 2, "action": "swap" },
+    { "in_label": 101, "nexthop": 1, "action": "swap" }
   ],
   "localsids": [
     { "sid": "fc00:0:1::", "behavior": "end", "prefix_len": 128 }
