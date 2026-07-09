@@ -1417,18 +1417,26 @@ impl Control {
             .collect())
     }
 
-    /// Serve the gRPC control API (TCP or unix socket) until Ctrl-C.
+    /// Serve the gRPC control API (TCP or unix socket) until Ctrl-C (SIGINT)
+    /// or SIGTERM.
     pub async fn serve(self, endpoint: GrpcEndpoint) -> Result<()> {
         let svc = CradleServer::new(GrpcService { control: self });
-        // Ctrl-C races the server future directly instead of driving tonic's
-        // graceful shutdown. A subscriber holding an open server-streaming RPC
-        // (zebra-rs on `WatchFdb`, or a live `Dump`) never lets a graceful
-        // drain finish, so the daemon would hang on Ctrl-C. Dropping the server
-        // future exits immediately; the eBPF programs are held by bpf_links
-        // that die with the process, so there is nothing to flush.
+        // A termination signal races the server future directly instead of
+        // driving tonic's graceful shutdown. A subscriber holding an open
+        // server-streaming RPC (zebra-rs on `WatchFdb`, or a live `Dump`) never
+        // lets a graceful drain finish, so the daemon would hang. Dropping the
+        // server future exits immediately; the eBPF programs are held by
+        // bpf_links that die with the process, so there is nothing to flush.
+        // We watch both Ctrl-C (SIGINT) and SIGTERM (systemd/`kill`/container
+        // stop) so the daemon stops promptly under either.
         let shutdown = async {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("shutdown signal received");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("shutdown signal received (SIGINT)"),
+                _ = sigterm.recv() => info!("shutdown signal received (SIGTERM)"),
+            }
         };
         match endpoint {
             GrpcEndpoint::Tcp(addr) => {
