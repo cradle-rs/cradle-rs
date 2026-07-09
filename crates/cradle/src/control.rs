@@ -134,6 +134,13 @@ pub struct Control {
     policy_revisions: Arc<Mutex<HashMap<u32, u64>>>,
     /// L7-steered (ip, port)s programmed per endpoint — replace semantics.
     l7_policies: Arc<Mutex<L7Programmed>>,
+    /// MAC-move-away hints: `(mac, bd)` published when a remote install
+    /// displaces a locally-learned entry. `WatchFdb` subscribers consume
+    /// these to emit an age event *synchronously*, instead of waiting for the
+    /// next poll to notice the (often sub-second, racy) local→remote flip —
+    /// the RFC 7432 §7.7 move-away that must reach BGP so the previous owner
+    /// withdraws before the station reappears elsewhere.
+    fdb_hint_tx: tokio::sync::broadcast::Sender<([u8; 6], u16)>,
 }
 
 impl Control {
@@ -149,7 +156,13 @@ impl Control {
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
             l7_policies: Arc::new(Mutex::new(HashMap::new())),
+            fdb_hint_tx: tokio::sync::broadcast::channel(256).0,
         }
+    }
+
+    /// Subscribe to MAC-move-away hints (see `fdb_hint_tx`).
+    pub fn subscribe_fdb_hints(&self) -> tokio::sync::broadcast::Receiver<([u8; 6], u16)> {
+        self.fdb_hint_tx.subscribe()
     }
 
     /// Start the user-space L7 transparent proxy (best-effort; logs and
@@ -331,10 +344,17 @@ impl Control {
         remote_sid: Ipv6Addr,
         nexthop_id: u32,
     ) -> Result<()> {
-        self.dp
+        let displaced_local = self
+            .dp
             .lock()
             .await
             .fdb_remote_add(mac, bd, remote_sid, nexthop_id)?;
+        // A remote install over a locally-learned MAC = the station moved away.
+        // Signal WatchFdb so it ages the MAC out immediately (RFC 7432 §7.7),
+        // rather than relying on the next poll catching the racy flip.
+        if displaced_local {
+            let _ = self.fdb_hint_tx.send((mac, bd));
+        }
         Ok(())
     }
 
@@ -1860,6 +1880,7 @@ impl Cradle for GrpcService {
     ) -> Result<Response<Self::WatchFdbStream>, Status> {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let control = self.control.clone();
+        let mut hints = self.control.subscribe_fdb_hints();
         tokio::spawn(async move {
             let fmt_mac = |mac: [u8; 6]| {
                 format!(
@@ -1893,7 +1914,33 @@ impl Cradle for GrpcService {
                     }
                 }
                 seen = current;
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                // Wake either on the periodic poll or immediately on a
+                // move-away hint. A hint fires an age event synchronously for a
+                // MAC that a remote install just displaced from local — closing
+                // the race where the local→remote flip is reverted by a fresh
+                // learn before the next poll observes it (MAC mobility).
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    hint = hints.recv() => {
+                        match hint {
+                            Ok((mac, bd)) => {
+                                if seen.remove(&(mac, bd)) {
+                                    let ev = pb::FdbEvent {
+                                        mac: fmt_mac(mac),
+                                        bd: bd as u32,
+                                        event: 1, // aged / removed (moved away)
+                                    };
+                                    if tx.send(Ok(ev)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            // Lagged/closed: fall through and re-poll.
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        }
+                    }
+                }
             }
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(

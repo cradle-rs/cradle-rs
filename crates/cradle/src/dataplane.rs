@@ -681,13 +681,21 @@ impl Dataplane {
     /// bridge domain `bd` sits behind `remote_sid` (the remote PE's `End.DT2U`
     /// SID), reached via underlay nexthop `nexthop_id`. Frames to `mac` are
     /// MAC-in-SRv6 encapsulated in the XDP stage.
+    ///
+    /// Returns `true` when this call *displaced a local entry* (the MAC was
+    /// learned on a local port and is now remote) — a MAC-move-away that the
+    /// `WatchFdb` stream must surface immediately (see `Control::add_fdb_remote`).
     pub fn fdb_remote_add(
         &mut self,
         mac: [u8; 6],
         bd: u16,
         remote_sid: Ipv6Addr,
         nexthop_id: u32,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let displaced_local = matches!(
+            self.fdb.get(&FdbKey { mac, vlan: bd }, 0),
+            Ok(e) if e.flags & FDB_F_REMOTE == 0
+        );
         self.fdb.insert(
             FdbKey { mac, vlan: bd },
             FdbEntry {
@@ -698,7 +706,7 @@ impl Dataplane {
             },
             0,
         )?;
-        Ok(())
+        Ok(displaced_local)
     }
 
     /// Remove an overlay FDB entry — but only if it still IS one. After a
