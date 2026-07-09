@@ -284,9 +284,12 @@ fn host_mac(ifname: &str) -> Result<String> {
 /// `tcp:host:port`, or a bare `host:port` — mirrors the daemon's `GrpcEndpoint`.
 async fn client(conf: &NetConf) -> Result<CradleClient<tonic::transport::Channel>> {
     let ep = &conf.grpc_endpoint;
-    connect_cradle(ep)
-        .await
-        .map_err(|e| coded(ERR_TRANSIENT, format!("cradle daemon unreachable at {ep}: {e}")))
+    connect_cradle(ep).await.map_err(|e| {
+        coded(
+            ERR_TRANSIENT,
+            format!("cradle daemon unreachable at {ep}: {e}"),
+        )
+    })
 }
 
 /// Dial the cradle daemon. `unix:NAME` (no leading `/`) is a Linux abstract
