@@ -129,7 +129,7 @@ mod tests {
     fn unix_absolute_path_is_filesystem() {
         assert!(matches!(
             GrpcEndpoint::parse("unix:/run/cradle/cradle.sock").unwrap(),
-            GrpcEndpoint::Uds(p) if p == PathBuf::from("/run/cradle/cradle.sock")
+            GrpcEndpoint::Uds(p) if p == std::path::Path::new("/run/cradle/cradle.sock")
         ));
     }
 
