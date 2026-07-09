@@ -289,7 +289,7 @@ STAT_MPLS_SWAP   // label swapped (transit LSR)
 STAT_MPLS_POP    // label popped (PHP / egress LER)
 ```
 
-Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by
+Surfaced through the existing `GetStats` RPC and `cradle stats`, and used by
 the BDD suite to assert *which* MPLS operation handled a packet.
 
 ## Control-plane API (gRPC)

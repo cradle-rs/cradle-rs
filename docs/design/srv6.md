@@ -422,7 +422,7 @@ STAT_SRV6_DX      // End.DX4/DX6 decap + cross-connect (RFC 8986 §4.4/§4.5)
 STAT_SRV6_DX2     // End.DX2/DX2V decap + raw AC emit (EVPN VPWS, RFC 8986 §4.9/§4.10)
 ```
 
-Surfaced through the existing `GetStats` RPC and `cradle ctl stats`, and used by
+Surfaced through the existing `GetStats` RPC and `cradle stats`, and used by
 the BDD suite to assert which SRv6 behavior handled a packet.
 
 ## Control-plane API (gRPC)

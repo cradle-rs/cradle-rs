@@ -68,20 +68,24 @@ Loads a JSON config and replays it as gRPC calls against the server. Equivalent
 in effect to having passed the same file to `serve --config`, but against an
 already-running daemon.
 
-### `ctl stats`
+## `cradle stats`
 
 Fetches and prints the datapath packet counters — one line per counter, `name`
 and `packets`. See [Observability and Counters](ch-03-01-observability.md).
 
+| Option | Short | Argument | Purpose |
+|---|---|---|---|
+| `--grpc` | `-g` | `ENDPOINT` | The server endpoint to connect to (same forms as above). Defaults to `unix:cradle/grpc`. |
+
 ```sh
-cradle ctl stats
+cradle stats
 ```
 
 ## `cradle dump`
 
 Streams the contents of a single forwarding table from a running `cradle` over
-gRPC and prints them in aligned columns. It is the per-entry counterpart to `ctl
-stats`: where `stats` reports *how many* packets each layer handled, `dump` shows
+gRPC and prints them in aligned columns. It is the per-entry counterpart to
+`stats`: where `stats` reports *how many* packets each layer handled, `dump` shows
 you the table entries that drove those decisions.
 
 | Option | Short | Argument | Purpose |

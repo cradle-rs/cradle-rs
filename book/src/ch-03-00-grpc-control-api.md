@@ -46,18 +46,21 @@ drives them) or by interface name.
 `ctl` is a thin client over this API. `ctl apply FILE` loads the JSON config and
 issues the corresponding RPCs in order — ports, L2 domains, nexthops, neighbors,
 routes, services, and L7 services — so it produces exactly the same data-plane
-state as an in-process bootstrap of the same file. `ctl stats` calls `GetStats`
-and prints the result.
+state as an in-process bootstrap of the same file.
 
 ```sh
 cradle ctl apply services.json
-cradle ctl stats
 ```
 
-The read side of the API is also exposed by the top-level `cradle dump`
-command, which calls the server-streaming `Dump` RPC to print a forwarding
-table's entries — see [Command Line Options](ch-00-03-command-line-options.md)
-and [Observability and Counters](ch-03-01-observability.md).
+The read side of the API is exposed by the top-level `cradle stats` command,
+which calls `GetStats` and prints the datapath counters, and by `cradle dump`,
+which calls the server-streaming `Dump` RPC to print a forwarding table's
+entries — see [Command Line Options](ch-00-03-command-line-options.md) and
+[Observability and Counters](ch-03-01-observability.md).
+
+```sh
+cradle stats
+```
 
 The JSON schema `ctl apply` consumes is the one documented in
 [Configuration Model](ch-01-00-configuration.md). Fields not expressible in that

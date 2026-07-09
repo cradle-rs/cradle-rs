@@ -2,11 +2,11 @@
 
 The datapath maintains a set of **per-CPU packet counters**, one at each
 forwarding decision point, so you can see what the eBPF program actually did with
-traffic. They are read over the gRPC `GetStats` RPC and printed by `cradle ctl
+traffic. They are read over the gRPC `GetStats` RPC and printed by `cradle
 stats`.
 
 ```sh
-$ cradle ctl stats
+$ cradle stats
 l2_forward     0
 l2_flood       0
 l3v4_forward   128

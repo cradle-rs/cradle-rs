@@ -321,12 +321,6 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                 println!("{name:<14} {v}");
             }
         }
-        CtlOp::Stats => {
-            let reply = client.get_stats(pb::StatsRequest {}).await?.into_inner();
-            for e in reply.entries {
-                println!("{:<14} {}", e.name, e.packets);
-            }
-        }
         CtlOp::Fib => {
             let s = client
                 .get_fib_summary(pb::FibSummaryRequest {})
@@ -402,6 +396,18 @@ async fn gen_routes(
         elapsed,
         prefixes.len() as f64 / elapsed.as_secs_f64()
     );
+    Ok(())
+}
+
+/// `cradle stats` — dump the data-plane packet counters over the gRPC control
+/// API, one `name value` per line.
+pub async fn run_stats(endpoint: GrpcEndpoint) -> Result<()> {
+    let channel = endpoint.connect().await?;
+    let mut client = CradleClient::new(channel);
+    let reply = client.get_stats(pb::StatsRequest {}).await?.into_inner();
+    for e in reply.entries {
+        println!("{:<14} {}", e.name, e.packets);
+    }
     Ok(())
 }
 
