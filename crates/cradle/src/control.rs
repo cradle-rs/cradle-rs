@@ -1420,6 +1420,12 @@ impl Control {
     /// Serve the gRPC control API (TCP or unix socket) until Ctrl-C.
     pub async fn serve(self, endpoint: GrpcEndpoint) -> Result<()> {
         let svc = CradleServer::new(GrpcService { control: self });
+        // Ctrl-C races the server future directly instead of driving tonic's
+        // graceful shutdown. A subscriber holding an open server-streaming RPC
+        // (zebra-rs on `WatchFdb`, or a live `Dump`) never lets a graceful
+        // drain finish, so the daemon would hang on Ctrl-C. Dropping the server
+        // future exits immediately; the eBPF programs are held by bpf_links
+        // that die with the process, so there is nothing to flush.
         let shutdown = async {
             let _ = tokio::signal::ctrl_c().await;
             info!("shutdown signal received");
@@ -1427,10 +1433,11 @@ impl Control {
         match endpoint {
             GrpcEndpoint::Tcp(addr) => {
                 info!("serving gRPC control API on tcp {addr}");
-                Server::builder()
-                    .add_service(svc)
-                    .serve_with_shutdown(addr, shutdown)
-                    .await?;
+                let srv = Server::builder().add_service(svc).serve(addr);
+                tokio::select! {
+                    r = srv => r?,
+                    _ = shutdown => {}
+                }
             }
             GrpcEndpoint::Uds(path) => {
                 let _ = std::fs::remove_file(&path); // clear a stale socket
@@ -1438,18 +1445,24 @@ impl Control {
                 let uds = tokio::net::UnixListener::bind(&path)
                     .with_context(|| format!("binding {}", path.display()))?;
                 let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
-                Server::builder()
+                let srv = Server::builder()
                     .add_service(svc)
-                    .serve_with_incoming_shutdown(incoming, shutdown)
-                    .await?;
+                    .serve_with_incoming(incoming);
+                tokio::select! {
+                    r = srv => r?,
+                    _ = shutdown => {}
+                }
             }
             GrpcEndpoint::AbstractUds(name) => {
                 info!("serving gRPC control API on abstract unix @{name}");
                 let incoming = bind_abstract_uds(&name)?;
-                Server::builder()
+                let srv = Server::builder()
                     .add_service(svc)
-                    .serve_with_incoming_shutdown(incoming, shutdown)
-                    .await?;
+                    .serve_with_incoming(incoming);
+                tokio::select! {
+                    r = srv => r?,
+                    _ = shutdown => {}
+                }
             }
         }
         Ok(())
