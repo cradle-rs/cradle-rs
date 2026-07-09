@@ -1099,8 +1099,9 @@ async fn start_zebra_tee(world: &mut World, namespace: String, config: String, s
     let ep = grpc_sock(world, &sock);
     // The tee is driven by `system cradle enabled true` in the YAML (cfg),
     // not the CRADLE_GRPC env — so this exercises the config path. With no
-    // `system cradle-grpc` override, the endpoint defaults to `unix:cradle/grpc`
-    // (which is `ep`), the same per-netns abstract socket cradle serves on.
+    // `system cradle grpc-endpoint` override, the endpoint defaults to
+    // `unix:cradle/grpc` (which is `ep`), the per-netns abstract socket cradle
+    // serves on.
     netns::spawn_in_netns_env(
         &scoped,
         &[("RUST_LOG", "info")],
