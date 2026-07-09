@@ -24,9 +24,9 @@ use cradle_common::{
     Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey, PortConfig, ServiceInfo,
     ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, DIR24_TBL8_GROUPS,
     DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIB_F_ECMP,
-    LB_ALGO_RANDOM, MAX_LABELS, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
-    STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
+    LB_ALGO_RANDOM, MAX_LABELS, MPLS_OP_POP, MPLS_OP_SWAP, NEIGH_STATE_REACHABLE, NH_F_GTP,
+    NH_F_MPLS, NH_F_SRV6, NH_F_V6, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
 };
 
 use crate::{
@@ -1162,16 +1162,31 @@ impl Dataplane {
     }
 
     /// The MPLS ILM (`cradle dump mpls`): incoming label → operation.
+    ///
+    /// The reported op is the *effective* one. zebra-rs encodes PHP /
+    /// pop-and-forward (SR adjacency SIDs, penultimate/ultimate-hop prefix
+    /// SIDs) as an `MPLS_OP_SWAP` whose nexthop carries an empty out-label
+    /// stack (`num_labels == 0`) — the datapath pops on the empty stack, not
+    /// on a distinct opcode (see `pop_and_forward` in the eBPF XDP stage). So
+    /// we resolve the nexthop unconditionally here and report such an entry as
+    /// `pop`, matching `zebra sh mpls ilm`; a swap that carries a real
+    /// out-label (`num_labels >= 1`) stays `swap`.
     fn mpls_dump(&self, resolve: bool) -> Result<Vec<DumpRow>> {
         let mut out = Vec::new();
         for item in self.mpls_fib.iter() {
             let Ok((label, e)) = item else { continue };
+            let nh = self.nexthops.get(&e.nexthop_id, 0).ok();
+            let op = match nh {
+                Some(n) if e.op == MPLS_OP_SWAP && n.num_labels == 0 => MPLS_OP_POP,
+                // Missing nexthop: can't tell, report the raw stored op.
+                _ => e.op,
+            };
             out.push(DumpRow::Mpls {
                 label,
-                op: e.op,
+                op,
                 nexthop_id: e.nexthop_id,
                 vrf: e.vrf_id,
-                nh: self.nh_resolve(resolve, e.nexthop_id, 0),
+                nh: if resolve { nh } else { None },
             });
         }
         Ok(out)
