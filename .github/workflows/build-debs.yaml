@@ -43,11 +43,27 @@ jobs:
       # cradle's build script compiles cradle-ebpf for bpfel-unknown-none via
       # aya-build, which links with bpf-linker (which itself links against LLVM).
       # Versions match the validated combo bpf-linker 0.10.3 / LLVM 18.1.
+      # apt.llvm.org's llvm.sh does a HEAD-probe reachability check and aborts
+      # with a misleading "distribution not supported" if the probe flakes
+      # (observed intermittently on arm64 runners). Retry so a transient blip
+      # doesn't fail the unattended nightly.
       - name: Install eBPF toolchain
         run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18
+          install_llvm() {
+            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+            chmod +x /tmp/llvm.sh
+            sudo /tmp/llvm.sh 18
+          }
+          n=0
+          until install_llvm; do
+            n=$((n + 1))
+            if [ "$n" -ge 4 ]; then
+              echo "apt.llvm.org install failed after $n attempts" >&2
+              exit 1
+            fi
+            echo "llvm.sh attempt $n failed (apt.llvm.org flaky); retrying in 20s..."
+            sleep 20
+          done
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
           cargo install bpf-linker --version 0.10.3 --locked
@@ -137,9 +153,21 @@ jobs:
       - name: Install eBPF toolchain
         run: |
           apt-get install -y wget lsb-release gnupg software-properties-common
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          /tmp/llvm.sh 18 -n noble
+          install_llvm() {
+            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+            chmod +x /tmp/llvm.sh
+            /tmp/llvm.sh 18 -n noble
+          }
+          n=0
+          until install_llvm; do
+            n=$((n + 1))
+            if [ "$n" -ge 4 ]; then
+              echo "apt.llvm.org install failed after $n attempts" >&2
+              exit 1
+            fi
+            echo "llvm.sh attempt $n failed (apt.llvm.org flaky); retrying in 20s..."
+            sleep 20
+          done
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
           cargo install bpf-linker --version 0.10.3 --locked
