@@ -1,0 +1,28 @@
+{
+  "ports": [
+    { "name": "fwd1", "l3": true },
+    { "name": "fwd2", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "fwd2", "gateway": "10.0.2.1" },
+    { "id": 2, "oif": "fwd2", "gateway": "10.0.2.1", "labels": [200] }
+  ],
+  "neighbors": [
+    { "oif": "fwd2", "ip": "10.0.2.1", "mac": "02:00:00:00:00:22" }
+  ],
+  "routes": [
+    { "prefix": "10.9.9.0/24", "nexthop": 1 }
+  ],
+  "routes6": [
+    { "prefix": "2001:db8:9::/64", "nexthop": 1 }
+  ],
+  "ilm": [
+    { "in_label": 100, "nexthop": 2, "action": "swap" }
+  ],
+  "localsids": [
+    { "sid": "fc00:0:1::", "behavior": "end", "prefix_len": 128 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:00:0b", "bd": 10, "remote_sid": "fc00:0:2::100", "nexthop": 1 }
+  ]
+}

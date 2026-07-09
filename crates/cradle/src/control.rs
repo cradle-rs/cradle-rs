@@ -21,7 +21,7 @@ use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::{
-    dataplane::Dataplane,
+    dataplane::{Dataplane, DumpRow, DumpTable},
     grpc::GrpcEndpoint,
     pb::{
         self,
@@ -30,11 +30,11 @@ use crate::{
     util,
 };
 use cradle_common::{
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, PORT_F_L2, PORT_F_L3, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46, SRV6_BH_END_DT6,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, STAT_MAX,
+    NextHop, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, PORT_F_L2, PORT_F_L3, SRV6_BH_END,
+    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46,
+    SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
+    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
+    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -542,6 +542,11 @@ impl Control {
     /// Snapshot the locally-learned FDB (see `Dataplane::fdb_local_entries`).
     pub async fn fdb_local_entries(&self) -> Vec<([u8; 6], u16)> {
         self.dp.lock().await.fdb_local_entries()
+    }
+
+    /// Snapshot a forwarding table for `cradle dump` (see `Dataplane::dump`).
+    pub async fn dump(&self, table: DumpTable, vrf: u32, resolve: bool) -> Result<Vec<DumpRow>> {
+        self.dp.lock().await.dump(table, vrf, resolve)
     }
 
     pub async fn set_nexthop(
@@ -1486,6 +1491,162 @@ fn st<E: std::fmt::Display>(e: E) -> Status {
     Status::internal(e.to_string())
 }
 
+/// Display name of an MPLS ILM op for `cradle dump mpls`.
+fn mpls_op_name(op: u8) -> &'static str {
+    match op {
+        MPLS_OP_SWAP => "swap",
+        MPLS_OP_POP_L3 => "pop_l3",
+        MPLS_OP_POP => "pop",
+        _ => "unknown",
+    }
+}
+
+/// Display name of an SRv6 behavior code for `cradle dump srv6`.
+fn srv6_behavior_name(b: u8) -> &'static str {
+    match b {
+        SRV6_BH_END => "End",
+        SRV6_BH_END_X => "End.X",
+        SRV6_BH_END_DT4 => "End.DT4",
+        SRV6_BH_END_DT6 => "End.DT6",
+        SRV6_BH_END_DT46 => "End.DT46",
+        SRV6_BH_END_B6 => "End.B6.Encaps",
+        SRV6_BH_UN => "uN",
+        SRV6_BH_UA => "uA",
+        SRV6_BH_UALIB => "uA.lib",
+        SRV6_BH_END_DT2U => "End.DT2U",
+        SRV6_BH_END_DT2M => "End.DT2M",
+        SRV6_BH_END_M => "End.M",
+        SRV6_BH_END_REP => "End.Replace",
+        SRV6_BH_END_X_REP => "End.X.Replace",
+        SRV6_BH_END_T => "End.T",
+        SRV6_BH_END_DX4 => "End.DX4",
+        SRV6_BH_END_DX6 => "End.DX6",
+        SRV6_BH_END_DX2 => "End.DX2",
+        SRV6_BH_END_DX2V => "End.DX2V",
+        _ => "unknown",
+    }
+}
+
+fn fmt_mac(mac: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Render a resolved nexthop into the wire `NexthopInfo`.
+fn nh_to_pb(id: u32, nh: &NextHop) -> pb::NexthopInfo {
+    let gateway = if nh.flags & NH_F_V6 != 0 {
+        let a = Ipv6Addr::from(nh.gateway_v6);
+        if a.is_unspecified() {
+            String::new()
+        } else {
+            a.to_string()
+        }
+    } else if nh.gateway_v4 != 0 {
+        Ipv4Addr::from(nh.gateway_v4.to_be_bytes()).to_string()
+    } else {
+        String::new()
+    };
+    pb::NexthopInfo {
+        id,
+        gateway,
+        oif: nh.oif,
+        labels: nh.labels[..nh.num_labels as usize].to_vec(),
+        flags: nh.flags,
+    }
+}
+
+/// Convert one domain `DumpRow` into the wire `pb::DumpEntry`.
+fn row_to_pb(row: DumpRow) -> pb::DumpEntry {
+    use pb::dump_entry::Entry;
+    let entry = match row {
+        DumpRow::Fdb {
+            mac,
+            vlan,
+            oif,
+            flags,
+            remote_sid,
+            age_ms,
+        } => {
+            let sid = Ipv6Addr::from(remote_sid);
+            Entry::Fdb(pb::FdbDumpEntry {
+                mac: fmt_mac(mac),
+                vlan: vlan as u32,
+                oif,
+                flags,
+                remote_sid: if sid.is_unspecified() {
+                    String::new()
+                } else {
+                    sid.to_string()
+                },
+                age_ms,
+            })
+        }
+        DumpRow::Fib {
+            addr,
+            prefix_len,
+            vrf,
+            nexthop_id,
+            flags,
+            nh,
+        } => Entry::Fib(pb::FibDumpEntry {
+            prefix: format!("{addr}/{prefix_len}"),
+            vrf,
+            nexthop_id,
+            flags,
+            nh: nh.map(|n| nh_to_pb(nexthop_id, &n)),
+        }),
+        DumpRow::Mpls {
+            label,
+            op,
+            nexthop_id,
+            vrf,
+            nh,
+        } => Entry::Mpls(pb::MplsDumpEntry {
+            label,
+            op: mpls_op_name(op).to_string(),
+            nexthop_id,
+            vrf,
+            nh: nh.map(|n| nh_to_pb(nexthop_id, &n)),
+        }),
+        DumpRow::Srv6LocalSid {
+            sid,
+            prefix_len,
+            behavior,
+            flavors,
+            vrf,
+            nexthop_id,
+            nh,
+        } => Entry::Srv6Localsid(pb::Srv6LocalSidEntry {
+            sid: sid.to_string(),
+            prefix_len: prefix_len as u32,
+            behavior: srv6_behavior_name(behavior).to_string(),
+            flavors: flavors as u32,
+            vrf,
+            nexthop_id,
+            nh: nh.map(|n| nh_to_pb(nexthop_id, &n)),
+        }),
+        DumpRow::Srv6Encap { nexthop_id, encap } => {
+            let segs = encap.segs[..encap.num_segs as usize]
+                .iter()
+                .map(|s| Ipv6Addr::from(*s).to_string())
+                .collect();
+            Entry::Srv6Encap(pb::Srv6EncapEntry {
+                nexthop_id,
+                mode: if encap.mode == SRV6_ENCAP_MODE_INSERT {
+                    "insert"
+                } else {
+                    "encaps"
+                }
+                .to_string(),
+                segs,
+            })
+        }
+    };
+    pb::DumpEntry { entry: Some(entry) }
+}
+
 #[tonic::async_trait]
 impl Cradle for GrpcService {
     async fn set_port(&self, req: Request<pb::Port>) -> Result<Response<pb::Empty>, Status> {
@@ -2120,6 +2281,41 @@ impl Cradle for GrpcService {
             .map(|(name, packets)| pb::StatEntry { name, packets })
             .collect();
         Ok(Response::new(pb::StatsReply { entries }))
+    }
+
+    type DumpStream = tokio_stream::wrappers::ReceiverStream<Result<pb::DumpEntry, Status>>;
+
+    /// Stream a forwarding table's contents (`cradle dump`). The snapshot is
+    /// taken under the data-plane lock up front, then streamed so an arbitrarily
+    /// large FIB never has to fit in one gRPC message.
+    async fn dump(
+        &self,
+        req: Request<pb::DumpRequest>,
+    ) -> Result<Response<Self::DumpStream>, Status> {
+        let r = req.into_inner();
+        let table = match pb::DumpTable::try_from(r.table).unwrap_or(pb::DumpTable::DumpL2) {
+            pb::DumpTable::DumpL2 => DumpTable::L2,
+            pb::DumpTable::DumpIpv4 => DumpTable::Ipv4,
+            pb::DumpTable::DumpIpv6 => DumpTable::Ipv6,
+            pb::DumpTable::DumpMpls => DumpTable::Mpls,
+            pb::DumpTable::DumpSrv6 => DumpTable::Srv6,
+        };
+        let rows = self
+            .control
+            .dump(table, r.vrf, r.resolve)
+            .await
+            .map_err(st)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            for row in rows {
+                if tx.send(Ok(row_to_pb(row))).await.is_err() {
+                    return; // client hung up
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     async fn set_masq_node(

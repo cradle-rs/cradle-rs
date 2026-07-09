@@ -214,6 +214,15 @@ impl Dir24Engine {
         self.shadow.len()
     }
 
+    /// Iterate the installed routes as `(network, prefix_len, entry)`. The
+    /// shadow is authoritative for what is programmed, so this is the dump
+    /// source for the v4 FIB in dir24 mode (`cradle dump ipv4`).
+    pub fn routes(&self) -> impl Iterator<Item = (u32, u8, FibEntry)> + '_ {
+        self.shadow
+            .iter()
+            .map(|(&(net, len), &entry)| (net, len, entry))
+    }
+
     /// Groups available for allocation (free list + quarantine).
     pub fn tbl8_free(&self) -> usize {
         self.free.len() + self.quarantine.len()

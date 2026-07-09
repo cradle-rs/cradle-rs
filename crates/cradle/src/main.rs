@@ -45,6 +45,9 @@ enum Cmd {
     Serve(ServeArgs),
     /// Control-plane client: push configuration to a running cradle.
     Ctl(CtlArgs),
+    /// Dump the contents of a forwarding table (L2/IPv4/IPv6/MPLS/SRv6) from a
+    /// running cradle over its gRPC control API.
+    Dump(DumpArgs),
     /// FIB lookup-latency harness (BPF_PROG_TEST_RUN; root, no attach) —
     /// large-fib.md's LPM vs DIR-24-8 numbers. Not CI-gating.
     FibBench(FibBenchArgs),
@@ -144,6 +147,39 @@ struct CtlArgs {
     op: CtlOp,
 }
 
+#[derive(Debug, Parser)]
+struct DumpArgs {
+    /// gRPC server endpoint: `unix:NAME` (a Linux abstract socket),
+    /// `unix:/path/to.sock` (a filesystem socket), or `tcp:127.0.0.1:50151`.
+    /// Defaults to the daemon's default, `unix:cradle/grpc`.
+    #[arg(short, long, default_value = "unix:cradle/grpc")]
+    grpc: String,
+    /// Which table to dump.
+    #[arg(value_enum)]
+    table: DumpTable,
+    /// Per-VRF FIB filter for ipv4/ipv6 (0 = global table).
+    #[arg(long, default_value_t = 0)]
+    vrf: u32,
+    /// Resolve each nexthop id to its gateway / oif / label stack.
+    #[arg(long)]
+    resolve: bool,
+}
+
+/// Which forwarding table `cradle dump` walks.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum DumpTable {
+    /// L2 bridge FDB (MAC table).
+    L2,
+    /// IPv4 FIB.
+    Ipv4,
+    /// IPv6 FIB.
+    Ipv6,
+    /// MPLS ILM (incoming-label map).
+    Mpls,
+    /// SRv6 local SIDs (My-SID) + transit encaps.
+    Srv6,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum CtlOp {
     /// Apply a JSON config to the running data plane.
@@ -220,6 +256,15 @@ async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve(args) => serve(args).await,
         Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
+        Cmd::Dump(args) => {
+            ctl::run_dump(
+                GrpcEndpoint::parse(&args.grpc)?,
+                args.table,
+                args.vrf,
+                args.resolve,
+            )
+            .await
+        }
         Cmd::FibBench(args) => bench::run(args.mode, args.routes, args.seed, args.repeat),
         Cmd::PolicyBench(args) => bench::run_policy(args.endpoints, args.rules, args.repeat),
     }
