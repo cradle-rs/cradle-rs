@@ -6,7 +6,7 @@ traffic. They are read over the gRPC `GetStats` RPC and printed by `cradle ctl
 stats`.
 
 ```sh
-$ cradle ctl --grpc unix:/run/cradle.sock stats
+$ cradle ctl stats
 l2_forward     0
 l2_flood       0
 l3v4_forward   128
