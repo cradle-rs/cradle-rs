@@ -1,9 +1,10 @@
 //! cradle — user-space control plane for the cradle-rs eBPF data plane.
 //!
-//! `serve` loads the eBPF datapath and, optionally, applies a bootstrap JSON
-//! config and/or serves the gRPC control API. `ctl` is the client that pushes
-//! configuration to a running instance. The gRPC API is the seam the zebra-rs
-//! routing control plane will eventually drive.
+//! `serve` loads the eBPF datapath and serves the gRPC control API (default
+//! `unix:cradle/grpc`, a per-netns abstract socket), optionally applying a
+//! bootstrap JSON config first. `ctl` is the client that pushes configuration
+//! to a running instance. The gRPC API is the seam the zebra-rs routing
+//! control plane will eventually drive.
 
 mod bench;
 mod cilium;
@@ -39,8 +40,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Load the data plane; optionally apply a bootstrap config and/or serve the
-    /// gRPC control API.
+    /// Load the data plane and serve the gRPC control API (default
+    /// `unix:cradle/grpc`); optionally apply a bootstrap config first.
     Serve(ServeArgs),
     /// Control-plane client: push configuration to a running cradle.
     Ctl(CtlArgs),
@@ -84,10 +85,11 @@ struct ServeArgs {
     /// Bootstrap JSON config applied at startup.
     #[arg(short, long)]
     config: Option<PathBuf>,
-    /// Serve the gRPC control API. `unix:/path/to.sock` or `tcp:127.0.0.1:50151`
-    /// (a bare `host:port` is treated as TCP).
-    #[arg(short, long)]
-    grpc: Option<String>,
+    /// Serve the gRPC control API. `unix:NAME` (a Linux abstract socket, the
+    /// default), `unix:/path/to.sock` (a filesystem socket), or
+    /// `tcp:127.0.0.1:50151` (a bare `host:port` is treated as TCP).
+    #[arg(short, long, default_value = "unix:cradle/grpc")]
+    grpc: String,
     /// Write this process's PID to this file at startup (for test harnesses).
     #[arg(long)]
     pid_file: Option<PathBuf>,
@@ -133,8 +135,10 @@ pub(crate) enum Fib4Mode {
 
 #[derive(Debug, Parser)]
 struct CtlArgs {
-    /// gRPC server endpoint: `unix:/path/to.sock` or `tcp:127.0.0.1:50151`.
-    #[arg(short, long)]
+    /// gRPC server endpoint: `unix:NAME` (a Linux abstract socket),
+    /// `unix:/path/to.sock` (a filesystem socket), or `tcp:127.0.0.1:50151`.
+    /// Defaults to the daemon's default, `unix:cradle/grpc`.
+    #[arg(short, long, default_value = "unix:cradle/grpc")]
     grpc: String,
     #[command(subcommand)]
     op: CtlOp,
@@ -363,13 +367,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // nexthops fail over to their backups (TI-LFA fast-reroute).
     control.start_link_monitor();
 
-    match args.grpc {
-        Some(s) => control.serve(GrpcEndpoint::parse(&s)?).await?, // runs until Ctrl-C
-        None => {
-            info!("cradle running — press Ctrl-C to exit");
-            tokio::signal::ctrl_c().await?;
-        }
-    }
+    // Serve the gRPC control API (default `unix:cradle/grpc`, a per-netns
+    // abstract socket); runs until Ctrl-C.
+    control.serve(GrpcEndpoint::parse(&args.grpc)?).await?;
 
     info!("shutting down");
     Ok(())

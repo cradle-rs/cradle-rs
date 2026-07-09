@@ -32,6 +32,7 @@ regex = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+tower = { workspace = true }
 
 [build-dependencies]
 aya-build = { workspace = true }

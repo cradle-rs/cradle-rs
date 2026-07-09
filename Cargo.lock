@@ -524,6 +524,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -544,6 +545,7 @@ name = "cradle-cni"
 version = "0.9.1"
 dependencies = [
  "anyhow",
+ "hyper-util",
  "prost",
  "serde",
  "serde_json",
@@ -551,6 +553,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower",
 ]
 
 [[package]]

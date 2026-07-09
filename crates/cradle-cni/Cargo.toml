@@ -18,6 +18,8 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
+tower = { workspace = true }
+hyper-util = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

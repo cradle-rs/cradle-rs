@@ -43,6 +43,7 @@ socket2 = { version = "0.5", features = ["all"] }
 regex = "1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
