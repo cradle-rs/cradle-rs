@@ -279,21 +279,58 @@ fn host_mac(ifname: &str) -> Result<String> {
     Ok(s.trim().to_string())
 }
 
-/// Connect to the cradle daemon. `unix:/path` or `tcp:host:port` / bare
-/// `host:port` (mirrors the daemon's `GrpcEndpoint`).
+/// Connect to the cradle daemon. `unix:/path` (filesystem UDS), `unix:NAME`
+/// (Linux abstract socket, e.g. the daemon's default `unix:cradle/grpc`),
+/// `tcp:host:port`, or a bare `host:port` — mirrors the daemon's `GrpcEndpoint`.
 async fn client(conf: &NetConf) -> Result<CradleClient<tonic::transport::Channel>> {
     let ep = &conf.grpc_endpoint;
-    let uri = if ep.starts_with("unix:") {
-        ep.clone()
-    } else {
-        format!("http://{}", ep.strip_prefix("tcp:").unwrap_or(ep))
-    };
-    CradleClient::connect(uri).await.map_err(|e| {
+    connect_cradle(ep).await.map_err(|e| {
         coded(
             ERR_TRANSIENT,
             format!("cradle daemon unreachable at {ep}: {e}"),
         )
     })
+}
+
+/// Dial the cradle daemon. `unix:NAME` (no leading `/`) is a Linux abstract
+/// socket, which tonic can't dial natively, so it gets a custom connector;
+/// `unix:/path` and `http://…`/`tcp` use tonic's built-in support.
+async fn connect_cradle(ep: &str) -> anyhow::Result<CradleClient<tonic::transport::Channel>> {
+    if let Some(name) = ep.strip_prefix("unix:") {
+        if !name.starts_with('/') {
+            return connect_abstract(name.trim_start_matches('@')).await;
+        }
+        return Ok(CradleClient::connect(ep.to_string()).await?);
+    }
+    let uri = format!("http://{}", ep.strip_prefix("tcp:").unwrap_or(ep));
+    Ok(CradleClient::connect(uri).await?)
+}
+
+/// Dial a cradle server on a Linux abstract Unix socket by name (tonic's UDS
+/// connector is filesystem-path only).
+async fn connect_abstract(name: &str) -> anyhow::Result<CradleClient<tonic::transport::Channel>> {
+    use hyper_util::rt::TokioIo;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr as StdSockAddr, UnixStream as StdUnixStream};
+    use tokio::net::UnixStream;
+    use tonic::transport::Endpoint;
+    use tower::service_fn;
+
+    let name = name.to_string();
+    let channel = Endpoint::try_from("http://[::]:50051")?
+        .connect_with_connector(service_fn(move |_: tonic::transport::Uri| {
+            let name = name.clone();
+            async move {
+                let addr = StdSockAddr::from_abstract_name(name.as_bytes())
+                    .map_err(std::io::Error::other)?;
+                let std = StdUnixStream::connect_addr(&addr)?;
+                std.set_nonblocking(true)?;
+                let stream = UnixStream::from_std(std)?;
+                Ok::<_, std::io::Error>(TokioIo::new(stream))
+            }
+        }))
+        .await?;
+    Ok(CradleClient::new(channel))
 }
 
 fn read_stdin() -> String {

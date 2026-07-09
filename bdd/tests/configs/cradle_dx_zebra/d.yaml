@@ -4,7 +4,8 @@
 # plain static routes are the return paths, also teed. No IGP at all —
 # this proves the config-static → tee → eBPF chain by itself.
 system:
-  cradle-grpc: "unix:/tmp/cradle_dx_zebra_ctl2.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:

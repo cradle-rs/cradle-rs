@@ -5,7 +5,8 @@
 # vrf-t: the connected LAN route and the static return route exist
 # only in that table — main has no path to either side.
 system:
-  cradle-grpc: "unix:/tmp/cradle_endt_zebra_ctl2.sock"
+  cradle:
+    enabled: true
 vrf:
 - name: vrf-t
 interface:

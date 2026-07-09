@@ -5,7 +5,8 @@
 # list rides as a cradle SRv6 nexthop. The static routes are the plain
 # forwarding underlay (policy egress e, ingress/return via s), teed.
 system:
-  cradle-grpc: "unix:/tmp/cradle_b6_zebra_ctl2.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:

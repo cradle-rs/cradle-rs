@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_tilfa_mpls_ctl1.sock"
+  cradle:
+    enabled: true
 router:
   isis:
     net: 49.0000.0000.0000.0001.00

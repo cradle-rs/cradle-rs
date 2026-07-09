@@ -12,10 +12,9 @@ use crate::{
 };
 
 pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
-    let uri = endpoint.connect_uri();
-    let mut client = CradleClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {uri}"))?;
+    let uri = endpoint.uri();
+    let channel = endpoint.connect().await?;
+    let mut client = CradleClient::new(channel);
 
     match op {
         CtlOp::Apply { config } => {

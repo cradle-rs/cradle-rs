@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_tilfa_psp_ctl4.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:

@@ -9,7 +9,8 @@
 #     that forwards the inner packet into VRF Nul.
 # The gNB peer is a static cradle node that mirrors the tunnel.
 system:
-  cradle-grpc: "unix:/tmp/cradle_mup_gtp_zebra_ctl1.sock"
+  cradle:
+    enabled: true
 vrf:
 - name: Ndl
 - name: Nul

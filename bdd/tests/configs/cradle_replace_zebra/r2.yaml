@@ -4,7 +4,8 @@
 # packet onto the c2 LAN. The static route is the return path toward
 # c1 via r1.
 system:
-  cradle-grpc: "unix:/tmp/cradle_replace_zebra_ctl3.sock"
+  cradle:
+    enabled: true
 interface:
 - if-name: lo
   ipv6:

@@ -7,7 +7,8 @@
 # pure protector — it does NOT originate ce2 into BGP; it peers with pe1
 # to import ce1 so the return path resolves.
 system:
-  cradle-grpc: "unix:/tmp/cradle_endm_ctl3.sock"
+  cradle:
+    enabled: true
 vrf:
 - name: vrf-cust
   ipv6:

@@ -1,5 +1,6 @@
 system:
-  cradle-grpc: "unix:/tmp/cradle_zebra_ctl.sock"
+  cradle:
+    enabled: true
 router:
   static:
     ipv4:

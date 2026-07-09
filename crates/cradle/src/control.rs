@@ -1438,9 +1438,44 @@ impl Control {
                     .serve_with_incoming_shutdown(incoming, shutdown)
                     .await?;
             }
+            GrpcEndpoint::AbstractUds(name) => {
+                info!("serving gRPC control API on abstract unix @{name}");
+                let incoming = bind_abstract_uds(&name)?;
+                Server::builder()
+                    .add_service(svc)
+                    .serve_with_incoming_shutdown(incoming, shutdown)
+                    .await?;
+            }
         }
         Ok(())
     }
+}
+
+/// Bind a Linux abstract Unix socket by name (no filesystem entry). The name
+/// is scoped to the process network namespace, so per-netns cradle instances
+/// don't collide — this backs the default `unix:cradle/grpc` endpoint.
+fn bind_abstract_uds(name: &str) -> Result<tokio_stream::wrappers::UnixListenerStream> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::SocketAddr as StdSockAddr;
+    use std::os::unix::net::UnixListener as StdUnixListener;
+    use tokio::net::UnixListener;
+    use tokio_stream::wrappers::UnixListenerStream;
+
+    let addr = StdSockAddr::from_abstract_name(name.as_bytes())
+        .with_context(|| format!("invalid abstract socket name '@{name}' (contains NUL?)"))?;
+    let std_listener = StdUnixListener::bind_addr(&addr).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+            "abstract gRPC socket '@{name}' is already in use \
+             (another cradle running in this network namespace?)"
+        ),
+        _ => anyhow::anyhow!("failed to bind abstract gRPC socket '@{name}': {e}"),
+    })?;
+    std_listener
+        .set_nonblocking(true)
+        .with_context(|| format!("set_nonblocking on abstract gRPC socket '@{name}'"))?;
+    let listener = UnixListener::from_std(std_listener)
+        .with_context(|| format!("register abstract gRPC socket '@{name}' with tokio"))?;
+    Ok(UnixListenerStream::new(listener))
 }
 
 struct GrpcService {

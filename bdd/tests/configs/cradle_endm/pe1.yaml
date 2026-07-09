@@ -6,7 +6,8 @@
 # H.Encaps toward peb's Mirror SID) resolves the stale VPN route, and
 # cradle's post-encap FIB re-lookup stacks the second layer in eBPF.
 system:
-  cradle-grpc: "unix:/tmp/cradle_endm_ctl1.sock"
+  cradle:
+    enabled: true
 vrf:
 - name: vrf-cust
   ipv6:
