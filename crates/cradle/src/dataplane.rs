@@ -43,6 +43,7 @@ pub enum DumpTable {
     Ipv6,
     Mpls,
     Srv6,
+    Nexthop,
 }
 
 /// One row of a forwarding-table dump — the plain domain form. `control.rs`
@@ -84,6 +85,15 @@ pub enum DumpRow {
     Srv6Encap {
         nexthop_id: u32,
         encap: Srv6Encap,
+    },
+    Nexthop {
+        id: u32,
+        nh: NextHop,
+    },
+    /// One ECMP group: `NHGROUP[id]` with its ordered `NHGROUP_MEMBER` ids.
+    NexthopGroup {
+        id: u32,
+        members: Vec<u32>,
     },
 }
 
@@ -1091,7 +1101,33 @@ impl Dataplane {
             DumpTable::Ipv6 => self.fib6_dump(vrf, resolve),
             DumpTable::Mpls => self.mpls_dump(resolve),
             DumpTable::Srv6 => self.srv6_dump(resolve),
+            DumpTable::Nexthop => self.nexthop_dump(),
         }
+    }
+
+    /// The `NEXTHOPS` table plus the ECMP groups (`NHGROUP` +
+    /// `NHGROUP_MEMBER`, members in slot order). Rows come back in map
+    /// order; groups follow the plain nexthops.
+    fn nexthop_dump(&self) -> Result<Vec<DumpRow>> {
+        let mut rows = Vec::new();
+        for item in self.nexthops.iter() {
+            let Ok((id, nh)) = item else { continue };
+            rows.push(DumpRow::Nexthop { id, nh });
+        }
+        for item in self.nhgroup.iter() {
+            let Ok((id, count)) = item else { continue };
+            let mut members = Vec::with_capacity(count as usize);
+            for slot in 0..count {
+                if let Ok(member) = self
+                    .nhgroup_member
+                    .get(&NhGroupKey { group_id: id, slot }, 0)
+                {
+                    members.push(member);
+                }
+            }
+            rows.push(DumpRow::NexthopGroup { id, members });
+        }
+        Ok(rows)
     }
 
     /// Resolve a single `nexthop_id`; `None` for ECMP group ids or misses.

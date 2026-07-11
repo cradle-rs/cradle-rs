@@ -22,6 +22,7 @@ Feature: gRPC control API drives the eBPF data plane
     Then ping from "h1" to "10.0.2.1" should fail
     When I apply cradle config "ports.json" to namespace "fwd" via gRPC as "ctl"
     Then ping from "h1" to "10.0.2.1" should eventually succeed
+    And the cradle dump "nexthop" in namespace "fwd" via gRPC as "ctl" should contain "nh_id"
 
   Scenario: Teardown topology
     Given the test topology exists

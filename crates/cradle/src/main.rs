@@ -191,6 +191,8 @@ pub enum DumpTable {
     Mpls,
     /// SRv6 local SIDs (My-SID) + transit encaps.
     Srv6,
+    /// Nexthops + ECMP group membership.
+    Nexthop,
 }
 
 #[derive(Debug, Subcommand)]
