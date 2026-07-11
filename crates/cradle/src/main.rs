@@ -34,8 +34,52 @@ use crate::{config::Config, control::Control, dataplane::Dataplane, grpc::GrpcEn
 #[derive(Debug, Parser)]
 #[command(name = "cradle", version, about = "cradle-rs eBPF L2/L3/L4 data plane")]
 struct Cli {
+    /// Log output format.
+    #[arg(long, global = true, value_enum, default_value = "terminal")]
+    log_format: LogFormat,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// Log output format (`--log-format`, mirrors zebra-rs).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LogFormat {
+    /// Human-readable text; ANSI colors only when stdout is a terminal and
+    /// `NO_COLOR` is unset (a supervising daemon piping our stdout gets
+    /// clean text without passing anything).
+    Terminal,
+    /// Human-readable text, never colored.
+    Plain,
+    /// One JSON object per line.
+    Json,
+}
+
+/// Initialize tracing per `--log-format`, honoring `RUST_LOG`.
+fn init_tracing(format: LogFormat) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    match format {
+        LogFormat::Terminal => {
+            use std::io::IsTerminal;
+            let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(std::io::stdout().is_terminal() && !no_color)
+                .init();
+        }
+        LogFormat::Plain => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .json()
+                .init();
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -275,14 +319,10 @@ pub enum CtlOp {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let cli = Cli::parse();
+    init_tracing(cli.log_format);
 
-    match Cli::parse().cmd {
+    match cli.cmd {
         Cmd::Serve(args) => serve(args).await,
         Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
         Cmd::Stats(args) => ctl::run_stats(GrpcEndpoint::parse(&args.grpc)?).await,
