@@ -23,7 +23,7 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pb::cradle_client::CradleClient;
 
@@ -221,10 +221,11 @@ fn host_ifname(container_id: &str, ifname: &str) -> String {
 /// (and `ip netns add`) mount named namespaces under /run/netns.
 fn netns_name(path: &str) -> Result<String> {
     for prefix in ["/var/run/netns/", "/run/netns/"] {
-        if let Some(name) = path.strip_prefix(prefix) {
-            if !name.is_empty() && !name.contains('/') {
-                return Ok(name.to_string());
-            }
+        if let Some(name) = path.strip_prefix(prefix)
+            && !name.is_empty()
+            && !name.contains('/')
+        {
+            return Ok(name.to_string());
         }
     }
     Err(coded(
@@ -264,10 +265,10 @@ fn mac_in_ns(ns: &str, ifname: &str) -> Result<String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut tokens = text.split_whitespace();
     while let Some(tok) = tokens.next() {
-        if tok == "link/ether" {
-            if let Some(mac) = tokens.next() {
-                return Ok(mac.to_string());
-            }
+        if tok == "link/ether"
+            && let Some(mac) = tokens.next()
+        {
+            return Ok(mac.to_string());
         }
     }
     anyhow::bail!("no link/ether in `ip -n {ns} link show {ifname}` output")

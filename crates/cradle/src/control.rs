@@ -13,15 +13,15 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use aya::{
+    Ebpf,
     programs::{
+        SchedClassifier, TcAttachType, Xdp, XdpMode,
         tc::{self, SchedClassifierLink},
         xdp::XdpLink,
-        SchedClassifier, TcAttachType, Xdp, XdpMode,
     },
-    Ebpf,
 };
 use tokio::sync::Mutex;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 use tracing::{info, warn};
 
 use crate::{
@@ -34,9 +34,9 @@ use crate::{
     util,
 };
 use cradle_common::{
-    NextHop, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, PORT_F_L2, PORT_F_L3, SRV6_BH_END,
-    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46,
-    SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3, SRV6_BH_END,
+    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6,
+    SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
     SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
     SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
@@ -1413,20 +1413,19 @@ impl Control {
             return Ok((lines, "DEFAULT-ALLOW".into()));
         }
         // L7 steering pre-empts the L4 verdict for its ports.
-        if let (IpAddr::V4(d), true) = (dst, port != 0) {
-            if self
+        if let (IpAddr::V4(d), true) = (dst, port != 0)
+            && self
                 .l7_policies
                 .lock()
                 .await
                 .values()
                 .any(|v| v.contains(&(d, port)))
-            {
-                lines.push(format!(
-                    "L7_SERVICES: {d}:{port} steered to the transparent proxy \
+        {
+            lines.push(format!(
+                "L7_SERVICES: {d}:{port} steered to the transparent proxy \
                      (HTTP allow-list enforced there)"
-                ));
-                return Ok((lines, "L7".into()));
-            }
+            ));
+            return Ok((lines, "L7".into()));
         }
         // Peer identity, exactly as the datapath resolves it.
         let identity = match src {
@@ -1861,15 +1860,15 @@ impl Cradle for GrpcService {
         // ND/ARP for it — and the L2-rewrite egress paths need the entry,
         // which the control plane tees back once the kernel learns it. A
         // 0-byte UDP datagram to the discard port is enough; best-effort.
-        if !n.gateway.is_empty() {
-            if let Ok(gw) = n.gateway.parse::<std::net::IpAddr>() {
-                tokio::spawn(async move {
-                    let bind = if gw.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
-                    if let Ok(sock) = tokio::net::UdpSocket::bind(bind).await {
-                        let _ = sock.send_to(&[], (gw, 9)).await;
-                    }
-                });
-            }
+        if !n.gateway.is_empty()
+            && let Ok(gw) = n.gateway.parse::<std::net::IpAddr>()
+        {
+            tokio::spawn(async move {
+                let bind = if gw.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+                if let Ok(sock) = tokio::net::UdpSocket::bind(bind).await {
+                    let _ = sock.send_to(&[], (gw, 9)).await;
+                }
+            });
         }
         // A GTP-U nexthop (non-empty `gtp_dst`) imposes a GTP4.E encap: outer
         // IPv4 + UDP(2152) + GTP-U(gtp_teid) over the v4 underlay `gateway`.

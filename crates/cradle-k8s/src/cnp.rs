@@ -347,9 +347,10 @@ mod tests {
             &Alloc::default(),
         );
         assert!(any_in && !any_eg && eg.is_empty());
-        assert!(ing
-            .iter()
-            .any(|r| r.identity == IDENTITY_WORLD && r.proto == 6 && r.port == 80 && !r.deny));
+        assert!(
+            ing.iter()
+                .any(|r| r.identity == IDENTITY_WORLD && r.proto == 6 && r.port == 80 && !r.deny)
+        );
         assert!(ing.iter().any(|r| r.identity == IDENTITY_HOST && r.deny));
     }
 

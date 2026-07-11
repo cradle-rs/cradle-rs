@@ -19,9 +19,10 @@ default-members = [
 
 [workspace.package]
 version = "0.9.1"
-edition = "2021"
+edition = "2024"
+authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/zebra-rs/cradle-rs"
+repository = "https://github.com/cradle-rs/cradle-rs"
 
 [workspace.dependencies]
 # --- aya eBPF stack ---

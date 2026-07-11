@@ -33,11 +33,7 @@ pub struct Svc {
 pub type Desired = BTreeMap<Key, Svc>;
 
 pub fn proto_str(proto: u8) -> &'static str {
-    if proto == UDP {
-        "udp"
-    } else {
-        "tcp"
-    }
+    if proto == UDP { "udp" } else { "tcp" }
 }
 
 /// Stable nonzero backend-slot namespace for a service key (FNV-1a/32 of the
@@ -158,10 +154,10 @@ pub fn build_desired(
             // datapath change (the reverse-SNAT rewrites replies back to
             // nodeIP:nodePort — externalTrafficPolicy Local / source-
             // preserving; cross-node Cluster policy is a follow-on).
-            if let (Some(node), Ok(np)) = (node_ip, u16::try_from(sp.node_port.unwrap_or(0))) {
-                if np != 0 {
-                    out.insert((node, np, proto), svc.clone());
-                }
+            if let (Some(node), Ok(np)) = (node_ip, u16::try_from(sp.node_port.unwrap_or(0)))
+                && np != 0
+            {
+                out.insert((node, np, proto), svc.clone());
             }
             out.insert((vip, port, proto), svc);
         }

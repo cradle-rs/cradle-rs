@@ -29,7 +29,7 @@ use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use crate::control::Control;
@@ -91,15 +91,17 @@ fn pct_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 && i + 2 <= bytes.len() - 1 + 1 {
-            if let (Some(h), Some(l)) = (
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len() + 1
+            && i + 2 <= bytes.len() - 1 + 1
+            && let (Some(h), Some(l)) = (
                 bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
                 bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
-            ) {
-                out.push((h * 16 + l) as u8);
-                i += 3;
-                continue;
-            }
+            )
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

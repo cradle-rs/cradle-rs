@@ -16,14 +16,14 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use aya::maps::{Map, MapData, RingBuf};
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Server;
@@ -31,8 +31,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
 
 use cradle_common::{
-    FlowRecord, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
-    FLOW_TRANSLATED,
+    FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
+    FlowRecord,
 };
 
 use crate::control::{Control, EpInfo};
@@ -552,15 +552,15 @@ fn in_time_window(
         return true;
     };
     let tt = (t.seconds, t.nanos);
-    if let Some(s) = since {
-        if tt < (s.seconds, s.nanos) {
-            return false;
-        }
+    if let Some(s) = since
+        && tt < (s.seconds, s.nanos)
+    {
+        return false;
     }
-    if let Some(u) = until {
-        if tt > (u.seconds, u.nanos) {
-            return false;
-        }
+    if let Some(u) = until
+        && tt > (u.seconds, u.nanos)
+    {
+        return false;
     }
     true
 }
