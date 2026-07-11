@@ -478,11 +478,12 @@ message L7Service {
 
 // Which datapath table to dump.
 enum DumpTable {
-  DUMP_L2 = 0;   // FDB (L2 bridge MAC table)
-  DUMP_IPV4 = 1; // IPv4 FIB (LPM or DIR-24-8)
-  DUMP_IPV6 = 2; // IPv6 FIB
-  DUMP_MPLS = 3; // MPLS ILM (incoming-label map)
-  DUMP_SRV6 = 4; // SRv6 local SIDs (My-SID) + transit encaps
+  DUMP_L2 = 0;      // FDB (L2 bridge MAC table)
+  DUMP_IPV4 = 1;    // IPv4 FIB (LPM or DIR-24-8)
+  DUMP_IPV6 = 2;    // IPv6 FIB
+  DUMP_MPLS = 3;    // MPLS ILM (incoming-label map)
+  DUMP_SRV6 = 4;    // SRv6 local SIDs (My-SID) + transit encaps
+  DUMP_NEXTHOP = 5; // NEXTHOPS + ECMP group membership
 }
 
 message DumpRequest {
@@ -544,6 +545,19 @@ message Srv6EncapEntry {
   repeated string segs = 3; // segment list, [0] = outer destination
 }
 
+// One NEXTHOPS entry, or — when `group` is non-empty — one ECMP group
+// (`NHGROUP`/`NHGROUP_MEMBER`): the group's member nexthop ids, with the
+// per-nexthop fields zeroed.
+message NexthopDumpEntry {
+  uint32 id = 1;
+  string gateway = 2;         // "" = on-link / unresolved
+  uint32 oif = 3;
+  uint32 flags = 4;           // NH_F_*
+  repeated uint32 labels = 5; // MPLS out-label stack, [0] = outermost
+  uint32 backup_id = 6;       // fast-reroute backup nexthop (0 = unprotected)
+  repeated uint32 group = 7;  // ECMP member ids (group rows only)
+}
+
 message DumpEntry {
   oneof entry {
     FdbDumpEntry fdb = 1;
@@ -551,6 +565,7 @@ message DumpEntry {
     MplsDumpEntry mpls = 3;
     Srv6LocalSidEntry srv6_localsid = 4;
     Srv6EncapEntry srv6_encap = 5;
+    NexthopDumpEntry nexthop = 6;
   }
 }
 

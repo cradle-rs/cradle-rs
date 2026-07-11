@@ -1812,6 +1812,27 @@ fn row_to_pb(row: DumpRow) -> pb::DumpEntry {
                 segs,
             })
         }
+        DumpRow::Nexthop { id, nh } => {
+            let info = nh_to_pb(id, &nh);
+            Entry::Nexthop(pb::NexthopDumpEntry {
+                id,
+                gateway: info.gateway,
+                oif: info.oif,
+                flags: info.flags,
+                labels: info.labels,
+                backup_id: nh.backup_id,
+                group: Vec::new(),
+            })
+        }
+        DumpRow::NexthopGroup { id, members } => Entry::Nexthop(pb::NexthopDumpEntry {
+            id,
+            gateway: String::new(),
+            oif: 0,
+            flags: 0,
+            labels: Vec::new(),
+            backup_id: 0,
+            group: members,
+        }),
     };
     pb::DumpEntry { entry: Some(entry) }
 }
@@ -2482,6 +2503,7 @@ impl Cradle for GrpcService {
             pb::DumpTable::DumpIpv6 => DumpTable::Ipv6,
             pb::DumpTable::DumpMpls => DumpTable::Mpls,
             pb::DumpTable::DumpSrv6 => DumpTable::Srv6,
+            pb::DumpTable::DumpNexthop => DumpTable::Nexthop,
         };
         let rows = self
             .control

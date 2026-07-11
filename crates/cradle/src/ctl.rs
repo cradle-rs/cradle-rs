@@ -5,7 +5,8 @@
 use anyhow::{Context as _, Result};
 
 use cradle_common::{
-    FDB_F_LOCAL, FDB_F_REMOTE, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP, FIB_F_LOCAL,
+    FDB_F_LOCAL, FDB_F_REMOTE, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP, FIB_F_LOCAL, NH_F_GTP,
+    NH_F_MPLS, NH_F_ONLINK, NH_F_SRV6, NH_F_V6,
 };
 
 use crate::{
@@ -448,6 +449,7 @@ pub async fn run_dump(
         DumpTable::Ipv6 => pb::DumpTable::DumpIpv6,
         DumpTable::Mpls => pb::DumpTable::DumpMpls,
         DumpTable::Srv6 => pb::DumpTable::DumpSrv6,
+        DumpTable::Nexthop => pb::DumpTable::DumpNexthop,
     };
     let mut stream = client
         .dump(pb::DumpRequest {
@@ -535,6 +537,36 @@ pub async fn run_dump(
                     en.segs.join(", ")
                 );
             }
+            pb::dump_entry::Entry::Nexthop(n) => {
+                if !header {
+                    println!(
+                        "{:>7} {:<26} {:>5} {:<14} {:>7} labels",
+                        "nh_id", "gateway", "oif", "flags", "backup"
+                    );
+                    header = true;
+                }
+                if !n.group.is_empty() {
+                    println!("{:>7} group members {:?}", n.id, n.group);
+                } else {
+                    println!(
+                        "{:>7} {:<26} {:>5} {:<14} {:>7} {}",
+                        n.id,
+                        if n.gateway.is_empty() {
+                            "-"
+                        } else {
+                            n.gateway.as_str()
+                        },
+                        n.oif,
+                        nh_flags(n.flags),
+                        n.backup_id,
+                        if n.labels.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{:?}", n.labels)
+                        },
+                    );
+                }
+            }
         }
         count += 1;
     }
@@ -574,6 +606,31 @@ fn fib_flags(flags: u32) -> String {
     }
     if flags & FIB_F_ECMP != 0 {
         v.push("ecmp");
+    }
+    if v.is_empty() {
+        "-".to_string()
+    } else {
+        v.join(",")
+    }
+}
+
+/// Human-readable `NH_F_*` flag summary.
+fn nh_flags(flags: u32) -> String {
+    let mut v = Vec::new();
+    if flags & NH_F_V6 != 0 {
+        v.push("v6");
+    }
+    if flags & NH_F_ONLINK != 0 {
+        v.push("onlink");
+    }
+    if flags & NH_F_MPLS != 0 {
+        v.push("mpls");
+    }
+    if flags & NH_F_SRV6 != 0 {
+        v.push("srv6");
+    }
+    if flags & NH_F_GTP != 0 {
+        v.push("gtp");
     }
     if v.is_empty() {
         "-".to_string()
