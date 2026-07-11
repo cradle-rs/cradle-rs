@@ -9,10 +9,10 @@ use cradle_common::{
 };
 
 use crate::{
+    CtlOp, DumpTable,
     config::{self, Config},
     grpc::GrpcEndpoint,
     pb::{self, cradle_client::CradleClient},
-    CtlOp, DumpTable,
 };
 
 pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {

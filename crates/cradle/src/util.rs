@@ -8,7 +8,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 
 /// Deterministic SplitMix64.
 pub fn splitmix64(state: &mut u64) -> u64 {

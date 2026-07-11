@@ -20,10 +20,10 @@
 
 use aya_ebpf::{
     bindings::{
+        TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
         bpf_adj_room_mode::{BPF_ADJ_ROOM_MAC, BPF_ADJ_ROOM_NET},
         bpf_redir_neigh, bpf_redir_neigh__bindgen_ty_1, bpf_sock_tuple,
         bpf_sock_tuple__bindgen_ty_1, bpf_sock_tuple__bindgen_ty_1__bindgen_ty_1, xdp_action,
-        TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
     },
     helpers::generated::{
         bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_redirect, bpf_redirect_neigh, bpf_sk_assign,
@@ -31,35 +31,35 @@ use aya_ebpf::{
         bpf_xdp_adjust_meta,
     },
     macros::{classifier, map, xdp},
-    maps::{lpm_trie::Key, Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf},
+    maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::{TcContext, XdpContext},
 };
 use cradle_common::{
-    fibw_unpack, mpls_lse, mpls_lse_unpack, AffinityKey, AffinityVal, Backend, Backend6,
-    BackendKey, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, Dx2vKey, FdbEntry, FdbKey,
-    FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LocalSid, MirrorEntry,
-    MirrorKey, MplsEntry, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PolicyKey,
-    PortConfig, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key,
-    VrfIdKey, AFFINITY_TIMEOUT_NS, CT_F_DNAT, CT_F_SNAT, DPC_FIB4_DIR24, EP_F_AUDIT, EP_F_EGRESS,
-    EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_BLACKHOLE,
-    FIB_F_ECMP, FIB_F_LOCAL, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED,
-    FLOW_FORWARDED, FLOW_TRANSLATED, IDENTITY_WORLD, L7_PROXY_PORT, MAX_LABELS, MAX_SEGS,
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6,
-    PCT_INBOUND, PCT_POD_INITIATED, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, SRV6_BH_END,
-    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT46,
-    SRV6_BH_END_DT6, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
-    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD,
-    SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL24_HIT, STAT_FIB4_TBL8_HIT,
-    STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD,
-    STAT_L2_FORWARD, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L3_LOCAL, STAT_L4_DNAT,
-    STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH,
-    STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6,
-    STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM,
-    STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY,
-    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
+    AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
+    CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, Dx2vKey,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIB_F_BLACKHOLE, FIB_F_ECMP,
+    FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
+    FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
+    FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT,
+    LocalSid, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, MirrorEntry,
+    MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_ALLOW, POLICY_DENY,
+    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
+    PolicyKey, PortConfig, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U,
+    SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
+    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
+    STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
+    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
+    STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
+    STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT,
+    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
+    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
+    STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
+    Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
+    XDP_META_MAGIC_L2, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -281,11 +281,7 @@ fn skb_load_v6(ctx: &TcContext, offset: usize, dst: &mut [u8; 16]) -> Result<(),
             16,
         )
     };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(())
-    }
+    if ret == 0 { Ok(()) } else { Err(()) }
 }
 
 /// Per-CPU scratch for the v6 policy keys: `cradle_tc`'s flattened frame is
@@ -2236,11 +2232,11 @@ fn apply_hencap(ctx: &TcContext, enc: &Srv6Encap, inner_ethertype: u16) -> Resul
         ctx.store(SRH_OFF + 4, &(n as u8 - 2), 0).map_err(|_| ())?; // last_entry
         ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
         ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
-                                                           // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
-                                                           // Indexed by the loop counter on the stack side (bounded by the
-                                                           // constant range, kept alive by the volatile `n` above); the
-                                                           // reversal rides in the skb offset, which the store helper
-                                                           // validates at runtime.
+        // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
+        // Indexed by the loop counter on the stack side (bounded by the
+        // constant range, kept alive by the volatile `n` above); the
+        // reversal rides in the skb offset, which the store helper
+        // validates at runtime.
         for j in 1..MAX_SEGS {
             if j >= n {
                 break;
@@ -2363,11 +2359,11 @@ fn srv6_insert(ctx: &TcContext, enc: &Srv6Encap, nh: &NextHop) -> Result<i32, ()
     ctx.store(SRH_OFF + 4, &(n as u8), 0).map_err(|_| ())?; // last_entry
     ctx.store(SRH_OFF + 5, &0u8, 0).map_err(|_| ())?; // flags
     ctx.store(SRH_OFF + 6, &0u16, 0).map_err(|_| ())?; // tag
-                                                       // segment_list[0] = the original destination (final); repair segments
-                                                       // reversed above it so segment_list[n] = segs[0] = the active segment.
-                                                       // Indexed forward on the map side (the loop constant bounds the map-value
-                                                       // pointer for the verifier); the reversal rides in the skb offset, which
-                                                       // the store helper validates at runtime.
+    // segment_list[0] = the original destination (final); repair segments
+    // reversed above it so segment_list[n] = segs[0] = the active segment.
+    // Indexed forward on the map side (the loop constant bounds the map-value
+    // pointer for the verifier); the reversal rides in the skb offset, which
+    // the store helper validates at runtime.
     ctx.store(SRH_SEGLIST_OFF, &orig_da, 0).map_err(|_| ())?;
     for j in 0..MAX_SEGS {
         if j >= n {
@@ -3375,13 +3371,13 @@ fn srv6_b6_encaps(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         unsafe { *xdp_ptr::<u8>(ctx, SRH_LAST_ENTRY_OFF)? = n as u8 - 2 };
         unsafe { *xdp_ptr::<u8>(ctx, SRH_OFF + 5)? = 0 }; // flags
         unsafe { *xdp_ptr::<u16>(ctx, SRH_OFF + 6)? = 0 }; // tag
-                                                           // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
-                                                           // The map index rides the constant-bounded loop counter; the
-                                                           // reversal lives in the packet offset, MASKED so the address is
-                                                           // not affine in `j` — otherwise LLVM rotates the loop into a
-                                                           // pointer induction whose reassociated base carries a negative
-                                                           // constant offset, which the verifier rejects on either pointer
-                                                           // kind (packet and map_value both demand a non-negative minimum).
+        // Reversed list, omitting segs[0]: segment_list[n-1-j] = segs[j].
+        // The map index rides the constant-bounded loop counter; the
+        // reversal lives in the packet offset, MASKED so the address is
+        // not affine in `j` — otherwise LLVM rotates the loop into a
+        // pointer induction whose reassociated base carries a negative
+        // constant offset, which the verifier rejects on either pointer
+        // kind (packet and map_value both demand a non-negative minimum).
         for j in 1..MAX_SEGS {
             if j >= n {
                 break;

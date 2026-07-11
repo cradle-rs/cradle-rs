@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result};
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::{Client, ResourceExt as _};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::pb;
 

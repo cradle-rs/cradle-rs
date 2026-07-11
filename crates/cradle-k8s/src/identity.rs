@@ -15,9 +15,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
+use kube::Client;
 use kube::api::{Api, DeleteParams, DynamicObject, ListParams, PostParams};
 use kube::core::{ApiResource, GroupVersionKind};
-use kube::Client;
 use serde_json::json;
 
 /// First allocatable identity (256..: Cilium's cluster-scoped range).

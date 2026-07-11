@@ -17,8 +17,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use anyhow::{bail, Result};
-use cradle_common::{fibw_entry, fibw_group, FibEntry, FibWord};
+use anyhow::{Result, bail};
+use cradle_common::{FibEntry, FibWord, fibw_entry, fibw_group};
 
 /// One map write in a plan. `Tbl8` indices are absolute slot indices
 /// (`group * 256 + low_byte`).
@@ -336,7 +336,7 @@ impl Dir24Engine {
 mod tests {
     use super::*;
     use cradle_common::{
-        fibw_unpack, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FIB_F_ECMP, FIB_F_LOCAL,
+        FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, fibw_unpack,
     };
 
     /// Simulated data-plane tables — mirrors `fib4_lookup` in cradle-ebpf.

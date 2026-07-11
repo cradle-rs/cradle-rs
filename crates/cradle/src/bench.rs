@@ -20,7 +20,7 @@
 use std::net::Ipv4Addr;
 use std::os::fd::{AsFd as _, AsRawFd as _};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use aya::programs::SchedClassifier;
 use cradle_common::{DIR24_TBL8_GROUPS, PORT_F_L3};
 use nix::libc;
@@ -307,8 +307,8 @@ mod tests {
         assert_eq!(p[14], 0x45);
         assert_eq!(p[22], 64); // TTL
         assert_eq!(&p[30..34], &[10, 0, 2, 1]); // dst
-                                                // Header checksum validates: sum over the header including the
-                                                // checksum field must be 0xffff.
+        // Header checksum validates: sum over the header including the
+        // checksum field must be 0xffff.
         let mut sum = 0u32;
         for i in (14..34).step_by(2) {
             sum += u16::from_be_bytes([p[i], p[i + 1]]) as u32;

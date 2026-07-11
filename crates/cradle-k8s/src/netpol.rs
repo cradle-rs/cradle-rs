@@ -396,10 +396,10 @@ pub fn identities(pods: &[Pod], alloc: &Alloc) -> Vec<(String, u32)> {
                 .and_then(|s| s.pod_ips.as_ref())
                 .map(|v| v.iter().map(|pip| pip.ip.clone()).collect())
                 .unwrap_or_default();
-            if let Some(ip) = status.and_then(|s| s.pod_ip.clone()) {
-                if !ips.contains(&ip) {
-                    ips.push(ip);
-                }
+            if let Some(ip) = status.and_then(|s| s.pod_ip.clone())
+                && !ips.contains(&ip)
+            {
+                ips.push(ip);
             }
             ips.into_iter().map(move |ip| (ip, id))
         })
@@ -568,10 +568,11 @@ mod tests {
         let p = endpoint_policy(&ep("default", "web"), &[np], &pods, &[], &Alloc::default());
         assert!(p.enforce);
         // host rule + (any, tcp, 8080)
-        assert!(p
-            .rules
-            .iter()
-            .any(|r| r.identity == 0 && r.proto == 6 && r.port == 8080));
+        assert!(
+            p.rules
+                .iter()
+                .any(|r| r.identity == 0 && r.proto == 6 && r.port == 8080)
+        );
     }
 
     #[test]
