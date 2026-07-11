@@ -6,14 +6,18 @@
 //! mirrors `route_*_add/del`, nexthop and neighbor updates, plus L2/L4 setup.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 
 use anyhow::{Context as _, Result};
 use aya::{
-    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpMode},
+    programs::{
+        tc::{self, SchedClassifierLink},
+        xdp::XdpLink,
+        SchedClassifier, TcAttachType, Xdp, XdpMode,
+    },
     Ebpf,
 };
 use tokio::sync::Mutex;
@@ -110,11 +114,24 @@ pub struct EpInfo {
 /// Per-endpoint (pod-ip, port)s currently steered through the L7 proxy.
 type L7Programmed = HashMap<u32, Vec<(Ipv4Addr, u16)>>;
 
+/// One attached port, keyed by ifindex in `Control::attached`: the owned aya
+/// links (dropping them detaches the TC/XDP programs — the mechanism behind
+/// `del_port`), the attach-time name (so `del_port` can find the entry after
+/// the device itself is gone), and the FIB artifacts the port derived while
+/// L3 (so a role/VRF/address change or a `del_port` removes exactly them).
+struct PortAttachment {
+    name: String,
+    _tc_ingress: SchedClassifierLink,
+    _tc_egress: SchedClassifierLink,
+    _xdp: XdpLink,
+    derived: crate::kernel::DerivedPort,
+}
+
 #[derive(Clone)]
 pub struct Control {
     bpf: Arc<Mutex<Ebpf>>,
     dp: Arc<Mutex<Dataplane>>,
-    attached: Arc<Mutex<HashSet<u32>>>,
+    attached: Arc<Mutex<HashMap<u32, PortAttachment>>>,
     /// L7 path-routing table, shared with the transparent proxy task.
     routes: Arc<Mutex<crate::l7::RouteTable>>,
     /// Dynamic BUM replication slots (EVPN Type-3 tee): `(bd, remote DT2M
@@ -148,7 +165,7 @@ impl Control {
         Self {
             bpf: Arc::new(Mutex::new(bpf)),
             dp: Arc::new(Mutex::new(dp)),
-            attached: Arc::new(Mutex::new(HashSet::new())),
+            attached: Arc::new(Mutex::new(HashMap::new())),
             routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -228,9 +245,13 @@ impl Control {
     /// plus the XDP stage — L3 ports use it for MPLS pops / SRv6 `End.DT*`
     /// decap, L2 ports for EVPN-over-SRv6 MAC-in-SRv6 encap (`bpf_skb_adjust_room`
     /// can't resize non-IP or MPLS skbs at TC, so the grow/shrink runs in XDP).
+    /// The attach links are taken out of the programs and stored per ifindex,
+    /// so `del_port` can detach by dropping them. A failed attach rolls back
+    /// (links taken so far drop → detach) and leaves the port unattached, so
+    /// a retry re-runs the full sequence.
     async fn attach(&self, name: &str, ifindex: u32, _l3: bool) -> Result<()> {
         let mut attached = self.attached.lock().await;
-        if !attached.insert(ifindex) {
+        if attached.contains_key(&ifindex) {
             return Ok(());
         }
         let mut bpf = self.bpf.lock().await;
@@ -253,26 +274,32 @@ impl Control {
         } else {
             info!("detached a stale cradle_tc filter from {name} (predecessor cleanup)");
         }
-        let prog: &mut SchedClassifier = bpf
-            .program_mut("cradle_tc")
-            .context("program cradle_tc not found")?
-            .try_into()?;
-        prog.attach(name, TcAttachType::Ingress)
-            .with_context(|| format!("attaching to {name}"))?;
-        info!("attached cradle datapath to {name} (clsact ingress)");
+        let tc_ingress = {
+            let prog: &mut SchedClassifier = bpf
+                .program_mut("cradle_tc")
+                .context("program cradle_tc not found")?
+                .try_into()?;
+            let id = prog
+                .attach(name, TcAttachType::Ingress)
+                .with_context(|| format!("attaching to {name}"))?;
+            info!("attached cradle datapath to {name} (clsact ingress)");
+            prog.take_link(id)?
+        };
         // Egress reverse-NAT: rewrite a host-network/node-local service
         // reply's source back to the VIP as it leaves toward the client
         // (its 5-tuple hits a reverse CT entry; a pod-backed reply already
         // un-NATed at ingress won't match — no double-NAT).
-        {
+        let tc_egress = {
             let eg: &mut SchedClassifier = bpf
                 .program_mut("cradle_egress")
                 .context("program cradle_egress not found")?
                 .try_into()?;
-            eg.attach(name, TcAttachType::Egress)
+            let id = eg
+                .attach(name, TcAttachType::Egress)
                 .with_context(|| format!("attaching egress reverse-NAT to {name}"))?;
-        }
-        {
+            eg.take_link(id)?
+        };
+        let xdp_link = {
             let xdp: &mut Xdp = bpf
                 .program_mut("cradle_xdp")
                 .context("program cradle_xdp not found")?
@@ -282,19 +309,35 @@ impl Control {
             // frame forwarded by the previous hop's TC stage would bypass a
             // generic-mode pop. veth supports native XDP; fall back to
             // generic (with that caveat) on drivers that don't.
-            match xdp.attach(name, XdpMode::Driver) {
-                Ok(_) => info!("attached cradle XDP stage to {name} (XDP native)"),
+            let id = match xdp.attach(name, XdpMode::Driver) {
+                Ok(id) => {
+                    info!("attached cradle XDP stage to {name} (XDP native)");
+                    id
+                }
                 Err(e) => {
                     warn!(
                         "native XDP attach on {name} failed ({e}); falling back to generic \
                          (frames redirected by an upstream TC hop bypass the pop stage)"
                     );
-                    xdp.attach(name, XdpMode::Skb)
+                    let id = xdp
+                        .attach(name, XdpMode::Skb)
                         .with_context(|| format!("attaching XDP MPLS pop to {name}"))?;
                     info!("attached cradle XDP stage to {name} (XDP generic)");
+                    id
                 }
-            }
-        }
+            };
+            xdp.take_link(id)?
+        };
+        attached.insert(
+            ifindex,
+            PortAttachment {
+                name: name.to_string(),
+                _tc_ingress: tc_ingress,
+                _tc_egress: tc_egress,
+                _xdp: xdp_link,
+                derived: Default::default(),
+            },
+        );
         Ok(())
     }
 
@@ -313,15 +356,121 @@ impl Control {
         };
         let flags = if l3 { PORT_F_L3 } else { PORT_F_L2 };
         self.attach(name, ifindex, l3).await?;
+        // Lock order (attach releases its locks first): attached → dp, the
+        // same order `del_port` uses.
+        let mut attached = self.attached.lock().await;
         let mut dp = self.dp.lock().await;
         dp.port_set(ifindex, mac, flags, vlan, vrf_id)?;
         // Routed ports auto-derive their local + connected routes from the
         // kernel (into the port's VRF table when bound), so no manual
         // route/neighbor config is needed.
-        if l3 {
-            crate::kernel::derive_port(&mut dp, name, ifindex, vrf_id)?;
+        let new_derived = if l3 {
+            crate::kernel::derive_port(&mut dp, name, ifindex, vrf_id)?
+        } else {
+            Default::default()
+        };
+        // Reconcile against what an earlier set_port derived (different VRF,
+        // addresses, or an L3→L2 role change): the new set was just
+        // (re-)inserted above, so remove only the leftovers.
+        if let Some(att) = attached.get_mut(&ifindex) {
+            for r in att
+                .derived
+                .v4
+                .iter()
+                .filter(|r| !new_derived.v4.contains(r))
+            {
+                let _ = dp.route4_del(r.0, r.1, r.2);
+            }
+            for r in att
+                .derived
+                .v6
+                .iter()
+                .filter(|r| !new_derived.v6.contains(r))
+            {
+                let _ = dp.route6_del(r.0, r.1, r.2);
+            }
+            if let Some(nh) = att.derived.nh4.filter(|_| new_derived.nh4.is_none()) {
+                let _ = dp.nexthop_del(nh);
+            }
+            if let Some(nh) = att.derived.nh6.filter(|_| new_derived.nh6.is_none()) {
+                let _ = dp.nexthop_del(nh);
+            }
+            att.derived = new_derived;
         }
         Ok(())
+    }
+
+    /// Inverse of `set_port`: detach the TC/XDP programs (by dropping their
+    /// links), drop the `PORTS` entry and the routes the port derived, and
+    /// flush the MACs learned on it. Resolves by current ifindex, falling
+    /// back to the attach-time name when the device is already gone.
+    /// Idempotent: unknown ports are a logged no-op. L2 domain membership is
+    /// the caller's to update (`set_l2_domain` replaces the full list).
+    pub async fn del_port(&self, name: &str) -> Result<()> {
+        let mut attached = self.attached.lock().await;
+        let key = match util::ifindex_of(name) {
+            Ok(ix) if attached.contains_key(&ix) => Some(ix),
+            _ => attached
+                .iter()
+                .find(|(_, a)| a.name == name)
+                .map(|(ix, _)| *ix),
+        };
+        let Some(ifindex) = key else {
+            info!("del_port {name}: not attached (no-op)");
+            return Ok(());
+        };
+        let att = attached.remove(&ifindex).expect("looked up above");
+        let mut dp = self.dp.lock().await;
+        drop(attached);
+        dp.port_del(ifindex)?;
+        for (vrf, prefix, plen) in &att.derived.v4 {
+            let _ = dp.route4_del(*vrf, *prefix, *plen);
+        }
+        for (vrf, prefix, plen) in &att.derived.v6 {
+            let _ = dp.route6_del(*vrf, *prefix, *plen);
+        }
+        if let Some(nh) = att.derived.nh4 {
+            let _ = dp.nexthop_del(nh);
+        }
+        if let Some(nh) = att.derived.nh6 {
+            let _ = dp.nexthop_del(nh);
+        }
+        let flushed = dp.fdb_flush(Some(ifindex), None)?;
+        drop(dp);
+        // Dropping the attachment drops its links → the programs detach
+        // (a no-op if the device is already gone).
+        drop(att);
+        info!("deleted port {name} (ifindex {ifindex}; flushed {flushed} learned FDB entries)");
+        Ok(())
+    }
+
+    /// Flush locally-learned FDB entries, optionally scoped to a port and/or
+    /// a bridge domain (control-plane-installed remote entries are never
+    /// touched). `WatchFdb` subscribers report the removals as age events.
+    pub async fn flush_fdb(&self, port: Option<&str>, vlan: Option<u16>) -> Result<usize> {
+        let ifindex = match port {
+            Some(name) => Some(match util::ifindex_of(name) {
+                Ok(ix) => ix,
+                // Device gone — fall back to the attach-time name so learned
+                // entries of a just-removed interface can still be flushed.
+                Err(e) => self
+                    .attached
+                    .lock()
+                    .await
+                    .iter()
+                    .find(|(_, a)| a.name == name)
+                    .map(|(ix, _)| *ix)
+                    .ok_or(e)?,
+            }),
+            None => None,
+        };
+        let flushed = self.dp.lock().await.fdb_flush(ifindex, vlan)?;
+        info!(
+            "flushed {flushed} learned FDB entries (port {}, vlan {})",
+            port.unwrap_or("any"),
+            vlan.map_or("any".to_string(), |v| v.to_string()),
+        );
+        Ok(flushed)
     }
 
     pub async fn set_l2_domain(&self, vlan: u16, members: &[String]) -> Result<()> {
@@ -1679,6 +1828,12 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn del_port(&self, req: Request<pb::PortDel>) -> Result<Response<pb::Empty>, Status> {
+        let p = req.into_inner();
+        self.control.del_port(&p.name).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn set_l2_domain(
         &self,
         req: Request<pb::L2Domain>,
@@ -1688,6 +1843,14 @@ impl Cradle for GrpcService {
             .set_l2_domain(d.vlan as u16, &d.members)
             .await
             .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn flush_fdb(&self, req: Request<pb::FdbFlush>) -> Result<Response<pb::Empty>, Status> {
+        let f = req.into_inner();
+        let port = Some(f.port.as_str()).filter(|p| !p.is_empty());
+        let vlan = (f.vlan != 0).then_some(f.vlan as u16);
+        self.control.flush_fdb(port, vlan).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

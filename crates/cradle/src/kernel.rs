@@ -25,11 +25,28 @@ use cradle_common::FIB_F_LOCAL;
 pub const CONNECTED_NH_BASE_V4: u32 = 1_000_000;
 pub const CONNECTED_NH_BASE_V6: u32 = 2_000_000;
 
+/// The FIB artifacts `derive_port` installed for one L3 port, recorded so a
+/// later `DelPort` (or a re-`SetPort` under different addresses/VRF) can
+/// remove exactly what was derived and nothing else.
+#[derive(Debug, Default, Clone)]
+pub struct DerivedPort {
+    /// Derived v4 routes as `(vrf, prefix, prefix_len)` — the `/32` locals
+    /// plus the connected subnets.
+    pub v4: Vec<(u32, Ipv4Addr, u8)>,
+    /// Derived v6 routes as `(vrf, prefix, prefix_len)`.
+    pub v6: Vec<(u32, Ipv6Addr, u8)>,
+    /// Connected nexthop ids installed (`CONNECTED_NH_BASE_* + ifindex`).
+    pub nh4: Option<u32>,
+    pub nh6: Option<u32>,
+}
+
 /// Install local + connected routes for `name` (ifindex `ifindex`) from its
 /// current kernel addresses (IPv4 and global IPv6). `vrf` scopes the derived
 /// v4 routes to that VRF table (0 = global); v6 has no VRF table yet, so v6
 /// derivation is skipped for VRF-bound ports rather than leaked globally.
-pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Result<()> {
+/// Returns the installed artifact set for later cleanup.
+pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Result<DerivedPort> {
+    let mut derived = DerivedPort::default();
     for ifa in getifaddrs()? {
         if ifa.interface_name != name {
             continue;
@@ -44,6 +61,7 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
             let ip = Ipv4Addr::from(sin.as_ref().sin_addr.s_addr.to_be());
             let plen = min.as_ref().sin_addr.s_addr.count_ones() as u8;
             dp.route4_add(vrf, ip, 32, 0, FIB_F_LOCAL)?;
+            derived.v4.push((vrf, ip, 32));
             if plen < 32 {
                 let mask_bits = if plen == 0 {
                     0
@@ -54,6 +72,8 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
                 let nh = CONNECTED_NH_BASE_V4 + ifindex;
                 dp.nexthop_set(nh, None, ifindex, &[], 0)?;
                 dp.route4_add(vrf, net, plen, nh, 0)?;
+                derived.v4.push((vrf, net, plen));
+                derived.nh4 = Some(nh);
             }
             info!("port {name}: derived v4 {ip}/{plen} (vrf {vrf})");
         } else if let (Some(sin6), Some(min6)) = (addr.as_sockaddr_in6(), mask.as_sockaddr_in6()) {
@@ -71,16 +91,19 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
                 .map(|b| b.count_ones() as u8)
                 .sum();
             dp.route6_add(vrf, ip, 128, 0, FIB_F_LOCAL)?;
+            derived.v6.push((vrf, ip, 128));
             if plen < 128 {
                 let net = mask_v6(ip, plen);
                 let nh = CONNECTED_NH_BASE_V6 + ifindex;
                 dp.nexthop_set_v6(nh, None, ifindex, &[], 0)?;
                 dp.route6_add(vrf, net, plen, nh, 0)?;
+                derived.v6.push((vrf, net, plen));
+                derived.nh6 = Some(nh);
             }
             info!("port {name}: derived v6 {ip}/{plen}");
         }
     }
-    Ok(())
+    Ok(derived)
 }
 
 /// Install a kernel `local` route for an L7 VIP, so packets steered to the

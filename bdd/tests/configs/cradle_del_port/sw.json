@@ -1,0 +1,1 @@
+{ "ports": [ {"name":"sw1","vlan":0}, {"name":"sw2","vlan":0} ] }

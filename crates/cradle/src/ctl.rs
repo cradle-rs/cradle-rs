@@ -340,6 +340,27 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                 .await?;
             println!("deleted {prefix}");
         }
+        CtlOp::DelPort { name } => {
+            client.del_port(pb::PortDel { name: name.clone() }).await?;
+            println!("deleted port {name}");
+        }
+        CtlOp::FlushFdb { port, vlan } => {
+            client
+                .flush_fdb(pb::FdbFlush {
+                    port: port.clone(),
+                    vlan: vlan as u32,
+                })
+                .await?;
+            println!(
+                "flushed learned fdb (port {}, vlan {})",
+                if port.is_empty() { "any" } else { &port },
+                if vlan == 0 {
+                    "any".to_string()
+                } else {
+                    vlan.to_string()
+                },
+            );
+        }
         CtlOp::DelService { vip, port, proto } => {
             client
                 .del_service(pb::ServiceDel {

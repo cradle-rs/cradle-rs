@@ -839,6 +839,73 @@ async fn cradle_dump_contains(
     );
 }
 
+/// Negative twin of `cradle_dump_contains`: poll until the dump output no
+/// longer contains `expect` (e.g. learned FDB entries after a flush).
+#[then(
+    expr = "the cradle dump {string} in namespace {string} via gRPC as {string} should eventually not contain {string}"
+)]
+async fn cradle_dump_not_contains(
+    world: &mut World,
+    table: String,
+    namespace: String,
+    sock: String,
+    expect: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let mut last = String::new();
+    for _ in 0..15 {
+        if let Ok(out) =
+            netns::exec_in_netns(&scoped, &cradle, &["dump", "--grpc", &ep, &table]).await
+        {
+            if !out.contains(&expect) {
+                println!(
+                    "✓ cradle dump {} no longer contains {:?} in {}",
+                    table, expect, scoped
+                );
+                return;
+            }
+            last = out;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!(
+        "cradle dump {} in {} still contains {:?}; last output:\n{}",
+        table, scoped, expect, last
+    );
+}
+
+/// Detach a port from a running cradle over gRPC (`cradle ctl del-port`).
+#[when(expr = "I delete cradle port {string} in namespace {string} via gRPC as {string}")]
+async fn cradle_del_port(world: &mut World, port: String, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    netns::exec_in_netns(
+        &scoped,
+        &cradle_bin(),
+        &["ctl", "--grpc", &ep, "del-port", &port],
+    )
+    .await
+    .expect("Failed to delete cradle port via gRPC");
+    println!(
+        "✓ deleted cradle port {} in {} via gRPC {}",
+        port, scoped, ep
+    );
+}
+
+/// Flush every locally-learned FDB entry on a running cradle over gRPC
+/// (`cradle ctl flush-fdb`, no port/vlan filter).
+#[when(expr = "I flush the cradle fdb in namespace {string} via gRPC as {string}")]
+async fn cradle_flush_fdb(world: &mut World, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    netns::exec_in_netns(&scoped, &cradle_bin(), &["ctl", "--grpc", &ep, "flush-fdb"])
+        .await
+        .expect("Failed to flush cradle fdb via gRPC");
+    println!("✓ flushed cradle fdb in {} via gRPC {}", scoped, ep);
+}
+
 /// Resolve a hypothetical flow against the live policy maps and assert the
 /// trace output (verdict line included) contains `expect`. Args string:
 /// "<src> <dst> <port>" (proto tcp, vrf 0).
