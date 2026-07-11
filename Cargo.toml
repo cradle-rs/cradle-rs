@@ -20,7 +20,7 @@ default-members = [
 [workspace.package]
 version = "0.9.1"
 edition = "2021"
-license = "Apache-2.0 OR MIT"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/zebra-rs/cradle-rs"
 
 [workspace.dependencies]

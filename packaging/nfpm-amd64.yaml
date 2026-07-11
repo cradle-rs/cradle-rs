@@ -29,3 +29,7 @@ contents:
     dst: /usr/bin/cradle-cni
   - src: ../target/release/cradle-k8s
     dst: /usr/bin/cradle-k8s
+scripts:
+  # setcap on /usr/bin/cradle so a non-root supervisor (zebra-rs
+  # `system ebpf enabled`) can spawn a working datapath.
+  postinstall: ./scripts/postinstall.sh
