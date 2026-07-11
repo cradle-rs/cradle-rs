@@ -227,6 +227,22 @@ pub enum CtlOp {
         /// Prefix, e.g. "10.0.9.16/28".
         prefix: String,
     },
+    /// Detach a port from the data plane (inverse of a config `ports` entry):
+    /// programs, PORTS entry, derived routes, and its learned FDB entries.
+    DelPort {
+        /// Interface name.
+        name: String,
+    },
+    /// Flush locally-learned FDB entries (never control-plane remote
+    /// entries), optionally scoped by port and/or bridge domain.
+    FlushFdb {
+        /// Only entries learned on this port (default: any).
+        #[arg(long, default_value = "")]
+        port: String,
+        /// Only entries in this bridge domain (default: any).
+        #[arg(long, default_value_t = 0)]
+        vlan: u16,
+    },
     /// Delete one L4 service by its (vip, port, proto) key.
     DelService {
         /// Service VIP, e.g. "10.96.0.10".

@@ -719,6 +719,22 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Unregister a port (idempotent). Program detach is the caller's job —
+    /// `Control` owns the attach links; this only clears the map entry so the
+    /// datapath stops treating the ifindex as a port.
+    pub fn port_del(&mut self, ifindex: u32) -> Result<()> {
+        let _ = self.ports.remove(&ifindex);
+        Ok(())
+    }
+
+    /// Remove a nexthop entry (idempotent; v4 and v6 share the map). Used for
+    /// the connected nexthops a deleted L3 port derived — control-plane ids
+    /// are removed by their owner via route withdrawal instead.
+    pub fn nexthop_del(&mut self, id: u32) -> Result<()> {
+        let _ = self.nexthops.remove(&id);
+        Ok(())
+    }
+
     /// Define the member ports of an L2 (VLAN/bridge) domain. Frames are flooded
     /// to these ports (minus the ingress) on BUM / unknown unicast.
     pub fn l2_domain_set(&mut self, vlan: u16, members: &[u32]) -> Result<()> {
@@ -980,6 +996,30 @@ impl Dataplane {
             let _ = self.link_down.remove(&ifindex);
         }
         Ok(())
+    }
+
+    /// Flush locally-learned FDB entries (`flags == 0` — never control-plane
+    /// remote entries), optionally filtered by learn port and/or bridge
+    /// domain (filters AND). Returns the number removed. `WatchFdb`
+    /// subscribers observe the removals in their next scan and report age
+    /// events upstream, exactly as with the aging sweep.
+    pub fn fdb_flush(&mut self, port: Option<u32>, vlan: Option<u16>) -> Result<usize> {
+        let mut stale = Vec::new();
+        for item in self.fdb.iter() {
+            let Ok((k, v)) = item else { continue };
+            if v.flags != 0 {
+                continue;
+            }
+            if port.is_some_and(|p| v.oif != p) || vlan.is_some_and(|vl| k.vlan != vl) {
+                continue;
+            }
+            stale.push(k);
+        }
+        let flushed = stale.len();
+        for k in stale {
+            let _ = self.fdb.remove(&k);
+        }
+        Ok(flushed)
     }
 
     /// Expire idle locally-learned FDB entries: remove every local
