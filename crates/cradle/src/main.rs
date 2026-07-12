@@ -7,6 +7,7 @@
 //! control plane will eventually drive.
 
 mod bench;
+mod bfd_echo;
 mod cilium;
 mod cni;
 mod config;

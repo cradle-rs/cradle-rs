@@ -5,7 +5,14 @@ use aya_build::{Package, Toolchain};
 
 fn main() -> anyhow::Result<()> {
     // gRPC control API. The build script runs in the crate dir, so reference
-    // the workspace-root proto by absolute path.
+    // the workspace-root proto by absolute path. Emit rerun-if-changed
+    // explicitly — the proto lives outside this crate's package dir, so cargo
+    // wouldn't otherwise re-run this script (and regenerate the bindings) when
+    // it changes.
+    println!(
+        "cargo:rerun-if-changed={}",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../proto/cradle.proto")
+    );
     tonic_prost_build::compile_protos(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../proto/cradle.proto"

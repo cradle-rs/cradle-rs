@@ -84,5 +84,13 @@ Source: `crates/xdp-bfd-echo-ebpf/src/main.rs` (the XDP program) +
   end-to-end; the *Echo originator* role awaits 2b (`arm_bfd_echo` seeds the maps
   but nothing transmits yet, and `watch_bfd` emits only on `down==1`, which stays
   0 for echo until the transmitter runs — so no spurious events).
-- Next: Slice 2b (Echo originator into cradle's control loop), Slice 3 (zebra
-  `bfd/reflector.rs` → gRPC + WatchBfd consumer), Slice 4 (BDD + retire crate).
+- 2026-07-12: **Slice 2b DONE** (branch `bfd-echo-originator`, commit `0548dd3`):
+  `crates/cradle/src/bfd_echo.rs` `BfdEchoEngine` — the AF_PACKET Echo transmit
+  path ported from sender.rs as a background task, driven over an `EchoCmd`
+  channel from `bfd_echo_arm`/`disarm`; `BfdEcho` gains `oif`; bootstrap timeout
+  writes `down=1` into `ECHO_TIMERS` (race-free) so `watch_bfd` reports it
+  uniformly. **The cradle-side BFD datapath is now complete** (responder +
+  control watchdog + Echo originator). build/clippy/fmt clean.
+- Next: Slice 3 (zebra `bfd/reflector.rs` child-spawn → gRPC arm/disarm +
+  WatchBfd consumer; readiness gate via engine reachability), Slice 4 (BDD
+  engine-mode + retire the standalone `xdp-bfd-echo{,-ebpf}` crates).
