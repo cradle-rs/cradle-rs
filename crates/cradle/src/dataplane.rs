@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context as _, Result};
 use aya::{
-    Ebpf,
+    Ebpf, Pod,
     maps::{
         Array, HashMap, MapData, PerCpuArray,
         lpm_trie::{Key, LpmTrie},
@@ -34,6 +34,58 @@ use crate::{
     dir24::{Dir24Engine, SlotWrite},
     util,
 };
+
+/// Userspace mirror of the eBPF `bfd::DetectState` value shared by the
+/// `ECHO_TIMERS` and `CONTROL_TIMERS` maps. Byte-identical layout (`#[repr(C)]`,
+/// 32 bytes, 8-byte aligned). We seed an entry with the `timer` zeroed (only XDP
+/// may `bpf_timer_init` it; the kernel manages and re-zeroes it) and read back
+/// `armed` / `down`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DetectStateUser {
+    /// Opaque kernel `struct bpf_timer` (`[u64; 2]`). Never touched here.
+    timer: [u64; 2],
+    /// Detection time in ns; the timer's re-arm delay (set by us at arm time).
+    detect_ns: u64,
+    /// 1 once XDP has init'd + started the timer (it took over detection).
+    armed: u8,
+    /// 1 when the timer fired (tracked packets stopped). Reset by XDP on the
+    /// next observed packet.
+    down: u8,
+    _pad: [u8; 6],
+}
+
+// SAFETY: `#[repr(C)]`, `Copy`, only integer fields with no implicit padding —
+// safe to read/write as raw map bytes (the `aya::Pod` contract).
+unsafe impl Pod for DetectStateUser {}
+
+impl DetectStateUser {
+    /// A fresh entry to seed: zeroed timer (only XDP inits it), the detection
+    /// time, not yet armed, not down.
+    fn seed(detect_ns: u64) -> Self {
+        Self {
+            timer: [0, 0],
+            detect_ns,
+            armed: 0,
+            down: 0,
+            _pad: [0; 6],
+        }
+    }
+
+    /// The kernel timer fired: tracked packets stopped for `detect_ns`.
+    pub fn is_down(&self) -> bool {
+        self.down != 0
+    }
+}
+
+/// Userspace key for the eBPF `OUR_LOCAL_IPS_V6` map: a 16-byte IPv6 address in
+/// wire order. A newtype (not bare `[u8; 16]`) so we can implement `aya::Pod`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct In6Key([u8; 16]);
+
+// SAFETY: `#[repr(C)]`, `Copy`, plain bytes with no padding.
+unsafe impl Pod for In6Key {}
 
 /// Which forwarding table `Dataplane::dump` walks (`cradle dump`).
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +191,20 @@ pub struct Dataplane {
     /// Static overlay FDB entries (EVPN over SRv6). Local MACs are still learned
     /// in the eBPF datapath; this only programs remote (`FDB_F_REMOTE`) entries.
     fdb: HashMap<MapData, FdbKey, FdbEntry>,
+    /// BFD Echo offload maps (absorbed xdp-bfd-echo): the local IPs of sessions
+    /// we originate Echo for (so XDP recognizes our own looped-back Echo), and
+    /// the per-discriminator detection state for Echo-return / control-packet
+    /// expiration (the embedded `bpf_timer` is kernel-managed).
+    bfd_local_ips: HashMap<MapData, u32, u8>,
+    bfd_local_ips6: HashMap<MapData, In6Key, u8>,
+    bfd_echo_timers: HashMap<MapData, u32, DetectStateUser>,
+    bfd_ctrl_timers: HashMap<MapData, u32, DetectStateUser>,
+    /// Refcount per local IP (several sessions may share one) so `bfd_echo_disarm`
+    /// removes an `OUR_LOCAL_IPS` entry only when its last echo session goes.
+    bfd_ip_refs: std::collections::HashMap<IpAddr, u32>,
+    /// The local IP each echo session was armed with, so disarm (keyed only by
+    /// discriminator) can release the right `OUR_LOCAL_IPS` refcount.
+    bfd_echo_local: std::collections::HashMap<u32, IpAddr>,
     /// BUM ingress-replication slots: ifindex → the slot's remote PE
     /// (`End.DT2M` SID or VTEP+VNI), both ends of each slot's veth pair.
     repl_sid: HashMap<MapData, u32, ReplTarget>,
@@ -235,6 +301,24 @@ impl Dataplane {
                 bpf.take_map("LINK_DOWN").context("map LINK_DOWN missing")?,
             )?,
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
+            bfd_local_ips: HashMap::try_from(
+                bpf.take_map("OUR_LOCAL_IPS")
+                    .context("map OUR_LOCAL_IPS missing")?,
+            )?,
+            bfd_local_ips6: HashMap::try_from(
+                bpf.take_map("OUR_LOCAL_IPS_V6")
+                    .context("map OUR_LOCAL_IPS_V6 missing")?,
+            )?,
+            bfd_echo_timers: HashMap::try_from(
+                bpf.take_map("ECHO_TIMERS")
+                    .context("map ECHO_TIMERS missing")?,
+            )?,
+            bfd_ctrl_timers: HashMap::try_from(
+                bpf.take_map("CONTROL_TIMERS")
+                    .context("map CONTROL_TIMERS missing")?,
+            )?,
+            bfd_ip_refs: std::collections::HashMap::new(),
+            bfd_echo_local: std::collections::HashMap::new(),
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
             vlan_vni: HashMap::try_from(bpf.take_map("VLAN_VNI").context("map VLAN_VNI missing")?)?,
             vni_info: HashMap::try_from(bpf.take_map("VNI_INFO").context("map VNI_INFO missing")?)?,
@@ -1024,6 +1108,87 @@ impl Dataplane {
     pub fn repl_sid_del(&mut self, ifindex: u32) -> Result<()> {
         self.repl_sid.remove(&ifindex)?;
         Ok(())
+    }
+
+    /// Arm the Echo-return detector for session `discr` (local address `local`):
+    /// record `local` in `OUR_LOCAL_IPS` (so XDP recognizes our own looped-back
+    /// Echo, keyed as it reads it off the wire) and seed the per-session
+    /// `ECHO_TIMERS` entry. The AF_PACKET Echo transmitter is a later slice; this
+    /// only wires the maps XDP reads.
+    pub fn bfd_echo_arm(&mut self, discr: u32, local: IpAddr, detect_ns: u64) -> Result<()> {
+        let refs = self.bfd_ip_refs.entry(local).or_insert(0);
+        if *refs == 0 {
+            match local {
+                IpAddr::V4(a) => self.bfd_local_ips.insert(u32::from(a), 1, 0)?,
+                IpAddr::V6(a) => self.bfd_local_ips6.insert(In6Key(a.octets()), 1, 0)?,
+            }
+        }
+        *refs += 1;
+        self.bfd_echo_local.insert(discr, local);
+        self.bfd_echo_timers
+            .insert(discr, DetectStateUser::seed(detect_ns), 0)?;
+        Ok(())
+    }
+
+    /// Disarm the Echo detector for `discr`: drop its `ECHO_TIMERS` entry
+    /// (freeing the embedded `bpf_timer` cancels any pending fire) and release
+    /// its `OUR_LOCAL_IPS` refcount, removing the local IP on the last session.
+    pub fn bfd_echo_disarm(&mut self, discr: u32) -> Result<()> {
+        let _ = self.bfd_echo_timers.remove(&discr);
+        if let Some(local) = self.bfd_echo_local.remove(&discr)
+            && let Some(refs) = self.bfd_ip_refs.get_mut(&local)
+        {
+            *refs = refs.saturating_sub(1);
+            if *refs == 0 {
+                self.bfd_ip_refs.remove(&local);
+                match local {
+                    IpAddr::V4(a) => {
+                        let _ = self.bfd_local_ips.remove(&u32::from(a));
+                    }
+                    IpAddr::V6(a) => {
+                        let _ = self.bfd_local_ips6.remove(&In6Key(a.octets()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Arm the control-packet expiration watchdog for Up session `discr`: seed
+    /// its `CONTROL_TIMERS` entry. Re-arming replaces it (updates the detection
+    /// time; the map-element replace cancels any armed timer, which re-arms on
+    /// the next observed control packet).
+    pub fn bfd_detect_arm(&mut self, discr: u32, detect_ns: u64) -> Result<()> {
+        self.bfd_ctrl_timers
+            .insert(discr, DetectStateUser::seed(detect_ns), 0)?;
+        Ok(())
+    }
+
+    /// Disarm the control watchdog for `discr` (drops the `CONTROL_TIMERS` entry).
+    pub fn bfd_detect_disarm(&mut self, discr: u32) -> Result<()> {
+        let _ = self.bfd_ctrl_timers.remove(&discr);
+        Ok(())
+    }
+
+    /// Poll both detector maps for sessions whose kernel timer fired. Returns
+    /// `(discr, kind)` where kind 0 = echo-down, 1 = detect-down.
+    pub fn bfd_poll_down(&self) -> Vec<(u32, u8)> {
+        let mut down = Vec::new();
+        for entry in self.bfd_echo_timers.iter() {
+            if let Ok((discr, st)) = entry
+                && st.is_down()
+            {
+                down.push((discr, 0));
+            }
+        }
+        for entry in self.bfd_ctrl_timers.iter() {
+            if let Ok((discr, st)) = entry
+                && st.is_down()
+            {
+                down.push((discr, 1));
+            }
+        }
+        down
     }
 
     /// Register a BUM replication slot (EVPN ingress replication): frames

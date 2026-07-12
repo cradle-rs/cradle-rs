@@ -72,6 +72,17 @@ Source: `crates/xdp-bfd-echo-ebpf/src/main.rs` (the XDP program) +
   -p cradle` links via bpf-linker, and `cradle serve` loads all three programs —
   `cradle_xdp` with the BFD branch + BTF maps + bpf_timer passes the kernel
   verifier. Nothing drives the new maps yet (Slice 2).
-- Next: Slice 2 (proto Arm/Disarm/WatchBfd + control.rs handlers + the AF_PACKET
-  originator into cradle's control loop), then Slice 3 (zebra rewiring), Slice 4
-  (BDD + retire the standalone crate).
+- 2026-07-12: **Slice 2 DONE** (branch `bfd-control-plane`, commit `6ace23c`):
+  the userspace control plane for the detection offload — proto
+  Arm/Disarm{Echo,Detect} + `WatchBfd(stream BfdEvent)`; `DetectStateUser` mirror
+  + the four BFD maps in `Dataplane`; `bfd_echo_arm`/`bfd_detect_arm`/`bfd_poll_down`;
+  the five service handlers + `watch_bfd` (modeled on `watch_fdb`). Build/clippy/
+  fmt clean; `cradle serve` resolves all four map names.
+  **Scope note:** the AF_PACKET Echo *originator* (sender.rs's transmit path) was
+  split into a follow-on **Slice 2b** — Slice 2 wires everything the XDP reads,
+  so the *responder* (Slice 1 reflect) + the *control-packet watchdog* work
+  end-to-end; the *Echo originator* role awaits 2b (`arm_bfd_echo` seeds the maps
+  but nothing transmits yet, and `watch_bfd` emits only on `down==1`, which stays
+  0 for echo until the transmitter runs — so no spurious events).
+- Next: Slice 2b (Echo originator into cradle's control loop), Slice 3 (zebra
+  `bfd/reflector.rs` → gRPC + WatchBfd consumer), Slice 4 (BDD + retire crate).

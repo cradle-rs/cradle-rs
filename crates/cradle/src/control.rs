@@ -537,6 +537,37 @@ impl Control {
         Ok(())
     }
 
+    /// Arm the BFD Echo-return detector for `discr` (see `Dataplane::bfd_echo_arm`).
+    pub async fn bfd_echo_arm(
+        &self,
+        discr: u32,
+        local: std::net::IpAddr,
+        detect_ns: u64,
+    ) -> Result<()> {
+        self.dp.lock().await.bfd_echo_arm(discr, local, detect_ns)
+    }
+
+    /// Disarm the BFD Echo detector for `discr`.
+    pub async fn bfd_echo_disarm(&self, discr: u32) -> Result<()> {
+        self.dp.lock().await.bfd_echo_disarm(discr)
+    }
+
+    /// Arm the BFD control-packet expiration watchdog for `discr`.
+    pub async fn bfd_detect_arm(&self, discr: u32, detect_ns: u64) -> Result<()> {
+        self.dp.lock().await.bfd_detect_arm(discr, detect_ns)
+    }
+
+    /// Disarm the BFD control watchdog for `discr`.
+    pub async fn bfd_detect_disarm(&self, discr: u32) -> Result<()> {
+        self.dp.lock().await.bfd_detect_disarm(discr)
+    }
+
+    /// Poll both BFD detector maps for fired sessions — `(discr, kind)` with
+    /// kind 0 = echo-down, 1 = detect-down.
+    pub async fn bfd_poll_down(&self) -> Vec<(u32, u8)> {
+        self.dp.lock().await.bfd_poll_down()
+    }
+
     /// Bind a VPWS attachment circuit to its remote End.DX2/DX2V SID.
     /// `local_sid`, when given, also installs the matching End.DX2
     /// LocalSid on the same AC (decap + raw emit) — one call binds the
@@ -2474,6 +2505,7 @@ impl Cradle for GrpcService {
     }
 
     type WatchFdbStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FdbEvent, Status>>;
+    type WatchBfdStream = tokio_stream::wrappers::ReceiverStream<Result<pb::BfdEvent, Status>>;
 
     /// Stream datapath MAC learning to the control plane: a 1s poll of the
     /// FDB map, diffed against the entries already reported on this stream.
@@ -2548,6 +2580,91 @@ impl Cradle for GrpcService {
                         }
                     }
                 }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
+    }
+
+    async fn arm_bfd_echo(&self, req: Request<pb::BfdEcho>) -> Result<Response<pb::Empty>, Status> {
+        let e = req.into_inner();
+        let local: std::net::IpAddr = e.local.parse().map_err(st)?;
+        // detection time = tx interval x detect multiplier (RFC 5880 §6.8.4),
+        // in nanoseconds. `peer` is used by the Echo transmitter (a later slice);
+        // the detector only needs `local` for OUR_LOCAL_IPS.
+        let detect_ns = e.tx_us as u64 * (e.detect_mult.max(1)) as u64 * 1000;
+        self.control
+            .bfd_echo_arm(e.discr, local, detect_ns)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn disarm_bfd_echo(
+        &self,
+        req: Request<pb::BfdKey>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        self.control
+            .bfd_echo_disarm(req.into_inner().discr)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn arm_bfd_detect(
+        &self,
+        req: Request<pb::BfdDetect>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let d = req.into_inner();
+        self.control
+            .bfd_detect_arm(d.discr, d.detect_us as u64 * 1000)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn disarm_bfd_detect(
+        &self,
+        req: Request<pb::BfdKey>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        self.control
+            .bfd_detect_disarm(req.into_inner().discr)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    /// Stream BFD detection events (echo-down / detect-down) to the daemon: a
+    /// ~500ms poll of the two detector maps' kernel-set `down` flags, deduped so
+    /// each down episode is reported once (a re-armed/re-fired session reports
+    /// again). Modeled on `watch_fdb`.
+    async fn watch_bfd(
+        &self,
+        _req: Request<pb::WatchBfdRequest>,
+    ) -> Result<Response<Self::WatchBfdStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let control = self.control.clone();
+        tokio::spawn(async move {
+            let mut reported: std::collections::HashSet<(u32, u8)> =
+                std::collections::HashSet::new();
+            loop {
+                let down: std::collections::HashSet<(u32, u8)> =
+                    control.bfd_poll_down().await.into_iter().collect();
+                for &(discr, kind) in down.difference(&reported) {
+                    let ev = pb::BfdEvent {
+                        discr,
+                        kind: kind as u32,
+                    };
+                    if tx.send(Ok(ev)).await.is_err() {
+                        return; // subscriber went away
+                    }
+                }
+                // Clear the latch for sessions no longer down (re-armed or
+                // disarmed) so a subsequent failure reports again.
+                reported.retain(|k| down.contains(k));
+                reported.extend(down);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
