@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result};
 
 use cradle_common::{
     FDB_F_LOCAL, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP,
-    FIB_F_LOCAL, NH_F_GTP, NH_F_MPLS, NH_F_ONLINK, NH_F_SRV6, NH_F_V6,
+    FIB_F_LOCAL, NH_F_GTP, NH_F_MPLS, NH_F_ONLINK, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
 };
 
 use crate::{
@@ -59,6 +59,9 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     .set_vni(pb::Vni {
                         vni: v.vni,
                         vlan: v.vlan as u32,
+                        l3: v.l3,
+                        vrf: v.vrf,
+                        rmac: v.rmac.clone().unwrap_or_default(),
                     })
                     .await?;
             }
@@ -81,6 +84,9 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         gtp_src: nh.gtp_src.clone().unwrap_or_default(),
                         gtp_dst: nh.gtp_dst.clone().unwrap_or_default(),
                         gtp_teid: nh.gtp_teid,
+                        vxlan_vtep: nh.vxlan_vtep.clone().unwrap_or_default(),
+                        vxlan_l3vni: nh.vxlan_l3vni,
+                        vxlan_rmac: nh.vxlan_rmac.clone().unwrap_or_default(),
                     })
                     .await?;
             }
@@ -670,6 +676,9 @@ fn nh_flags(flags: u32) -> String {
     }
     if flags & NH_F_GTP != 0 {
         v.push("gtp");
+    }
+    if flags & NH_F_VXLAN != 0 {
+        v.push("vxlan");
     }
     if v.is_empty() {
         "-".to_string()

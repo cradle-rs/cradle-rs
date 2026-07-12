@@ -130,12 +130,24 @@ pub struct FdbCfg {
     pub nexthop: u32,
 }
 
-/// An EVPN/VXLAN L2VNI binding: frames in bridge domain `vlan` tunnel with
-/// `vni`; received VXLAN frames with `vni` bridge in `vlan`.
+/// An EVPN/VXLAN VNI binding. An **L2VNI** (default): frames in bridge domain
+/// `vlan` tunnel with `vni`, received frames bridge in `vlan`. An **L3VNI**
+/// (`l3: true`, symmetric IRB): received frames route their inner IP in `vrf`,
+/// with this PE's router MAC `rmac` — `vlan` is unused.
 #[derive(Debug, Deserialize)]
 pub struct VniCfg {
     pub vni: u32,
+    #[serde(default)]
     pub vlan: u16,
+    /// L3VNI (symmetric IRB) instead of an L2VNI.
+    #[serde(default)]
+    pub l3: bool,
+    /// VRF the inner IP is routed in (L3VNI).
+    #[serde(default)]
+    pub vrf: u32,
+    /// This PE's router MAC for the L3VNI.
+    #[serde(default)]
+    pub rmac: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +274,16 @@ pub struct Nexthop {
     pub gtp_dst: Option<String>,
     #[serde(default)]
     pub gtp_teid: u32,
+    /// EVPN symmetric-IRB VXLAN L3 encap: a present `vxlan_vtep` makes this an
+    /// `NH_F_VXLAN` nexthop that VXLAN-wraps the routed packet with
+    /// `vxlan_l3vni` toward `vxlan_vtep` (inner dst MAC = `vxlan_rmac`, the
+    /// remote PE's router MAC), over the v4 underlay `gateway`/`oif`.
+    #[serde(default)]
+    pub vxlan_vtep: Option<String>,
+    #[serde(default)]
+    pub vxlan_l3vni: u32,
+    #[serde(default)]
+    pub vxlan_rmac: Option<String>,
 }
 
 /// A GTP-U decap PDR (`H.M.GTP4.D`).
@@ -510,9 +532,39 @@ impl Config {
             ctl.set_vtep_source(addr).await?;
         }
         for v in &self.vnis {
-            ctl.set_vni(v.vni, v.vlan).await?;
+            if v.l3 {
+                let rmac = util::parse_mac(
+                    v.rmac
+                        .as_deref()
+                        .with_context(|| format!("L3VNI {} needs an rmac", v.vni))?,
+                )?;
+                ctl.set_vni_l3(v.vni, v.vrf, rmac).await?;
+            } else {
+                ctl.set_vni(v.vni, v.vlan).await?;
+            }
         }
         for nh in &self.nexthops {
+            if let Some(vtep) = &nh.vxlan_vtep {
+                let gw = match &nh.gateway {
+                    Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
+                    None => None,
+                };
+                let oif = match &nh.oif {
+                    Some(o) => util::ifindex_of(o)?,
+                    None => anyhow::bail!("VXLAN nexthop {} needs an oif", nh.id),
+                };
+                let vtep = vtep
+                    .parse()
+                    .with_context(|| format!("bad vxlan_vtep {vtep:?}"))?;
+                let rmac = util::parse_mac(
+                    nh.vxlan_rmac
+                        .as_deref()
+                        .with_context(|| format!("VXLAN nexthop {} needs a vxlan_rmac", nh.id))?,
+                )?;
+                ctl.set_nexthop_vxlan(nh.id, gw, oif, vtep, nh.vxlan_l3vni, rmac)
+                    .await?;
+                continue;
+            }
             if let Some(dst) = &nh.gtp_dst {
                 let gw = match &nh.gateway {
                     Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),

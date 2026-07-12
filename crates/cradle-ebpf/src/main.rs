@@ -42,8 +42,8 @@ use cradle_common::{
     FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
     FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT,
     LocalSid, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, MirrorEntry,
-    MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
+    MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key,
+    Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
     POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
     PolicyKey, PortConfig, REPL_KIND_VXLAN, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6,
     SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46,
@@ -59,8 +59,9 @@ use cradle_common::{
     STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
     STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP,
     STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, XDP_META_MAGIC, XDP_META_MAGIC_DX,
-    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, fibw_unpack, mpls_lse, mpls_lse_unpack,
+    Srv6Encap, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, fibw_unpack,
+    mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -111,6 +112,10 @@ static VNI_INFO: HashMap<u32, VniInfo> = HashMap::with_max_entries(4096, 0);
 /// All-zero = VXLAN unconfigured: the decap never claims a packet.
 #[map]
 static VXLAN_SRC: Array<[u8; 4]> = Array::with_max_entries(1, 0);
+/// EVPN symmetric IRB (RFC 9135): per-nexthop VXLAN L3 encap, keyed by
+/// nexthop id (the `NH_F_VXLAN` companion to `GTP_ENCAP`).
+#[map]
+static VXLAN_ENCAP: HashMap<u32, VxlanEncap> = HashMap::with_max_entries(4096, 0);
 /// Per-instance random cookie folded into the XDP→TC metadata magic. skb
 /// metadata SURVIVES a veth hop into the neighbour's TC stage (and is not
 /// even visible to its XDP program on the veth rx path), so a constant
@@ -362,6 +367,27 @@ const VXLAN_PORT: u16 = 4789;
 const VXLAN_ENCAP_HDR_LEN: usize = 50;
 /// Offset of the VXLAN header in a received no-options VXLAN frame.
 const VXLAN_HDR_OFF: usize = L4_OFF + 8;
+/// Offset of the inner Ethernet header a symmetric-IRB VXLAN L3 encap
+/// reserves after the VXLAN header (via `BPF_F_ADJ_ROOM_ENCAP_L2`).
+const VXLAN_L3_INNER_OFF: usize = VXLAN_HDR_OFF + 8;
+/// Bytes a VXLAN L3 (symmetric-IRB) encap grows: outer IPv4(20) + UDP(8) +
+/// VXLAN(8) + the reserved inner Ethernet(14). The pre-existing outer
+/// Ethernet is reused (rewritten by `l2_xmit`), so this is 50, not 64.
+const VXLAN_L3_GROW: usize = 20 + 8 + 8 + 14;
+
+// `bpf_skb_adjust_room` encap-mode flags (uapi/linux/bpf.h) — not re-exported
+// by aya-ebpf. Grow at the MAC layer and lay the new room out as an
+// encapsulation: outer IPv4 + UDP + (our VXLAN header) + a reserved inner L2.
+const BPF_F_ADJ_ROOM_ENCAP_L3_IPV4: u64 = 1 << 1;
+const BPF_F_ADJ_ROOM_ENCAP_L4_UDP: u64 = 1 << 4;
+/// Keep skb->csum across the grow — we write the outer headers (and a zero
+/// UDP checksum) ourselves.
+const BPF_F_ADJ_ROOM_NO_CSUM_RESET: u64 = 1 << 5;
+const BPF_F_ADJ_ROOM_ENCAP_L2_ETH: u64 = 1 << 6;
+/// Reserve `len` bytes for the inner L2 header (`BPF_ADJ_ROOM_ENCAP_L2_SHIFT`).
+const fn bpf_f_adj_room_encap_l2(len: u64) -> u64 {
+    len << 56
+}
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -1779,6 +1805,13 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
         return gtp_encap(ctx, nh_id, &nh);
     }
 
+    // EVPN symmetric IRB: VXLAN-encapsulate the routed v4 packet toward the
+    // remote PE's VTEP with an L3VNI + RMAC rewrite. Tunnel model — inner
+    // TTL kept.
+    if nh.flags & NH_F_VXLAN != 0 {
+        return vxlan_l3_encap(ctx, nh_id, &nh, ETH_P_IP);
+    }
+
     // MPLS imposition (ingress LER): a labeled nexthop pushes its out-label
     // stack and egresses MPLS. Pipe-model TTL — the inner IP TTL is left
     // untouched; the label TTL is seeded from it (a dying packet still punts
@@ -1949,6 +1982,12 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     // (2152) + GTP-U(TEID). Tunnel/pipe model — the inner hop limit is kept.
     if nh.flags & NH_F_GTP != 0 {
         return gtp_encap(ctx, nh_id, &nh);
+    }
+
+    // EVPN symmetric IRB: VXLAN-encapsulate the routed v6 packet toward the
+    // remote PE's VTEP with an L3VNI + RMAC rewrite (outer is IPv4).
+    if nh.flags & NH_F_VXLAN != 0 {
+        return vxlan_l3_encap(ctx, nh_id, &nh, ETH_P_IPV6);
     }
 
     // MPLS imposition — as in the v4 path; the label TTL seeds from the
@@ -2334,6 +2373,83 @@ fn gtp_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop) -> Result<i32, ()> {
     ctx.store(L4_OFF + 12, &enc.teid, 0).map_err(|_| ())?; // TEID
 
     stat_inc(STAT_GTP_ENCAP);
+    l2_xmit(ctx, nh, ETH_P_IP)
+}
+
+/// EVPN symmetric IRB (RFC 9135): VXLAN-encapsulate a *routed* inner packet
+/// toward the remote PE's VTEP with an L3VNI, giving it a fresh inner
+/// Ethernet header — dst = the remote PE's router MAC (`VXLAN_ENCAP[nh_id]`),
+/// src = this PE's router MAC for the L3VNI (`VNI_INFO[l3vni].rmac`). The
+/// remote PE, seeing the inner dst MAC is its own RMAC, routes the inner IP
+/// in the L3VNI's VRF. `bpf_skb_adjust_room` in encap mode grows the room and
+/// reserves the inner L2; the pre-existing (routed) Ethernet header is reused
+/// as the outer and rewritten by `l2_xmit`. UDP checksum 0 (RFC 7348 §4.3).
+#[inline(always)]
+fn vxlan_l3_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop, inner_et: u16) -> Result<i32, ()> {
+    let enc: VxlanEncap = match VXLAN_ENCAP.get_ptr(&nh_id) {
+        Some(e) => unsafe { *e },
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    // Local router MAC for this L3VNI (the inner source MAC). Absent = the
+    // L3VNI was never bound; punt.
+    let local_rmac: [u8; 6] = match VNI_INFO.get_ptr(&enc.l3vni) {
+        Some(i) => unsafe { (*i).rmac },
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    let src4: [u8; 4] = match VXLAN_SRC.get(0) {
+        Some(s) if *s != [0; 4] => *s,
+        _ => return Ok(TC_ACT_PIPE as i32), // no local VTEP configured
+    };
+    // Inner IP length (the routed packet), captured before the grow.
+    let inner_len = (ctx.len() as usize).saturating_sub(EthHdr::LEN) as u16;
+    let ip_total = inner_len + VXLAN_L3_GROW as u16; // 20 IP + 8 UDP + 8 VXLAN + 14 inner eth
+    let udp_len = inner_len + (VXLAN_L3_GROW - 20) as u16; // 8 UDP + 8 VXLAN + 14 inner eth
+
+    let flags = BPF_F_ADJ_ROOM_ENCAP_L3_IPV4
+        | BPF_F_ADJ_ROOM_ENCAP_L4_UDP
+        | BPF_F_ADJ_ROOM_ENCAP_L2_ETH
+        | BPF_F_ADJ_ROOM_NO_CSUM_RESET
+        | bpf_f_adj_room_encap_l2(EthHdr::LEN as u64);
+    ctx.skb
+        .adjust_room(VXLAN_L3_GROW as i32, BPF_ADJ_ROOM_MAC, flags)
+        .map_err(|_| ())?;
+
+    // Outer IPv4 header.
+    let csum = ipv4_hdr_csum(ip_total, src4, enc.vtep);
+    ctx.store(IP_VER_IHL_OFF, &0x45u8, 0).map_err(|_| ())?; // version 4, IHL 5
+    ctx.store(IP_VER_IHL_OFF + 1, &0u8, 0).map_err(|_| ())?; // TOS
+    ctx.store(IP_VER_IHL_OFF + 2, &ip_total.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(IP_VER_IHL_OFF + 4, &0u16, 0).map_err(|_| ())?; // identification
+    ctx.store(IP_VER_IHL_OFF + 6, &0u16, 0).map_err(|_| ())?; // flags / frag off
+    ctx.store(IP_TTL_OFF, &64u8, 0).map_err(|_| ())?;
+    ctx.store(IP_PROTO_OFF, &IPPROTO_UDP, 0).map_err(|_| ())?;
+    ctx.store(IP_CSUM_OFF, &csum.to_be(), 0).map_err(|_| ())?;
+    ctx.store(IP_SRC_OFF, &src4, 0).map_err(|_| ())?;
+    ctx.store(IP_DST_OFF, &enc.vtep, 0).map_err(|_| ())?;
+
+    // UDP header (source port = dport here; checksum 0 — optional over IPv4).
+    ctx.store(L4_OFF, &VXLAN_PORT.to_be(), 0).map_err(|_| ())?;
+    ctx.store(L4_OFF + 2, &VXLAN_PORT.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(L4_OFF + 4, &udp_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(L4_OFF + 6, &0u16, 0).map_err(|_| ())?;
+
+    // VXLAN header: I flag, L3VNI in the upper 24 bits of the second word.
+    ctx.store(VXLAN_HDR_OFF, &0x0800_0000u32.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(VXLAN_HDR_OFF + 4, &(enc.l3vni << 8).to_be(), 0)
+        .map_err(|_| ())?;
+
+    // Inner Ethernet: dst = remote RMAC, src = local RMAC, ethertype = inner.
+    ctx.store(VXLAN_L3_INNER_OFF, &enc.rmac, 0)
+        .map_err(|_| ())?;
+    ctx.store(VXLAN_L3_INNER_OFF + 6, &local_rmac, 0)
+        .map_err(|_| ())?;
+    ctx.store(VXLAN_L3_INNER_OFF + 12, &inner_et.to_be(), 0)
+        .map_err(|_| ())?;
+
+    stat_inc(STAT_VXLAN_ENCAP);
     l2_xmit(ctx, nh, ETH_P_IP)
 }
 
@@ -3008,16 +3124,26 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
     let vni = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, VXLAN_HDR_OFF + 4)? }) >> 8;
-    let bd: u16 = match VNI_INFO.get_ptr(&vni) {
-        Some(i) => unsafe { (*i).vlan },
+    // An L3VNI (symmetric IRB) routes the inner IP in `vrf_id` — hand it to
+    // TC's `l3_forward` with the L3 VRF meta (the End.DT46 pattern); an L2VNI
+    // bridges the inner frame in `vlan` via the L2 meta. Both keep the inner
+    // Ethernet header intact after the strip: the L3 path reads the inner IP
+    // at the normal offset and rewrites the egress MAC via redirect_neigh, so
+    // the inner (RMAC) header is simply ignored.
+    let info: VniInfo = match VNI_INFO.get_ptr(&vni) {
+        Some(i) => unsafe { *i },
         None => return Ok(xdp_action::XDP_PASS), // unknown VNI: not ours
+    };
+    let (magic, vrf) = if info.flags & VNI_F_L3 != 0 {
+        (XDP_META_MAGIC, info.vrf_id)
+    } else {
+        (XDP_META_MAGIC_L2, info.vlan as u32)
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN_ENCAP_HDR_LEN as i32) } != 0 {
         return Err(());
     }
     stat_inc(STAT_VXLAN_DECAP);
-    // Carry the bridge domain to the TC l2_switch (mirrors the DT2U meta).
     if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
     {
         stat_inc(STAT_DROP);
@@ -3025,8 +3151,8 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     }
     let meta = xdp_meta_ptr(ctx)?;
     unsafe {
-        (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
-        (*meta).vrf_id = bd as u32;
+        (*meta).magic = magic ^ meta_cookie();
+        (*meta).vrf_id = vrf;
     }
     Ok(xdp_action::XDP_PASS)
 }
