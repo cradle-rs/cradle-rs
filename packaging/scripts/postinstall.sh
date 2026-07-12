@@ -23,17 +23,10 @@ if [ -x /usr/bin/cradle ]; then
     setcap 'cap_net_admin,cap_bpf,cap_perfmon=ep' /usr/bin/cradle
 fi
 
-# zebra-rs offload helpers, spawned without root by zebra-rs's supervisors
-# (file capabilities do not inherit across exec, so each needs its own):
-#   xdp-bfd-echo      — XDP attach (cap_net_admin) + BPF load (cap_bpf) +
-#                       AF_PACKET Echo originator (cap_net_raw). This is the
-#                       proven set from zebra-rs's own install target.
-#   tc-evpn-replicate — TC/clsact attach (cap_net_admin) + BPF load
-#                       (cap_bpf,cap_perfmon; perfmon mirrors cradle's proven
-#                       BPF_PROG_LOAD requirement for a program of this size).
+# zebra-rs BFD Echo offload helper, spawned without root by zebra-rs's BFD
+# reflector (file capabilities do not inherit across exec, so it needs its own):
+# XDP attach (cap_net_admin) + BPF load (cap_bpf) + AF_PACKET Echo originator
+# (cap_net_raw). This is the proven set from zebra-rs's own install target.
 if [ -x /usr/sbin/xdp-bfd-echo ]; then
     setcap 'cap_net_admin,cap_bpf,cap_net_raw=ep' /usr/sbin/xdp-bfd-echo
-fi
-if [ -x /usr/sbin/tc-evpn-replicate ]; then
-    setcap 'cap_net_admin,cap_bpf,cap_perfmon=ep' /usr/sbin/tc-evpn-replicate
 fi

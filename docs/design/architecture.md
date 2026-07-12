@@ -20,7 +20,9 @@ Two existing systems bracket the problem:
   plane (BGP/OSPF/IS-IS/EVPN/SRv6/MPLS) with a single clean data-plane
   chokepoint — `FibHandle`, selected at compile time by `cfg(target_os)` — and
   an existing precedent of feeding **aya** eBPF programs from the control plane
-  via BPF maps (`offload/xdp-bfd-echo`, `offload/tc-evpn-replicate`).
+  via BPF maps (the imported `crates/xdp-bfd-echo`; the sibling
+  `tc-evpn-replicate` BUM-replication offload was retired once this engine
+  subsumed it).
 
 **cradle-rs is the part neither has built:** a fully-Rust, Cilium-class eBPF
 **L2–L7** data plane — adding true L2 switching below Cilium's L3 floor — whose
