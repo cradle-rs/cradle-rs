@@ -18,6 +18,10 @@
 //! `ctx.load::<u32>()` yields), and a port is the wire bytes read as a native
 //! `u16`. `bpf_l3/l4_csum_replace` consume `from`/`to` in this same order.
 
+// BFD Echo reflector + in-kernel watchdog, called from `cradle_xdp`'s UDP
+// dispatch (absorbed from the standalone xdp-bfd-echo offload — Phase 2).
+mod bfd;
+
 use aya_ebpf::{
     bindings::{
         TC_ACT_OK, TC_ACT_PIPE, TC_ACT_SHOT,
@@ -363,6 +367,10 @@ const GTP_ENCAP_HDR_LEN: usize = 36;
 const GTP_INNER_OFF: usize = L4_OFF + 16;
 /// VXLAN over UDP port (RFC 7348).
 const VXLAN_PORT: u16 = 4789;
+/// BFD Echo (RFC 5881 §4) and single-hop control destination ports. Echo is
+/// reflected in XDP; control is only observed (expiration watchdog) and passed.
+const BFD_ECHO_PORT: u16 = 3785;
+const BFD_CTRL_PORT: u16 = 3784;
 /// Bytes a VXLAN encap pushes: outer Eth(14) + IPv4(20) + UDP(8) + VXLAN(8).
 const VXLAN_ENCAP_HDR_LEN: usize = 50;
 /// Offset of the VXLAN header in a received no-options VXLAN frame.
@@ -2625,7 +2633,12 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     let ethertype = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? });
     match ethertype {
         ETH_P_MPLS_UC => try_mpls_xdp(ctx),
-        ETH_P_IPV6 => try_srv6_xdp(ctx),
+        // BFD Echo/control over IPv6 (udp/3785/3784, base header) is reflected /
+        // watched before SRv6; a non-BFD IPv6 packet falls through to SRv6.
+        ETH_P_IPV6 => match try_bfd6(ctx)? {
+            Some(action) => Ok(action),
+            None => try_srv6_xdp(ctx),
+        },
         // UDP tunnel decaps (GTP-U, VXLAN): a packet destined to a local
         // tunnel endpoint is stripped in XDP; anything else falls through to
         // TC. Dispatched on the UDP destination port in one place — a decap's
@@ -2651,7 +2664,35 @@ fn try_udp4_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     match u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, L4_OFF + 2)? }) {
         GTP_PORT => try_gtp_xdp(ctx),
         VXLAN_PORT => try_vxlan_xdp(ctx),
+        // BFD Echo: reflect (XDP_TX) or, for our own looped-back Echo, feed the
+        // in-kernel detector and drop. BFD control: observe the expiration
+        // watchdog, then always pass to the stack (the daemon runs the FSM).
+        BFD_ECHO_PORT => bfd::reflect_v4(ctx),
+        BFD_CTRL_PORT => {
+            bfd::observe_ctrl_v4(ctx);
+            Ok(xdp_action::XDP_PASS)
+        }
         _ => Ok(xdp_action::XDP_PASS),
+    }
+}
+
+/// BFD over IPv6 on a base header (no extension headers): `Some(action)` when
+/// the frame is BFD Echo (reflect) or control (observe + PASS), `None` when it
+/// isn't ours so the caller falls through to the SRv6 handler. Reads the IPv6
+/// Next Header + UDP destination port; a chained header (Next Header != UDP)
+/// is `None`.
+#[inline(always)]
+fn try_bfd6(ctx: &XdpContext) -> Result<Option<u32>, ()> {
+    if unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? } != IPPROTO_UDP {
+        return Ok(None);
+    }
+    match u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, IP6_L4_OFF + 2)? }) {
+        BFD_ECHO_PORT => Ok(Some(bfd::reflect_v6(ctx)?)),
+        BFD_CTRL_PORT => {
+            bfd::observe_ctrl_v6(ctx);
+            Ok(Some(xdp_action::XDP_PASS))
+        }
+        _ => Ok(None),
     }
 }
 
