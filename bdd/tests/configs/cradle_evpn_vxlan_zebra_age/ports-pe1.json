@@ -1,0 +1,13 @@
+{
+  "ports": [
+    {
+      "name": "pe1c",
+      "vlan": 100
+    },
+    {
+      "name": "pe1u",
+      "l3": true
+    }
+  ],
+  "fdb_age_secs": 5
+}

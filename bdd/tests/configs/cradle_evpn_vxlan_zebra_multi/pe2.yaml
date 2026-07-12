@@ -1,0 +1,49 @@
+system:
+  cradle:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.0.2.2/32
+- if-name: pe2u
+  ipv4:
+    address: 10.0.12.2/24
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 192.0.2.2
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 192.0.2.1/32
+        nexthop:
+        - address: 10.0.12.1
+      - prefix: 192.0.2.3/32
+        nexthop:
+        - address: 10.0.12.1
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.0.2.1
+      remote-as: 65001
+      update-source: 192.0.2.2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.0.2.3
+      remote-as: 65001
+      update-source: 192.0.2.2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
