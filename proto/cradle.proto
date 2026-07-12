@@ -201,14 +201,18 @@ message XconnectDel {
 }
 
 // A BUM ingress-replication slot: one remote PE in bridge domain `bd`,
-// reached by MAC-in-SRv6 toward its End.DT2M `remote_sid`. cradle manages
-// the slot's plumbing itself (a veth pair in the flood list whose far end
-// per-copy encapsulates — see docs/design/evpn-srv6.md). Idempotent per
-// (bd, remote_sid). The EVPN Type-3 tee drives these; a bridge domain using
-// slots must not also program the all-ones-MAC sentinel.
+// reached by MAC-in-SRv6 toward its End.DT2M `remote_sid`, or by VXLAN
+// toward its `remote_vtep` (exactly one of the two; the VXLAN VNI comes
+// from the bridge domain's SetVni binding, which must exist first). cradle
+// manages the slot's plumbing itself (a veth pair in the flood list whose
+// far end per-copy encapsulates — see docs/design/evpn-srv6.md and
+// evpn-vxlan.md). Idempotent per (bd, target). The EVPN Type-3 tee drives
+// these; a bridge domain using slots must not also program the
+// all-ones-MAC sentinel.
 message ReplSlot {
-  uint32 bd         = 1;
-  string remote_sid = 2;
+  uint32 bd          = 1;
+  string remote_sid  = 2;
+  string remote_vtep = 3;
 }
 
 // An egress-protection mirror route (End.M context): traffic exposed by an

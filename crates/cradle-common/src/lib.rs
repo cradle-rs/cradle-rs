@@ -442,6 +442,27 @@ pub struct VniInfo {
     pub _pad: [u8; 2],
 }
 
+/// A BUM ingress-replication slot's target — the remote PE one flooded copy
+/// is tunneled toward, by overlay kind (the `REPL_SID` map's value).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ReplTarget {
+    /// `REPL_KIND_*`. The zero value is SRv6, preserving the pre-`ReplTarget`
+    /// semantic of the map.
+    pub kind: u32,
+    /// L2VNI stamped into the outer header (`REPL_KIND_VXLAN` only; 0 for
+    /// SRv6, where the remote SID implies the bridge domain).
+    pub vni: u32,
+    /// `REPL_KIND_SRV6`: the remote `End.DT2M` SID. `REPL_KIND_VXLAN`: the
+    /// remote VTEP IPv4, v4-mapped (bytes 12..16 are the wire address).
+    pub addr: [u8; 16],
+}
+
+/// [`ReplTarget::addr`] is a remote `End.DT2M` SID (MAC-in-SRv6 per copy).
+pub const REPL_KIND_SRV6: u32 = 0;
+/// [`ReplTarget::addr`] is a remote VTEP IPv4 (VXLAN per copy, `vni` set).
+pub const REPL_KIND_VXLAN: u32 = 1;
+
 /// Per-VRF IPv6 LPM key — the v6 mirror of `Vrf4Key`: a route `addr/len` in
 /// VRF `v` is inserted with `prefix_len = 32 + len`.
 #[repr(C)]
@@ -936,6 +957,7 @@ mod user {
         GtpPdrKey,
         GtpPdr,
         VniInfo,
+        ReplTarget,
         FdbKey,
         FdbEntry,
         Dx2vKey,

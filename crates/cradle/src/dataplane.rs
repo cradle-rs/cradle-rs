@@ -25,9 +25,9 @@ use cradle_common::{
     LocalSid, MAX_LABELS, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry,
     NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, STAT_FDB_AGED, STAT_MAX,
-    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VniInfo, Vrf4Key, Vrf6Key,
-    VrfId6Key, VrfIdKey,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_SRV6, REPL_KIND_VXLAN,
+    ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
+    Srv6Encap, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey,
 };
 
 use crate::{
@@ -137,9 +137,9 @@ pub struct Dataplane {
     /// Static overlay FDB entries (EVPN over SRv6). Local MACs are still learned
     /// in the eBPF datapath; this only programs remote (`FDB_F_REMOTE`) entries.
     fdb: HashMap<MapData, FdbKey, FdbEntry>,
-    /// BUM ingress-replication slots (EVPN over SRv6): ifindex → remote
-    /// `End.DT2M` SID, both ends of each slot's veth pair.
-    repl_sid: HashMap<MapData, u32, [u8; 16]>,
+    /// BUM ingress-replication slots: ifindex → the slot's remote PE
+    /// (`End.DT2M` SID or VTEP+VNI), both ends of each slot's veth pair.
+    repl_sid: HashMap<MapData, u32, ReplTarget>,
     /// EVPN/VXLAN L2VNI bindings: bridge domain → VNI (encap direction) and
     /// VNI → bridge domain (decap direction), kept in lockstep by `vni_set`.
     vlan_vni: HashMap<MapData, u16, u32>,
@@ -1032,10 +1032,45 @@ impl Dataplane {
         encap_ifindex: u32,
         remote_sid: Ipv6Addr,
     ) -> Result<()> {
-        self.repl_sid
-            .insert(flood_ifindex, remote_sid.octets(), 0)?;
-        self.repl_sid
-            .insert(encap_ifindex, remote_sid.octets(), 0)?;
+        self.repl_target_add(
+            flood_ifindex,
+            encap_ifindex,
+            ReplTarget {
+                kind: REPL_KIND_SRV6,
+                vni: 0,
+                addr: remote_sid.octets(),
+            },
+        )
+    }
+
+    /// The VXLAN flavor of [`Self::repl_slot_add`]: each flooded copy is
+    /// VXLAN-encapsulated toward the remote VTEP `vtep`, carrying `vni`.
+    pub fn repl_slot_add_vxlan(
+        &mut self,
+        flood_ifindex: u32,
+        encap_ifindex: u32,
+        vtep: Ipv4Addr,
+        vni: u32,
+    ) -> Result<()> {
+        self.repl_target_add(
+            flood_ifindex,
+            encap_ifindex,
+            ReplTarget {
+                kind: REPL_KIND_VXLAN,
+                vni,
+                addr: vtep.to_ipv6_mapped().octets(),
+            },
+        )
+    }
+
+    fn repl_target_add(
+        &mut self,
+        flood_ifindex: u32,
+        encap_ifindex: u32,
+        target: ReplTarget,
+    ) -> Result<()> {
+        self.repl_sid.insert(flood_ifindex, target, 0)?;
+        self.repl_sid.insert(encap_ifindex, target, 0)?;
         Ok(())
     }
 
@@ -1666,6 +1701,13 @@ impl Dataplane {
         }
         let _ = self.vni_info.remove(&vni);
         Ok(())
+    }
+
+    /// The VNI a bridge domain is bound to, if any (the `VLAN_VNI` binding —
+    /// the single source of truth for bd → VNI resolution in the control
+    /// plane, e.g. VXLAN replication slots).
+    pub fn vni_of(&mut self, vlan: u16) -> Option<u32> {
+        self.vlan_vni.get(&vlan, 0).ok()
     }
 
     /// Set the local VTEP source IPv4 (VXLAN outer source; decap match).

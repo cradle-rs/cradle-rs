@@ -639,13 +639,62 @@ impl Control {
         Ok(())
     }
 
+    /// The VXLAN flavor of [`Self::add_repl_slot`]: flooded copies are
+    /// VXLAN-encapsulated toward `vtep` with `vni` (static config carries
+    /// the VNI explicitly — no bridge domain is in scope here).
+    pub async fn add_repl_slot_vxlan(
+        &self,
+        flood_port: &str,
+        encap_port: &str,
+        vtep: Ipv4Addr,
+        vni: u32,
+    ) -> Result<()> {
+        let flood = util::ifindex_of(flood_port)?;
+        let encap = util::ifindex_of(encap_port)?;
+        self.dp
+            .lock()
+            .await
+            .repl_slot_add_vxlan(flood, encap, vtep, vni)?;
+        Ok(())
+    }
+
     /// Create a BUM replication slot for `(bd, remote_sid)` with cradle-owned
     /// plumbing (the EVPN Type-3 tee): a fresh veth pair `crs<N>a`/`crs<N>b`,
     /// the A end joined to `bd`'s flood list, the B end XDP-attached, and
     /// `REPL_SID` keyed by both ends. Idempotent per `(bd, remote_sid)`.
     pub async fn add_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
+        self.add_repl_slot_auto_keyed(bd, remote_sid, |dp, a_idx, b_idx| {
+            dp.repl_slot_add(a_idx, b_idx, remote_sid)
+        })
+        .await
+    }
+
+    /// The VXLAN flavor of [`Self::add_repl_slot_auto`]: the VNI comes from
+    /// the bridge domain's `SetVni` binding (the single source of truth), so
+    /// the binding must exist first. Keyed by the VTEP v4-mapped — colliding
+    /// with no real SRv6 SID — so one slot registry and
+    /// [`Self::del_repl_slot_auto`] serve both overlays.
+    pub async fn add_repl_slot_auto_vxlan(&self, bd: u16, vtep: Ipv4Addr) -> Result<()> {
+        let vni =
+            self.dp.lock().await.vni_of(bd).with_context(|| {
+                format!("bd {bd} has no VNI binding (SetVni before AddReplSlot)")
+            })?;
+        self.add_repl_slot_auto_keyed(bd, vtep.to_ipv6_mapped(), |dp, a_idx, b_idx| {
+            dp.repl_slot_add_vxlan(a_idx, b_idx, vtep, vni)
+        })
+        .await
+    }
+
+    /// Shared cradle-owned slot plumbing: veth pair, XDP attach on the B end,
+    /// slot programming via `program`, flood membership for the A end.
+    async fn add_repl_slot_auto_keyed(
+        &self,
+        bd: u16,
+        key: Ipv6Addr,
+        program: impl FnOnce(&mut Dataplane, u32, u32) -> Result<()>,
+    ) -> Result<()> {
         let mut slots = self.repl_slots.lock().await;
-        if slots.contains_key(&(bd, remote_sid)) {
+        if slots.contains_key(&(bd, key)) {
             return Ok(());
         }
         let n = self
@@ -660,11 +709,11 @@ impl Control {
         self.attach(&b, b_idx, true).await?;
         {
             let mut dp = self.dp.lock().await;
-            dp.repl_slot_add(a_idx, b_idx, remote_sid)?;
+            program(&mut dp, a_idx, b_idx)?;
             dp.l2_member_add(bd, a_idx)?;
         }
-        info!("repl slot {a}/{b}: bd {bd} -> {remote_sid}");
-        slots.insert((bd, remote_sid), (a, a_idx, b_idx));
+        info!("repl slot {a}/{b}: bd {bd} -> {key}");
+        slots.insert((bd, key), (a, a_idx, b_idx));
         Ok(())
     }
 
@@ -2301,11 +2350,27 @@ impl Cradle for GrpcService {
         req: Request<pb::ReplSlot>,
     ) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
-        let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
-        self.control
-            .add_repl_slot_auto(r.bd as u16, sid)
-            .await
-            .map_err(st)?;
+        match (r.remote_sid.is_empty(), r.remote_vtep.is_empty()) {
+            (false, true) => {
+                let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
+                self.control
+                    .add_repl_slot_auto(r.bd as u16, sid)
+                    .await
+                    .map_err(st)?;
+            }
+            (true, false) => {
+                let vtep: Ipv4Addr = r.remote_vtep.parse().map_err(st)?;
+                self.control
+                    .add_repl_slot_auto_vxlan(r.bd as u16, vtep)
+                    .await
+                    .map_err(st)?;
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "exactly one of remote_sid / remote_vtep",
+                ));
+            }
+        }
         Ok(Response::new(pb::Empty {}))
     }
 
@@ -2314,9 +2379,18 @@ impl Cradle for GrpcService {
         req: Request<pb::ReplSlot>,
     ) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
-        let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
+        // One slot registry serves both overlays: a VXLAN slot is keyed by
+        // its VTEP v4-mapped, so the delete resolves to the same key.
+        let key: Ipv6Addr = if r.remote_vtep.is_empty() {
+            r.remote_sid.parse().map_err(st)?
+        } else {
+            r.remote_vtep
+                .parse::<Ipv4Addr>()
+                .map_err(st)?
+                .to_ipv6_mapped()
+        };
         self.control
-            .del_repl_slot_auto(r.bd as u16, sid)
+            .del_repl_slot_auto(r.bd as u16, key)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
