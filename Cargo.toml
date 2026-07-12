@@ -6,13 +6,10 @@ members = [
     "crates/cradle",
     "crates/cradle-cni",
     "crates/cradle-k8s",
-    # zebra-rs offload helpers (managed child processes, driven over a stdin
-    # line protocol). Each is a userspace loader + a `bpfel-unknown-none` eBPF
-    # crate, same shape as cradle/cradle-ebpf.
+    # zebra-rs offload helper (managed child process): a userspace loader + a
+    # `bpfel-unknown-none` eBPF crate, same shape as cradle/cradle-ebpf.
     "crates/xdp-bfd-echo",
     "crates/xdp-bfd-echo-ebpf",
-    "crates/tc-evpn-replicate",
-    "crates/tc-evpn-replicate-ebpf",
     "bdd",
 ]
 # The eBPF crates are built for `bpfel-unknown-none` by their loader's build
@@ -24,7 +21,6 @@ default-members = [
     "crates/cradle-cni",
     "crates/cradle-k8s",
     "crates/xdp-bfd-echo",
-    "crates/tc-evpn-replicate",
 ]
 
 [workspace.package]
@@ -84,19 +80,11 @@ opt-level = 3
 debug = 2
 codegen-units = 1
 
-# Same eBPF profile treatment for the imported offload eBPF crates.
+# Same eBPF profile treatment for the imported offload eBPF crate.
 [profile.dev.package.xdp-bfd-echo-ebpf]
 opt-level = 3
 
 [profile.release.package.xdp-bfd-echo-ebpf]
-debug = 2
-codegen-units = 1
-strip = false
-
-[profile.dev.package.tc-evpn-replicate-ebpf]
-opt-level = 3
-
-[profile.release.package.tc-evpn-replicate-ebpf]
 debug = 2
 codegen-units = 1
 strip = false

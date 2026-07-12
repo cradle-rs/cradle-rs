@@ -11,7 +11,10 @@
 Status: **analysis only — nothing to implement today.** Written while
 evaluating the integration of zebra-rs's `offload/` programs
 (`xdp-bfd-echo`, `tc-evpn-replicate`) into cradle, which would grow the
-monolith and adds pressure on the verifier budget. Builds on the datapath
+monolith and adds pressure on the verifier budget. (Outcome: `xdp-bfd-echo`
+was imported as a `crates/` member; `tc-evpn-replicate` was retired rather than
+absorbed — this engine already replicated EVPN BUM toward each leaf's End.DT2M
+SID, so the standalone program was redundant.) Builds on the datapath
 described in [`architecture.md`](architecture.md); the SRv6 surface it
 names as the natural split point is [`srv6.md`](srv6.md) /
 [`evpn-srv6.md`](evpn-srv6.md).
