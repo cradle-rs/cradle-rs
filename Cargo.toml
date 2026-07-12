@@ -18,7 +18,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 authors = ["Kunihiro Ishiguro <kunihiro@zebra.rs>"]
 license = "AGPL-3.0-or-later"
