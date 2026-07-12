@@ -3,8 +3,13 @@
 > VXLAN bridging and routing in the eBPF data plane, driven by the zebra-rs
 > BGP-EVPN control plane (Type-2/3/5, symmetric IRB, ingress replication).
 
-Status: **design / not yet implemented.** This proposes the map contract,
-data-plane logic, control-plane API, and a phased plan. It builds on the existing
+Status: **Phase 1 slice 1 implemented** — unicast L2VNI encap/decap
+(`VLAN_VNI`/`VNI_INFO`/`VXLAN_SRC`, `FDB_F_VXLAN` remote MACs v4-mapped in
+`remote_sid`, XDP `l2_vxlan_encap`/`try_vxlan_xdp`, `SetVni`/`SetVtepSource` +
+`FdbRemote.remote_vtep`, `cradle_evpn_vxlan` BDD). The rest of this document
+is the original design; where the implementation deviated (XDP instead of TC,
+no tail call, replication slots instead of `VNI_VTEPS`) the full rewrite lands
+with the ingress-replication slice. It builds on the existing
 L2-switching and L3 datapath (see [architecture.md](architecture.md)) and reuses
 mechanisms from the [MPLS](mpls.md) and [SRv6](srv6.md) designs (packet geometry,
 the verifier tail-call, the VRF model, the zebra tee).

@@ -96,6 +96,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "policy_drop",
     "masq",
     "policy_audit",
+    "vxlan_encap",
+    "vxlan_decap",
+    "vxlan_flood",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -507,6 +510,27 @@ impl Control {
         Ok(())
     }
 
+    /// The VXLAN flavor of [`Self::add_fdb_remote`]: `mac` is behind the
+    /// remote VTEP `vtep`, tunneled with the bridge domain's VNI (`SetVni`).
+    /// Same MAC-move-away hint semantics.
+    pub async fn add_fdb_remote_vxlan(
+        &self,
+        mac: [u8; 6],
+        bd: u16,
+        vtep: Ipv4Addr,
+        nexthop_id: u32,
+    ) -> Result<()> {
+        let displaced_local = self
+            .dp
+            .lock()
+            .await
+            .fdb_remote_add_vxlan(mac, bd, vtep, nexthop_id)?;
+        if displaced_local {
+            let _ = self.fdb_hint_tx.send((mac, bd));
+        }
+        Ok(())
+    }
+
     /// Remove an overlay FDB entry.
     pub async fn del_fdb_remote(&self, mac: [u8; 6], bd: u16) -> Result<()> {
         self.dp.lock().await.fdb_remote_del(mac, bd)?;
@@ -898,6 +922,24 @@ impl Control {
 
     pub async fn set_srv6_encap_source(&self, addr: Ipv6Addr) -> Result<()> {
         self.dp.lock().await.srv6_encap_source_set(addr)?;
+        Ok(())
+    }
+
+    /// Bind an L2VNI to its bridge domain (both datapath directions).
+    pub async fn set_vni(&self, vni: u32, vlan: u16) -> Result<()> {
+        self.dp.lock().await.vni_set(vni, vlan)?;
+        Ok(())
+    }
+
+    /// Remove an L2VNI binding.
+    pub async fn del_vni(&self, vni: u32) -> Result<()> {
+        self.dp.lock().await.vni_del(vni)?;
+        Ok(())
+    }
+
+    /// Set the local VTEP source IPv4 (VXLAN outer source + decap match).
+    pub async fn set_vtep_source(&self, addr: Ipv4Addr) -> Result<()> {
+        self.dp.lock().await.vxlan_source_set(addr)?;
         Ok(())
     }
 
@@ -2135,17 +2177,58 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn set_vni(&self, req: Request<pb::Vni>) -> Result<Response<pb::Empty>, Status> {
+        let v = req.into_inner();
+        self.control
+            .set_vni(v.vni, v.vlan as u16)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_vni(&self, req: Request<pb::VniDel>) -> Result<Response<pb::Empty>, Status> {
+        let v = req.into_inner();
+        self.control.del_vni(v.vni).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_vtep_source(
+        &self,
+        req: Request<pb::VtepSource>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let s = req.into_inner();
+        let addr: Ipv4Addr = s.addr.parse().map_err(st)?;
+        self.control.set_vtep_source(addr).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn add_fdb_remote(
         &self,
         req: Request<pb::FdbRemote>,
     ) -> Result<Response<pb::Empty>, Status> {
         let f = req.into_inner();
         let mac = util::parse_mac(&f.mac).map_err(st)?;
-        let remote_sid: Ipv6Addr = f.remote_sid.parse().map_err(st)?;
-        self.control
-            .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id)
-            .await
-            .map_err(st)?;
+        match (f.remote_sid.is_empty(), f.remote_vtep.is_empty()) {
+            (false, true) => {
+                let remote_sid: Ipv6Addr = f.remote_sid.parse().map_err(st)?;
+                self.control
+                    .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id)
+                    .await
+                    .map_err(st)?;
+            }
+            (true, false) => {
+                let vtep: Ipv4Addr = f.remote_vtep.parse().map_err(st)?;
+                self.control
+                    .add_fdb_remote_vxlan(mac, f.bd as u16, vtep, f.nexthop_id)
+                    .await
+                    .map_err(st)?;
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "exactly one of remote_sid / remote_vtep",
+                ));
+            }
+        }
         Ok(Response::new(pb::Empty {}))
     }
 

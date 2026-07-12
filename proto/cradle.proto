@@ -138,16 +138,34 @@ message LocalSidDel {
 
 message Srv6EncapSource { string addr = 1; }  // outer IPv6 SA for H.Encaps
 
-// EVPN-over-SRv6 overlay FDB entry: MAC `mac` in bridge domain `bd` sits
-// behind the remote PE's End.DT2U/DT2M service SID. `nexthop_id` selects the
-// underlay adjacency; 0 = resolve by a FIB6 lookup on `remote_sid` in the
-// datapath (the control plane doesn't need to pre-resolve). The all-ones MAC
-// is the per-BD BUM sentinel (remote End.DT2M).
+// EVPN/VXLAN L2VNI: bind VNI `vni` to bridge domain `vlan` (both datapath
+// directions — encap picks the VNI by bridge domain, decap picks the bridge
+// domain by VNI).
+message Vni {
+  uint32 vni  = 1;
+  uint32 vlan = 2;
+}
+
+message VniDel { uint32 vni = 1; }
+
+// Local VTEP source IPv4 — the VXLAN outer source address, and the decap
+// match for received VXLAN traffic.
+message VtepSource { string addr = 1; }
+
+// EVPN overlay FDB entry: MAC `mac` in bridge domain `bd` sits behind a
+// remote PE — over SRv6 (`remote_sid`, the PE's End.DT2U/DT2M service SID)
+// or over VXLAN (`remote_vtep`, the PE's VTEP IPv4; the VNI comes from the
+// bridge domain's SetVni binding). Exactly one of remote_sid / remote_vtep.
+// `nexthop_id` selects the underlay adjacency; 0 = resolve by a FIB lookup
+// on the SID/VTEP in the datapath (the control plane doesn't need to
+// pre-resolve). The all-ones MAC is the per-BD BUM sentinel (the remote
+// End.DT2M, or the flood VTEP).
 message FdbRemote {
-  string mac        = 1;
-  uint32 bd         = 2;
-  string remote_sid = 3;
-  uint32 nexthop_id = 4;
+  string mac         = 1;
+  uint32 bd          = 2;
+  string remote_sid  = 3;
+  uint32 nexthop_id  = 4;
+  string remote_vtep = 5;
 }
 
 message FdbRemoteDel {
@@ -597,6 +615,9 @@ service Cradle {
   rpc AddGtpPdr(GtpPdr) returns (Empty);
   rpc DelGtpPdr(GtpPdrDel) returns (Empty);
   rpc SetSrv6EncapSource(Srv6EncapSource) returns (Empty);
+  rpc SetVni(Vni) returns (Empty);
+  rpc DelVni(VniDel) returns (Empty);
+  rpc SetVtepSource(VtepSource) returns (Empty);
   rpc AddFdbRemote(FdbRemote) returns (Empty);
   rpc DelFdbRemote(FdbRemoteDel) returns (Empty);
   rpc WatchFdb(WatchFdbRequest) returns (stream FdbEvent);

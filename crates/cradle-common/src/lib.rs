@@ -429,6 +429,19 @@ pub struct GtpPdr {
     pub vrf_id: u32,
 }
 
+/// EVPN/VXLAN L2VNI binding — the decap direction of the VNI ↔ bridge-domain
+/// mapping (`VNI_INFO[vni]`; the encap direction is the `VLAN_VNI` map). A
+/// received VXLAN frame's VNI selects the bridge domain its inner Ethernet
+/// frame is switched in. Phase-3 symmetric IRB grows this struct (vrf_id,
+/// flags, rmac) — maps are unpinned, so the ABI can extend freely.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VniInfo {
+    /// Access bridge domain of this L2VNI.
+    pub vlan: u16,
+    pub _pad: [u8; 2],
+}
+
 /// Per-VRF IPv6 LPM key — the v6 mirror of `Vrf4Key`: a route `addr/len` in
 /// VRF `v` is inserted with `prefix_len = 32 + len`.
 #[repr(C)]
@@ -488,6 +501,11 @@ pub const FDB_F_LOCAL: u32 = 1 << 0;
 /// This MAC is behind an SRv6 overlay: `remote_sid` is its `End.DT2U` SID and
 /// `oif` is the underlay nexthop id (EVPN over SRv6).
 pub const FDB_F_REMOTE: u32 = 1 << 1;
+/// This MAC is behind a VXLAN overlay (set together with `FDB_F_REMOTE`):
+/// `remote_sid` holds the remote VTEP's IPv4 v4-mapped (`::ffff:a.b.c.d` —
+/// bytes 12..16 are the wire address) and `oif` is the underlay nexthop id
+/// (0 = resolve by FIB4 lookup on the VTEP).
+pub const FDB_F_VXLAN: u32 = 1 << 2;
 
 /// Membership of an L2 (VLAN/bridge) domain — enumerates the ports a BUM or
 /// unknown-unicast frame is flooded to. Keyed by `(vlan, slot)` where `slot` is
@@ -827,8 +845,15 @@ pub const STAT_MASQ: u32 = 39;
 /// Policy verdicts that would have dropped but the endpoint is in audit
 /// mode (`EP_F_AUDIT`) — the packet was forwarded.
 pub const STAT_POLICY_AUDIT: u32 = 40;
+/// EVPN/VXLAN: outer Eth+IPv4+UDP+VXLAN imposed on an L2 frame (ingress VTEP).
+pub const STAT_VXLAN_ENCAP: u32 = 41;
+/// EVPN/VXLAN: outer encapsulation stripped, inner frame bridged (egress VTEP).
+pub const STAT_VXLAN_DECAP: u32 = 42;
+/// EVPN/VXLAN: BUM (broadcast/multicast/unknown) frame VXLAN-encapsulated
+/// toward a remote VTEP (sentinel tunnel or ingress-replication copy).
+pub const STAT_VXLAN_FLOOD: u32 = 43;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 41;
+pub const STAT_MAX: u32 = 44;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -910,6 +935,7 @@ mod user {
         GtpEncap,
         GtpPdrKey,
         GtpPdr,
+        VniInfo,
         FdbKey,
         FdbEntry,
         Dx2vKey,

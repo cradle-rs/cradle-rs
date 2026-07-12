@@ -37,8 +37,8 @@ use aya_ebpf::{
 use cradle_common::{
     AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
     CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, Dx2vKey,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIB_F_BLACKHOLE, FIB_F_ECMP,
-    FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE,
+    FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
     FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
     FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT,
     LocalSid, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, MirrorEntry,
@@ -57,9 +57,10 @@ use cradle_common::{
     STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
     STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
-    STAT_SRV6_USID, STAT_SRV6_USP, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap,
-    Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
-    XDP_META_MAGIC_L2, fibw_unpack, mpls_lse, mpls_lse_unpack,
+    STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD,
+    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VniInfo, Vrf4Key, Vrf6Key,
+    VrfId6Key, VrfIdKey, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
+    fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -96,6 +97,20 @@ static GTP_ENCAP: HashMap<u32, GtpEncap> = HashMap::with_max_entries(4096, 0);
 /// forward the inner in `vrf_id` (the `SRV6_LOCALSID` analogue for GTP).
 #[map]
 static GTP_PDR: HashMap<GtpPdrKey, GtpPdr> = HashMap::with_max_entries(4096, 0);
+
+// --- EVPN/VXLAN (evpn-vxlan.md): the L2VNI ↔ bridge-domain binding in both
+// directions, and the local VTEP source address. ---
+/// Encap direction: an L2 frame in this bridge domain tunnels with this VNI.
+#[map]
+static VLAN_VNI: HashMap<u16, u32> = HashMap::with_max_entries(4096, 0);
+/// Decap direction: a received VXLAN frame's VNI selects the bridge domain
+/// (the `SRV6_LOCALSID`/`GTP_PDR` analogue for VXLAN).
+#[map]
+static VNI_INFO: HashMap<u32, VniInfo> = HashMap::with_max_entries(4096, 0);
+/// Local VTEP source IPv4, wire bytes ([0] — the `SRV6_ENCAP_SRC` analogue).
+/// All-zero = VXLAN unconfigured: the decap never claims a packet.
+#[map]
+static VXLAN_SRC: Array<[u8; 4]> = Array::with_max_entries(1, 0);
 /// Per-instance random cookie folded into the XDP→TC metadata magic. skb
 /// metadata SURVIVES a veth hop into the neighbour's TC stage (and is not
 /// even visible to its XDP program on the veth rx path), so a constant
@@ -340,6 +355,12 @@ const GTP_ENCAP_HDR_LEN: usize = 36;
 /// Offset of the inner packet in a received no-options G-PDU:
 /// eth(14) + IPv4(20) + UDP(8) + GTP-U(8).
 const GTP_INNER_OFF: usize = L4_OFF + 16;
+/// VXLAN over UDP port (RFC 7348).
+const VXLAN_PORT: u16 = 4789;
+/// Bytes a VXLAN encap pushes: outer Eth(14) + IPv4(20) + UDP(8) + VXLAN(8).
+const VXLAN_ENCAP_HDR_LEN: usize = 50;
+/// Offset of the VXLAN header in a received no-options VXLAN frame.
+const VXLAN_HDR_OFF: usize = L4_OFF + 8;
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -2483,20 +2504,45 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     match ethertype {
         ETH_P_MPLS_UC => try_mpls_xdp(ctx),
         ETH_P_IPV6 => try_srv6_xdp(ctx),
-        // GTP-U tunnel decap (H.M.GTP4.D): a G-PDU destined to a local tunnel
-        // endpoint is stripped in XDP; a non-GTP v4 packet falls through to TC.
-        ETH_P_IP => try_gtp_xdp(ctx),
+        // UDP tunnel decaps (GTP-U, VXLAN): a packet destined to a local
+        // tunnel endpoint is stripped in XDP; anything else falls through to
+        // TC. Dispatched on the UDP destination port in one place — a decap's
+        // success is XDP_PASS-with-metadata, indistinguishable from "not
+        // mine", so the handlers cannot be chained.
+        ETH_P_IP => try_udp4_xdp(ctx),
+        _ => Ok(xdp_action::XDP_PASS),
+    }
+}
+
+/// Route an IPv4 packet to the UDP-tunnel decap owning its destination port:
+/// GTP-U (2152) or VXLAN (4789). No-options IPv4 only (the L4 offsets assume
+/// IHL == 5); everything else passes to the TC L3 stage untouched.
+#[inline(always)]
+fn try_udp4_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    let ver_ihl = unsafe { *xdp_ptr::<u8>(ctx, IP_VER_IHL_OFF)? };
+    if ver_ihl & 0x0f != 5 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { *xdp_ptr::<u8>(ctx, IP_PROTO_OFF)? } != IPPROTO_UDP {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    match u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, L4_OFF + 2)? }) {
+        GTP_PORT => try_gtp_xdp(ctx),
+        VXLAN_PORT => try_vxlan_xdp(ctx),
         _ => Ok(xdp_action::XDP_PASS),
     }
 }
 
 /// The bridge domain's BUM tunnel: the all-ones-MAC FDB entry (installed by
 /// static config or the EVPN Type-3 tee), pointing at the remote `End.DT2M`
-/// SID. `None` when the BD has no overlay BUM tunnel.
+/// SID. `None` when the BD has no overlay BUM tunnel. Borrowed from map
+/// memory, not copied — a 32-byte `FdbEntry` stack temp is budget the
+/// flattened cradle_xdp frame doesn't have (see `PolicyScratch6`), and the
+/// copy would be just as unatomic against a concurrent update.
 #[inline(always)]
-fn l2_evpn_bum_tunnel(bd: u16) -> Option<FdbEntry> {
-    let ent: FdbEntry = unsafe {
-        *FDB.get_ptr(&FdbKey {
+fn l2_evpn_bum_tunnel(bd: u16) -> Option<&'static FdbEntry> {
+    let ent = unsafe {
+        &*FDB.get_ptr(&FdbKey {
             mac: [0xff; 6],
             vlan: bd,
         })?
@@ -2533,29 +2579,64 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
             0,
         );
     }
+    // Resolve to one (entry, bum?) pair, then encapsulate at a SINGLE call
+    // site — each `l2_overlay_encap` expansion inlines both encap bodies,
+    // and three of them push cradle_xdp's flattened frame past the
+    // verifier's call-chain stack budget (see `PolicyScratch6`).
     let dst = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? };
-    if dst[0] & 0x01 != 0 {
-        let Some(ent) = l2_evpn_bum_tunnel(bd) else {
-            return Ok(xdp_action::XDP_PASS); // no BUM tunnel → TC local flood
-        };
-        return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
-    }
-    let ent: FdbEntry = match FDB.get_ptr(&FdbKey { mac: dst, vlan: bd }) {
-        Some(e) => unsafe { *e },
-        None => {
-            // Unknown unicast — the "U" in BUM: flood it over the overlay
-            // too, so a not-yet-advertised remote station is reachable the
-            // moment it exists (its reply seeds both PEs' tables).
-            let Some(ent) = l2_evpn_bum_tunnel(bd) else {
-                return Ok(xdp_action::XDP_PASS); // no tunnel → TC local flood
-            };
-            return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
+    let (ent, bum): (&FdbEntry, bool) = if dst[0] & 0x01 != 0 {
+        match l2_evpn_bum_tunnel(bd) {
+            Some(ent) => (ent, true),
+            None => return Ok(xdp_action::XDP_PASS), // no BUM tunnel → TC local flood
+        }
+    } else {
+        match FDB.get_ptr(&FdbKey { mac: dst, vlan: bd }) {
+            Some(e) => {
+                let ent = unsafe { &*e };
+                if ent.flags & FDB_F_REMOTE == 0 {
+                    return Ok(xdp_action::XDP_PASS); // local → TC forward
+                }
+                (ent, false)
+            }
+            None => {
+                // Unknown unicast — the "U" in BUM: flood it over the overlay
+                // too, so a not-yet-advertised remote station is reachable the
+                // moment it exists (its reply seeds both PEs' tables).
+                match l2_evpn_bum_tunnel(bd) {
+                    Some(ent) => (ent, true),
+                    None => return Ok(xdp_action::XDP_PASS), // no tunnel → TC local flood
+                }
+            }
         }
     };
-    if ent.flags & FDB_F_REMOTE == 0 {
-        return Ok(xdp_action::XDP_PASS); // local → TC forward
+    l2_overlay_encap(ctx, ent, bd, bum)
+}
+
+/// Tunnel an L2 frame toward the remote PE its FDB entry names, by the
+/// entry's overlay flavor: VXLAN (`FDB_F_VXLAN`, the VNI from the bridge
+/// domain's `VLAN_VNI` binding) or MAC-in-SRv6 (the default). `bum`
+/// selects the flood-vs-unicast counter.
+#[inline(always)]
+fn l2_overlay_encap(ctx: &XdpContext, ent: &FdbEntry, bd: u16, bum: bool) -> Result<u32, ()> {
+    if ent.flags & FDB_F_VXLAN != 0 {
+        let vni = match VLAN_VNI.get_ptr(&bd) {
+            Some(v) => unsafe { *v },
+            None => return Ok(xdp_action::XDP_PASS), // BD not VNI-bound
+        };
+        let stat = if bum {
+            STAT_VXLAN_FLOOD
+        } else {
+            STAT_VXLAN_ENCAP
+        };
+        l2_vxlan_encap(ctx, ent, vni, stat)
+    } else {
+        let stat = if bum {
+            STAT_SRV6_L2_BUM
+        } else {
+            STAT_SRV6_L2_ENCAP
+        };
+        l2_srv6_encap(ctx, ent, stat)
     }
-    l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_ENCAP)
 }
 
 /// MAC-in-SRv6 encap: prepend an outer Ethernet + outer IPv6 header
@@ -2609,6 +2690,95 @@ fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry, stat: u32) -> Result<u32, ()>
     unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = 64 };
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)? = src6 };
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = ent.remote_sid };
+    stat_inc(stat);
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
+/// VXLAN encap (RFC 7348): prepend outer Ethernet + IPv4 + UDP(4789) + VXLAN
+/// carrying `vni`, toward the remote VTEP the FDB entry names (v4-mapped in
+/// `remote_sid`), and redirect out the underlay adjacency. The whole inner
+/// frame rides as the VXLAN payload. `l2_srv6_encap`'s shape with GTP's outer
+/// IPv4+UDP recipe: header checksum from `ipv4_hdr_csum`, UDP checksum 0
+/// (optional over IPv4, RFC 7348 §4.3), UDP source port from the inner MACs
+/// for underlay ECMP entropy (§5).
+#[inline(always)]
+fn l2_vxlan_encap(ctx: &XdpContext, ent: &FdbEntry, vni: u32, stat: u32) -> Result<u32, ()> {
+    let vtep: [u8; 4] = [
+        ent.remote_sid[12],
+        ent.remote_sid[13],
+        ent.remote_sid[14],
+        ent.remote_sid[15],
+    ];
+    // Underlay adjacency: an explicit nexthop id (static config), or — when
+    // the entry came from the control-plane tee with nexthop 0 — resolved by
+    // a FIB4 lookup on the remote VTEP (the underlay route the IGP installed).
+    // The LPM trie directly (`l2_srv6_encap`'s FIB6 shape) — the generic
+    // `fib4_lookup` would inline the whole DIR-24 engine into cradle_xdp's
+    // flattened frame and blow the verifier's stack budget; in dir24 mode a
+    // VXLAN FDB entry needs an explicit nexthop id.
+    let nh_id = if ent.oif != 0 {
+        ent.oif
+    } else {
+        // Borrow, don't copy: cradle_xdp's flattened frame sits at the
+        // verifier's call-chain stack budget (see `PolicyScratch6`), so this
+        // whole function avoids aggregate stack temporaries.
+        let fib: &FibEntry = match FIB4.get(Key::new(32, vtep)) {
+            Some(f) => f,
+            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+        };
+        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
+            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        }
+        fib.nexthop_id
+    };
+    let nh: &NextHop = match NEXTHOPS.get_ptr(&nh_id) {
+        Some(n) => unsafe { &*n },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    let src4: &[u8; 4] = match VXLAN_SRC.get(0) {
+        Some(s) if *s != [0; 4] => s,
+        _ => return Ok(xdp_action::XDP_PASS), // no local VTEP configured
+    };
+    // Flow entropy for the UDP source port — scalar reads, before the grow.
+    let e0 = unsafe { *xdp_ptr::<u8>(ctx, 0)? } ^ unsafe { *xdp_ptr::<u8>(ctx, 6)? };
+    let e1 = unsafe { *xdp_ptr::<u8>(ctx, 5)? } ^ unsafe { *xdp_ptr::<u8>(ctx, 11)? };
+    let h = e0 as u16 | (e1 as u16) << 8;
+    let sport = 0xC000 | (h & 0x3FFF); // the RFC 6335 dynamic range
+    // The whole inner frame (inner eth + payload) becomes the VXLAN payload.
+    let inner_len = (ctx.data_end() - ctx.data()) as u16;
+    let ip_total = inner_len + (VXLAN_ENCAP_HDR_LEN - EthHdr::LEN) as u16;
+    let udp_len = inner_len + 16; // UDP(8) + VXLAN(8) + inner
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, -(VXLAN_ENCAP_HDR_LEN as i32)) } != 0 {
+        return Err(());
+    }
+    // Outer Ethernet.
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? = ETH_P_IP.to_be() };
+    // Outer IPv4 (no options; id/flags/frag 0 — the csum helper assumes
+    // exactly this header shape).
+    let csum = ipv4_hdr_csum(ip_total, *src4, vtep);
+    unsafe { *xdp_ptr::<u8>(ctx, IP_VER_IHL_OFF)? = 0x45 };
+    unsafe { *xdp_ptr::<u8>(ctx, IP_VER_IHL_OFF + 1)? = 0 }; // TOS
+    unsafe { *xdp_ptr::<u16>(ctx, IP_VER_IHL_OFF + 2)? = ip_total.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, IP_VER_IHL_OFF + 4)? = 0 }; // identification
+    unsafe { *xdp_ptr::<u16>(ctx, IP_VER_IHL_OFF + 6)? = 0 }; // flags / frag off
+    unsafe { *xdp_ptr::<u8>(ctx, IP_TTL_OFF)? = 64 };
+    unsafe { *xdp_ptr::<u8>(ctx, IP_PROTO_OFF)? = IPPROTO_UDP };
+    unsafe { *xdp_ptr::<u16>(ctx, IP_CSUM_OFF)? = csum.to_be() };
+    unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_SRC_OFF)? = *src4 };
+    unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_DST_OFF)? = vtep };
+    // UDP header (checksum 0 — optional over IPv4).
+    unsafe { *xdp_ptr::<u16>(ctx, L4_OFF)? = sport.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, L4_OFF + 2)? = VXLAN_PORT.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, L4_OFF + 4)? = udp_len.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, L4_OFF + 6)? = 0 }; // UDP checksum
+    // VXLAN header: I flag, VNI in the upper 24 bits of the second word.
+    unsafe { *xdp_ptr::<u32>(ctx, VXLAN_HDR_OFF)? = 0x0800_0000u32.to_be() };
+    unsafe { *xdp_ptr::<u32>(ctx, VXLAN_HDR_OFF + 4)? = (vni << 8).to_be() };
     stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
@@ -2806,6 +2976,51 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
             (*meta).vrf_id = pdr.vrf_id;
         }
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// VXLAN decap (RFC 7348): a VXLAN frame addressed to the local VTEP is
+/// stripped of its 50-byte outer encapsulation — the inner Ethernet frame
+/// moves to the front intact — and its VNI's bridge domain rides to the TC
+/// `l2_switch` as metadata (the `srv6_dt2u` handoff: overlay-received, so
+/// split horizon applies and the underlay port never MAC-learns). Anything
+/// not ours — a *transit* VXLAN packet routed between other VTEPs, an unknown
+/// VNI — passes to the TC L3 stage untouched. The caller (`try_udp4_xdp`)
+/// already validated IHL == 5 / UDP / dport 4789.
+#[inline(always)]
+fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    let local: &[u8; 4] = match VXLAN_SRC.get(0) {
+        Some(s) if *s != [0; 4] => s,
+        _ => return Ok(xdp_action::XDP_PASS), // no local VTEP configured
+    };
+    if unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_DST_OFF)? } != *local {
+        return Ok(xdp_action::XDP_PASS); // transit VXLAN: route it normally
+    }
+    // Valid-VNI flag (I) must be set; other flag bits are reserved (ignored).
+    if unsafe { *xdp_ptr::<u8>(ctx, VXLAN_HDR_OFF)? } & 0x08 == 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let vni = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, VXLAN_HDR_OFF + 4)? }) >> 8;
+    let bd: u16 = match VNI_INFO.get_ptr(&vni) {
+        Some(i) => unsafe { (*i).vlan },
+        None => return Ok(xdp_action::XDP_PASS), // unknown VNI: not ours
+    };
+    // Drop the outer headers: the inner Ethernet frame moves to the front.
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN_ENCAP_HDR_LEN as i32) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_VXLAN_DECAP);
+    // Carry the bridge domain to the TC l2_switch (mirrors the DT2U meta).
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
+        (*meta).vrf_id = bd as u32;
     }
     Ok(xdp_action::XDP_PASS)
 }
