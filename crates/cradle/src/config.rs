@@ -97,12 +97,20 @@ fn default_fdb_age_secs() -> u64 {
 /// set. `flood_port` is the slot veth's A end (declare it as an L2 port in
 /// the BD so the flood reaches it); `encap_port` is the B end (declare it as
 /// an L3 port so the XDP stage attaches), where each flooded copy is
-/// MAC-in-SRv6 encapsulated toward `remote_sid` (the remote PE's End.DT2M).
+/// encapsulated toward the remote PE — MAC-in-SRv6 toward `remote_sid` (its
+/// End.DT2M), or VXLAN toward `remote_vtep` carrying `vni` (exactly one of
+/// sid/vtep; `vni` is required with `remote_vtep` — static slots name ports,
+/// not a bridge domain, so there is no binding to resolve it from).
 #[derive(Debug, Deserialize)]
 pub struct ReplSlotCfg {
     pub flood_port: String,
     pub encap_port: String,
-    pub remote_sid: String,
+    #[serde(default)]
+    pub remote_sid: Option<String>,
+    #[serde(default)]
+    pub remote_vtep: Option<String>,
+    #[serde(default)]
+    pub vni: Option<u32>,
 }
 
 /// A static overlay FDB entry: the MAC `mac` in bridge domain `bd` is behind
@@ -630,12 +638,29 @@ impl Config {
             }
         }
         for r in &self.repl_slots {
-            let remote_sid = r
-                .remote_sid
-                .parse()
-                .with_context(|| format!("bad remote SID {:?}", r.remote_sid))?;
-            ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid)
-                .await?;
+            match (&r.remote_sid, &r.remote_vtep) {
+                (Some(sid), None) => {
+                    let remote_sid = sid
+                        .parse()
+                        .with_context(|| format!("bad remote SID {sid:?}"))?;
+                    ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid)
+                        .await?;
+                }
+                (None, Some(vtep)) => {
+                    let vtep = vtep
+                        .parse()
+                        .with_context(|| format!("bad remote VTEP {vtep:?}"))?;
+                    let vni = r.vni.with_context(|| {
+                        format!("repl slot {}: remote_vtep needs a vni", r.flood_port)
+                    })?;
+                    ctl.add_repl_slot_vxlan(&r.flood_port, &r.encap_port, vtep, vni)
+                        .await?;
+                }
+                _ => anyhow::bail!(
+                    "repl slot {}: exactly one of remote_sid / remote_vtep",
+                    r.flood_port
+                ),
+            }
         }
         for x in &self.xconnects {
             let remote_sid = x

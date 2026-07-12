@@ -45,22 +45,22 @@ use cradle_common::{
     MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
     POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
-    PolicyKey, PortConfig, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U,
-    SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V,
-    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X,
-    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
-    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
-    STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
-    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
-    STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
-    STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT,
-    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
-    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
-    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_USD,
-    STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD,
-    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VniInfo, Vrf4Key, Vrf6Key,
-    VrfId6Key, VrfIdKey, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2,
-    fibw_unpack, mpls_lse, mpls_lse_unpack,
+    PolicyKey, PortConfig, REPL_KIND_VXLAN, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46,
+    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
+    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
+    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
+    STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT,
+    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
+    STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
+    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
+    STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP,
+    STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
+    Srv6Encap, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, XDP_META_MAGIC, XDP_META_MAGIC_DX,
+    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -158,12 +158,13 @@ static MPLS_FIB: HashMap<u32, MplsEntry> = HashMap::with_max_entries(4096, 0);
 static FDB: HashMap<FdbKey, FdbEntry> = HashMap::with_max_entries(8192, 0);
 /// EVPN BUM ingress-replication slots: a per-remote-PE veth pair whose A end
 /// sits in the bridge domain's flood list (TC `clone_redirect` gives the
-/// per-copy fan-out) and whose B end MAC-in-SRv6 encapsulates the arriving
-/// copy toward this slot's `End.DT2M` SID. Keyed by ifindex with BOTH ends
+/// per-copy fan-out) and whose B end encapsulates the arriving copy toward
+/// this slot's remote PE — MAC-in-SRv6 to an `End.DT2M` SID or VXLAN to a
+/// VTEP, per the [`ReplTarget`] kind. Keyed by ifindex with BOTH ends
 /// inserted — the A end so `flood()` can exclude slots on overlay-received
 /// frames (EVPN split horizon), the B end for the encap lookup in `try_xdp`.
 #[map]
-static REPL_SID: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
+static REPL_SID: HashMap<u32, ReplTarget> = HashMap::with_max_entries(256, 0);
 /// VPWS cross-connect (EVPN E-Line, RFC 8214): AC ingress ifindex → the
 /// remote End.DX2/DX2V service SID. Every frame arriving on a bound AC is
 /// MAC-in-SRv6 encapsulated toward the SID — no FDB, no learning.
@@ -2449,16 +2450,21 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     let iif = unsafe { (*ctx.ctx).ingress_ifindex };
     // A BUM replication slot: the TC flood clone_redirect'ed a bare copy of
     // a BUM frame into this veth; encapsulate it toward the slot's remote
-    // End.DT2M SID (per-copy encap — the piece clone_redirect itself can't
-    // do) and send it out the underlay via the FIB6 route to the SID.
-    if let Some(sid) = REPL_SID.get_ptr(&iif) {
+    // PE (per-copy encap — the piece clone_redirect itself can't do) and
+    // send it out the underlay via the FIB route to the SID/VTEP.
+    if let Some(t) = REPL_SID.get_ptr(&iif) {
+        let t = unsafe { &*t };
         let ent = FdbEntry {
-            oif: 0, // resolve the underlay adjacency by FIB6 lookup
+            oif: 0, // resolve the underlay adjacency by FIB lookup
             flags: FDB_F_REMOTE,
-            remote_sid: unsafe { *sid },
+            remote_sid: t.addr,
             last_seen: 0,
         };
-        return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM);
+        return if t.kind == REPL_KIND_VXLAN {
+            l2_vxlan_encap(ctx, &ent, t.vni, STAT_VXLAN_FLOOD)
+        } else {
+            l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM)
+        };
     }
     // VLAN-scoped VPWS AC (RFC 8214 VLAN-based E-Line, End.DX2V): an
     // 802.1Q-tagged frame picks its E-Line by (AC ifindex, VID) — the tag
