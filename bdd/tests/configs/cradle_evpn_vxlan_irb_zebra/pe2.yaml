@@ -1,0 +1,62 @@
+system:
+  cradle:
+    enabled: true
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.0.2.2/32
+- if-name: pe2u
+  ipv4:
+    address: 10.0.12.2/24
+- if-name: pe2c
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.2.1/24
+vxlan:
+- name: vxlan5000
+  vni: 5000
+  local-address: 192.0.2.2
+  vrf: vrf-cust
+  router-mac: 02:00:00:00:02:ff
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 192.0.2.1/32
+        nexthop:
+        - address: 10.0.12.1
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.0.2.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    neighbor:
+    - remote-address: 192.0.2.1
+      remote-as: 65001
+      update-source: 192.0.2.2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:100
+      encapsulation: vxlan
+      evpn:
+        advertise-ipv4: true
+        l3vni: 5000
+        router-mac: 02:00:00:00:02:ff
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.2.2.0/24
