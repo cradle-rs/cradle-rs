@@ -315,6 +315,23 @@ pub enum CtlOp {
         #[arg(long, default_value_t = 8192)]
         chunk: usize,
     },
+    /// Emit the same synthetic route table as `gen-routes` in `ip -batch`
+    /// format on stdout, so the kernel FIB can carry a table identical to the
+    /// eBPF one (same count + seed => same prefixes). Needs no running cradle.
+    GenRoutesKernel {
+        /// Number of routes to emit.
+        #[arg(long, default_value_t = 1_000_000)]
+        count: u64,
+        /// RNG seed (same seed => same table).
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Gateway every emitted route points at.
+        #[arg(long)]
+        via: std::net::Ipv4Addr,
+        /// Output interface for every emitted route.
+        #[arg(long)]
+        dev: String,
+    },
 }
 
 #[tokio::main]
@@ -324,7 +341,17 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Serve(args) => serve(args).await,
-        Cmd::Ctl(args) => ctl::run(GrpcEndpoint::parse(&args.grpc)?, args.op).await,
+        Cmd::Ctl(args) => match args.op {
+            // Local file emission — no daemon to talk to (kernel-mode
+            // baselines run with cradle stopped).
+            CtlOp::GenRoutesKernel {
+                count,
+                seed,
+                via,
+                dev,
+            } => ctl::gen_routes_kernel(count, seed, via, &dev),
+            op => ctl::run(GrpcEndpoint::parse(&args.grpc)?, op).await,
+        },
         Cmd::Stats(args) => ctl::run_stats(GrpcEndpoint::parse(&args.grpc)?).await,
         Cmd::Dump(args) => {
             ctl::run_dump(

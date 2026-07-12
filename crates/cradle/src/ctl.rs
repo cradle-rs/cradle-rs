@@ -380,7 +380,30 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
         } => {
             gen_routes(&mut client, count, seed, nexthop_id, chunk).await?;
         }
+        // Dispatched in main() before the gRPC connect.
+        CtlOp::GenRoutesKernel { .. } => unreachable!("handled without a daemon"),
     }
+    Ok(())
+}
+
+/// `ctl gen-routes-kernel` — write the `gen-routes` table as `ip -batch`
+/// lines on stdout (`route add <prefix> via <gw> dev <oif>`), so kernel-mode
+/// benchmark baselines carry exactly the prefixes the eBPF FIB does.
+pub fn gen_routes_kernel(count: u64, seed: u64, via: std::net::Ipv4Addr, dev: &str) -> Result<()> {
+    use std::io::Write as _;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    for (addr, len) in crate::util::gen_dfz_prefixes(count, seed) {
+        writeln!(
+            out,
+            "route add {}/{} via {} dev {}",
+            std::net::Ipv4Addr::from(addr),
+            len,
+            via,
+            dev
+        )?;
+    }
+    out.flush()?;
     Ok(())
 }
 
