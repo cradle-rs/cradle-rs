@@ -45,7 +45,13 @@ pub struct Config {
     /// SRv6 H.Encaps outer source address.
     #[serde(default)]
     pub srv6_source: Option<String>,
-    /// Static overlay FDB entries (EVPN over SRv6).
+    /// Local VTEP source IPv4 (EVPN/VXLAN outer source + decap match).
+    #[serde(default)]
+    pub vtep_source: Option<String>,
+    /// EVPN/VXLAN L2VNI bindings: VNI ↔ bridge domain.
+    #[serde(default)]
+    pub vnis: Vec<VniCfg>,
+    /// Static overlay FDB entries (EVPN over SRv6 or VXLAN).
     #[serde(default)]
     pub fdb: Vec<FdbCfg>,
     /// BUM ingress-replication slots (EVPN over SRv6, multi-PE).
@@ -99,15 +105,29 @@ pub struct ReplSlotCfg {
     pub remote_sid: String,
 }
 
-/// A static overlay FDB entry (EVPN over SRv6): the MAC `mac` in bridge domain
-/// `bd` is behind the remote PE's `End.DT2U` `remote_sid`, reached via underlay
-/// nexthop `nexthop`.
+/// A static overlay FDB entry: the MAC `mac` in bridge domain `bd` is behind
+/// a remote PE — over SRv6 (`remote_sid`, the PE's `End.DT2U`/`DT2M` SID) or
+/// over VXLAN (`remote_vtep`, the PE's VTEP IPv4; the VNI comes from the BD's
+/// `vnis` binding). Exactly one of the two. Reached via underlay nexthop
+/// `nexthop` (0 = FIB lookup on the SID/VTEP).
 #[derive(Debug, Deserialize)]
 pub struct FdbCfg {
     pub mac: String,
     pub bd: u16,
-    pub remote_sid: String,
+    #[serde(default)]
+    pub remote_sid: Option<String>,
+    #[serde(default)]
+    pub remote_vtep: Option<String>,
+    #[serde(default)]
     pub nexthop: u32,
+}
+
+/// An EVPN/VXLAN L2VNI binding: frames in bridge domain `vlan` tunnel with
+/// `vni`; received VXLAN frames with `vni` bridge in `vlan`.
+#[derive(Debug, Deserialize)]
+pub struct VniCfg {
+    pub vni: u32,
+    pub vlan: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -475,6 +495,15 @@ impl Config {
                 .with_context(|| format!("bad srv6_source {src:?}"))?;
             ctl.set_srv6_encap_source(addr).await?;
         }
+        if let Some(src) = &self.vtep_source {
+            let addr = src
+                .parse()
+                .with_context(|| format!("bad vtep_source {src:?}"))?;
+            ctl.set_vtep_source(addr).await?;
+        }
+        for v in &self.vnis {
+            ctl.set_vni(v.vni, v.vlan).await?;
+        }
         for nh in &self.nexthops {
             if let Some(dst) = &nh.gtp_dst {
                 let gw = match &nh.gateway {
@@ -581,11 +610,24 @@ impl Config {
         }
         for f in &self.fdb {
             let mac = util::parse_mac(&f.mac)?;
-            let remote_sid = f
-                .remote_sid
-                .parse()
-                .with_context(|| format!("bad remote SID {:?}", f.remote_sid))?;
-            ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop).await?;
+            match (&f.remote_sid, &f.remote_vtep) {
+                (Some(sid), None) => {
+                    let remote_sid = sid
+                        .parse()
+                        .with_context(|| format!("bad remote SID {sid:?}"))?;
+                    ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop).await?;
+                }
+                (None, Some(vtep)) => {
+                    let vtep = vtep
+                        .parse()
+                        .with_context(|| format!("bad remote VTEP {vtep:?}"))?;
+                    ctl.add_fdb_remote_vxlan(mac, f.bd, vtep, f.nexthop).await?;
+                }
+                _ => anyhow::bail!(
+                    "fdb entry {}: exactly one of remote_sid / remote_vtep",
+                    f.mac
+                ),
+            }
         }
         for r in &self.repl_slots {
             let remote_sid = r

@@ -20,14 +20,14 @@ use aya::{
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FIB_F_ECMP, FdbEntry, FdbKey,
-    FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM, LocalSid,
-    MAX_LABELS, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_ECMP,
+    FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM,
+    LocalSid, MAX_LABELS, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry,
     NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, Neigh4Key, Neigh6Key,
     NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
     POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, STAT_FDB_AGED, STAT_MAX,
-    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, Vrf4Key, Vrf6Key, VrfId6Key,
-    VrfIdKey,
+    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VniInfo, Vrf4Key, Vrf6Key,
+    VrfId6Key, VrfIdKey,
 };
 
 use crate::{
@@ -140,6 +140,12 @@ pub struct Dataplane {
     /// BUM ingress-replication slots (EVPN over SRv6): ifindex → remote
     /// `End.DT2M` SID, both ends of each slot's veth pair.
     repl_sid: HashMap<MapData, u32, [u8; 16]>,
+    /// EVPN/VXLAN L2VNI bindings: bridge domain → VNI (encap direction) and
+    /// VNI → bridge domain (decap direction), kept in lockstep by `vni_set`.
+    vlan_vni: HashMap<MapData, u16, u32>,
+    vni_info: HashMap<MapData, u32, VniInfo>,
+    /// Local VTEP source IPv4 ([0]; all-zero = VXLAN unconfigured).
+    vxlan_src: Array<MapData, [u8; 4]>,
     xconnect: HashMap<MapData, u32, [u8; 16]>,
     xconnect_vlan: HashMap<MapData, Dx2vKey, [u8; 16]>,
     dx2v: HashMap<MapData, Dx2vKey, u32>,
@@ -224,6 +230,11 @@ impl Dataplane {
             )?,
             fdb: HashMap::try_from(bpf.take_map("FDB").context("map FDB missing")?)?,
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
+            vlan_vni: HashMap::try_from(bpf.take_map("VLAN_VNI").context("map VLAN_VNI missing")?)?,
+            vni_info: HashMap::try_from(bpf.take_map("VNI_INFO").context("map VNI_INFO missing")?)?,
+            vxlan_src: Array::try_from(
+                bpf.take_map("VXLAN_SRC").context("map VXLAN_SRC missing")?,
+            )?,
             xconnect: HashMap::try_from(bpf.take_map("XCONNECT").context("map XCONNECT missing")?)?,
             xconnect_vlan: HashMap::try_from(
                 bpf.take_map("XCONNECT_VLAN")
@@ -778,6 +789,36 @@ impl Dataplane {
         remote_sid: Ipv6Addr,
         nexthop_id: u32,
     ) -> Result<bool> {
+        self.fdb_overlay_add(mac, bd, remote_sid.octets(), FDB_F_REMOTE, nexthop_id)
+    }
+
+    /// The VXLAN flavor of [`Self::fdb_remote_add`]: the MAC sits behind the
+    /// remote VTEP `vtep` (stored v4-mapped in `remote_sid`), tunneled with
+    /// the bridge domain's VNI. Same displaced-local MAC-move semantics.
+    pub fn fdb_remote_add_vxlan(
+        &mut self,
+        mac: [u8; 6],
+        bd: u16,
+        vtep: Ipv4Addr,
+        nexthop_id: u32,
+    ) -> Result<bool> {
+        self.fdb_overlay_add(
+            mac,
+            bd,
+            vtep.to_ipv6_mapped().octets(),
+            FDB_F_REMOTE | FDB_F_VXLAN,
+            nexthop_id,
+        )
+    }
+
+    fn fdb_overlay_add(
+        &mut self,
+        mac: [u8; 6],
+        bd: u16,
+        remote_sid: [u8; 16],
+        flags: u32,
+        nexthop_id: u32,
+    ) -> Result<bool> {
         let displaced_local = matches!(
             self.fdb.get(&FdbKey { mac, vlan: bd }, 0),
             Ok(e) if e.flags & FDB_F_REMOTE == 0
@@ -786,8 +827,8 @@ impl Dataplane {
             FdbKey { mac, vlan: bd },
             FdbEntry {
                 oif: nexthop_id,
-                flags: FDB_F_REMOTE,
-                remote_sid: remote_sid.octets(),
+                flags,
+                remote_sid,
                 last_seen: 0,
             },
             0,
@@ -1606,6 +1647,30 @@ impl Dataplane {
 
     pub fn srv6_encap_source_set(&mut self, addr: Ipv6Addr) -> Result<()> {
         self.srv6_encap_src.set(0, addr.octets(), 0)?;
+        Ok(())
+    }
+
+    /// Bind an L2VNI to its bridge domain, in both datapath directions
+    /// (encap `VLAN_VNI[vlan] → vni`, decap `VNI_INFO[vni] → vlan`).
+    pub fn vni_set(&mut self, vni: u32, vlan: u16) -> Result<()> {
+        self.vlan_vni.insert(vlan, vni, 0)?;
+        self.vni_info
+            .insert(vni, VniInfo { vlan, _pad: [0; 2] }, 0)?;
+        Ok(())
+    }
+
+    /// Remove an L2VNI ↔ bridge-domain binding (both directions).
+    pub fn vni_del(&mut self, vni: u32) -> Result<()> {
+        if let Ok(info) = self.vni_info.get(&vni, 0) {
+            let _ = self.vlan_vni.remove(&info.vlan);
+        }
+        let _ = self.vni_info.remove(&vni);
+        Ok(())
+    }
+
+    /// Set the local VTEP source IPv4 (VXLAN outer source; decap match).
+    pub fn vxlan_source_set(&mut self, addr: Ipv4Addr) -> Result<()> {
+        self.vxlan_src.set(0, addr.octets(), 0)?;
         Ok(())
     }
 

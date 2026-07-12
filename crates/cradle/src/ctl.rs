@@ -5,8 +5,8 @@
 use anyhow::{Context as _, Result};
 
 use cradle_common::{
-    FDB_F_LOCAL, FDB_F_REMOTE, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP, FIB_F_LOCAL, NH_F_GTP,
-    NH_F_MPLS, NH_F_ONLINK, NH_F_SRV6, NH_F_V6,
+    FDB_F_LOCAL, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP,
+    FIB_F_LOCAL, NH_F_GTP, NH_F_MPLS, NH_F_ONLINK, NH_F_SRV6, NH_F_V6,
 };
 
 use crate::{
@@ -47,6 +47,19 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
             if let Some(src) = &cfg.srv6_source {
                 client
                     .set_srv6_encap_source(pb::Srv6EncapSource { addr: src.clone() })
+                    .await?;
+            }
+            if let Some(src) = &cfg.vtep_source {
+                client
+                    .set_vtep_source(pb::VtepSource { addr: src.clone() })
+                    .await?;
+            }
+            for v in &cfg.vnis {
+                client
+                    .set_vni(pb::Vni {
+                        vni: v.vni,
+                        vlan: v.vlan as u32,
+                    })
                     .await?;
             }
             for nh in &cfg.nexthops {
@@ -607,6 +620,9 @@ fn fdb_flags(flags: u32) -> String {
     }
     if flags & FDB_F_REMOTE != 0 {
         v.push("remote");
+    }
+    if flags & FDB_F_VXLAN != 0 {
+        v.push("vxlan");
     }
     if v.is_empty() {
         "learned".to_string()
