@@ -6,15 +6,25 @@ members = [
     "crates/cradle",
     "crates/cradle-cni",
     "crates/cradle-k8s",
+    # zebra-rs offload helpers (managed child processes, driven over a stdin
+    # line protocol). Each is a userspace loader + a `bpfel-unknown-none` eBPF
+    # crate, same shape as cradle/cradle-ebpf.
+    "crates/xdp-bfd-echo",
+    "crates/xdp-bfd-echo-ebpf",
+    "crates/tc-evpn-replicate",
+    "crates/tc-evpn-replicate-ebpf",
     "bdd",
 ]
-# The eBPF crate is built for `bpfel-unknown-none` by `cradle`'s build script
-# (via aya-build), never for the host, so it is excluded from the default set.
+# The eBPF crates are built for `bpfel-unknown-none` by their loader's build
+# script (via aya-build), never for the host, so they are excluded from the
+# default set (host `cargo build` would otherwise fail on the no_main binary).
 default-members = [
     "crates/cradle-common",
     "crates/cradle",
     "crates/cradle-cni",
     "crates/cradle-k8s",
+    "crates/xdp-bfd-echo",
+    "crates/tc-evpn-replicate",
 ]
 
 [workspace.package]
@@ -47,6 +57,13 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"
 clap = { version = "4", features = ["derive"] }
+# Used by the offload loaders (env_logger/log/libc) and their eBPF crates'
+# build scripts (which). default-features = false mirrors the offload trees'
+# original declarations.
+env_logger = { version = "0.11.5", default-features = false }
+libc = { version = "0.2.159", default-features = false }
+log = { version = "0.4.22", default-features = false }
+which = { version = "6.0.0", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1", features = ["derive"] }
@@ -66,3 +83,20 @@ opt-level = 3
 [profile.release.package.cradle-ebpf]
 debug = 2
 codegen-units = 1
+
+# Same eBPF profile treatment for the imported offload eBPF crates.
+[profile.dev.package.xdp-bfd-echo-ebpf]
+opt-level = 3
+
+[profile.release.package.xdp-bfd-echo-ebpf]
+debug = 2
+codegen-units = 1
+strip = false
+
+[profile.dev.package.tc-evpn-replicate-ebpf]
+opt-level = 3
+
+[profile.release.package.tc-evpn-replicate-ebpf]
+debug = 2
+codegen-units = 1
+strip = false

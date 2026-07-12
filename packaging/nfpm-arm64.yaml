@@ -29,7 +29,15 @@ contents:
     dst: /usr/bin/cradle-cni
   - src: ../target/release/cradle-k8s
     dst: /usr/bin/cradle-k8s
+  # zebra-rs offload helpers, spawned per-interface/per-VNI by zebra-rs. The
+  # paths match zebra-rs's packaged fallbacks (ZEBRA_XDP_BFD_ECHO_BIN /
+  # ZEBRA_TC_EVPN_REPLICATE_BIN override them).
+  - src: ../target/release/xdp-bfd-echo
+    dst: /usr/sbin/xdp-bfd-echo
+  - src: ../target/release/tc-evpn-replicate
+    dst: /usr/sbin/tc-evpn-replicate
 scripts:
-  # setcap on /usr/bin/cradle so a non-root supervisor (zebra-rs
-  # `system ebpf enabled`) can spawn a working datapath.
+  # setcap on /usr/bin/cradle and the offload helpers so a non-root supervisor
+  # (zebra-rs `system ebpf enabled`, or the BFD/EVPN supervisors) can spawn a
+  # working datapath.
   postinstall: ./scripts/postinstall.sh
