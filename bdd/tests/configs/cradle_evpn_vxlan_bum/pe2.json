@@ -1,0 +1,20 @@
+{
+  "ports": [
+    { "name": "pe2c", "vlan": 100 },
+    { "name": "pe2u", "l3": true }
+  ],
+  "vtep_source": "10.100.0.2",
+  "vnis": [
+    { "vni": 10100, "vlan": 100 }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe2u", "gateway": "10.100.0.1" }
+  ],
+  "neighbors": [
+    { "oif": "pe2u", "ip": "10.100.0.1", "mac": "02:00:00:00:01:0a" }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:c1:01", "bd": 100, "remote_vtep": "10.100.0.1", "nexthop": 1 },
+    { "mac": "ff:ff:ff:ff:ff:ff", "bd": 100, "remote_vtep": "10.100.0.1", "nexthop": 1 }
+  ]
+}
