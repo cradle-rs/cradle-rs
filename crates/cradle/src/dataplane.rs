@@ -23,11 +23,11 @@ use cradle_common::{
     EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_ECMP,
     FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM,
     LocalSid, MAX_LABELS, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry,
-    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
+    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key,
+    Neigh6Key, NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
     POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_SRV6, REPL_KIND_VXLAN,
     ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey,
+    Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -112,6 +112,8 @@ pub struct Dataplane {
     srv6_localsid: LpmTrie<MapData, [u8; 16], LocalSid>,
     srv6_encap: HashMap<MapData, u32, Srv6Encap>,
     gtp_encap: HashMap<MapData, u32, GtpEncap>,
+    /// EVPN symmetric-IRB VXLAN L3 encap, keyed by nexthop id (`NH_F_VXLAN`).
+    vxlan_encap: HashMap<MapData, u32, VxlanEncap>,
     gtp_pdr: HashMap<MapData, GtpPdrKey, GtpPdr>,
     srv6_encap_src: Array<MapData, [u8; 16]>,
     meta_cookie: Array<MapData, u32>,
@@ -193,6 +195,10 @@ impl Dataplane {
             )?,
             gtp_encap: HashMap::try_from(
                 bpf.take_map("GTP_ENCAP").context("map GTP_ENCAP missing")?,
+            )?,
+            vxlan_encap: HashMap::try_from(
+                bpf.take_map("VXLAN_ENCAP")
+                    .context("map VXLAN_ENCAP missing")?,
             )?,
             gtp_pdr: HashMap::try_from(bpf.take_map("GTP_PDR").context("map GTP_PDR missing")?)?,
             srv6_encap_src: Array::try_from(
@@ -1635,6 +1641,41 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Install an EVPN symmetric-IRB VXLAN L3 nexthop (`NH_F_VXLAN`): a routed
+    /// packet resolving here is VXLAN-encapsulated with `l3vni` toward `vtep`,
+    /// its inner Ethernet dst set to `rmac` (the remote PE's router MAC).
+    /// `oif`/`gateway` are the underlay adjacency (`l2_xmit` resolves the MAC).
+    pub fn nexthop_set_vxlan(
+        &mut self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: u32,
+        vtep: Ipv4Addr,
+        l3vni: u32,
+        rmac: [u8; 6],
+    ) -> Result<()> {
+        let gateway_v4 = gateway.map(|a| u32::from_be_bytes(a.octets())).unwrap_or(0);
+        let nh = NextHop {
+            gateway_v4,
+            gateway_v6: [0; 16],
+            oif,
+            flags: NH_F_VXLAN,
+            labels: [0; MAX_LABELS],
+            num_labels: 0,
+            _pad: [0; 3],
+            backup_id: 0,
+        };
+        self.nexthops.insert(id, nh, 0)?;
+        let enc = VxlanEncap {
+            vtep: vtep.octets(),
+            l3vni,
+            rmac,
+            _pad: [0; 2],
+        };
+        self.vxlan_encap.insert(id, enc, 0)?;
+        Ok(())
+    }
+
     /// Install a GTP-U decap PDR: a received G-PDU on (`dst`, `teid`) is
     /// stripped and its inner packet forwarded in `vrf` (0 = global).
     pub fn gtp_pdr_add(&mut self, dst: Ipv4Addr, teid: u32, vrf: u32) -> Result<()> {
@@ -1689,8 +1730,36 @@ impl Dataplane {
     /// (encap `VLAN_VNI[vlan] → vni`, decap `VNI_INFO[vni] → vlan`).
     pub fn vni_set(&mut self, vni: u32, vlan: u16) -> Result<()> {
         self.vlan_vni.insert(vlan, vni, 0)?;
-        self.vni_info
-            .insert(vni, VniInfo { vlan, _pad: [0; 2] }, 0)?;
+        self.vni_info.insert(
+            vni,
+            VniInfo {
+                vlan,
+                flags: VNI_F_L2,
+                vrf_id: 0,
+                rmac: [0; 6],
+                _pad: [0; 2],
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Bind an L3VNI to its VRF (EVPN symmetric IRB): a received VXLAN frame
+    /// with this VNI routes its inner IP in `vrf_id`, and `rmac` is this PE's
+    /// router MAC for the L3VNI (the inner source MAC on encap). Decap
+    /// direction only — the encap direction is per-nexthop (`VXLAN_ENCAP`).
+    pub fn vni_set_l3(&mut self, vni: u32, vrf_id: u32, rmac: [u8; 6]) -> Result<()> {
+        self.vni_info.insert(
+            vni,
+            VniInfo {
+                vlan: 0,
+                flags: VNI_F_L3,
+                vrf_id,
+                rmac,
+                _pad: [0; 2],
+            },
+            0,
+        )?;
         Ok(())
     }
 

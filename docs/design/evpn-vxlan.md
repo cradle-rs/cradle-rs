@@ -3,15 +3,19 @@
 > VXLAN bridging and routing in the eBPF data plane, driven by the zebra-rs
 > BGP-EVPN control plane (Type-2/3/5, symmetric IRB, ingress replication).
 
-Status: **Phase 1 (L2VNI bridging) implemented** — VXLAN encap/decap in XDP,
-control-plane remote MACs, the BUM sentinel, and multi-VTEP ingress
-replication, with the `cradle_evpn_vxlan`, `cradle_evpn_vxlan_bum`, and
-`cradle_evpn_vxlan_multi` BDD features. Phases 2–4 (the zebra tee, symmetric
-IRB, multihoming) remain design. This document describes the mechanism **as
-built**; where the original proposal differed (a TC datapath, a tail-called
-program, a `VNI_VTEPS` clone-fanout), the implemented EVPN-over-SRv6 twin
-([evpn-srv6.md](evpn-srv6.md)) proved the better shape and this design now
-follows it.
+Status: **Phases 1–2 implemented + Phase 3 datapath (slice 1).** Phase 1
+(L2VNI bridging — VXLAN encap/decap in XDP, control-plane remote MACs, the
+BUM sentinel, multi-VTEP ingress replication) and Phase 2 (the BGP-EVPN
+Type-2/Type-3 tee, driven by zebra-rs). Phase 3 **slice 1** is the
+cradle-native symmetric-IRB **datapath** — an L3VNI routes the inner IP in a
+per-VRF FIB with router-MAC rewrite (`cradle_evpn_vxlan_irb`, static config);
+the BGP-EVPN Type-5/RMAC tee (slice 2) and ARP/ND suppression (slice 3)
+remain design. BDDs: `cradle_evpn_vxlan{,_bum,_multi}`,
+`cradle_evpn_vxlan_zebra{,_age,_mob,_multi}`, `cradle_evpn_vxlan_irb`. This
+document describes the mechanism **as built**; where the original proposal
+differed (a TC datapath, a tail-called program, a `VNI_VTEPS` clone-fanout),
+the implemented EVPN-over-SRv6 twin ([evpn-srv6.md](evpn-srv6.md)) proved the
+better shape and this design now follows it.
 
 ## Goal and scope
 
@@ -281,14 +285,37 @@ thesis, applied to the overlay.
 
 ## Symmetric IRB and VRF / L3VNI (Phase 3)
 
-A routed packet whose FIB nexthop is a host/prefix behind a remote VTEP
-resolves to a nexthop flagged `NH_F_VXLAN` carrying `{remote_vtep, l3vni,
-remote_rmac}`: rewrite the inner dst MAC to the remote RMAC and src MAC to
-the local RMAC, then VXLAN-encap with the L3VNI and forward as above. ARP/ND
-for silent hosts is answered locally from `ARP_SUPPRESS`. Symmetric IRB
-routes the inner packet in a VRF selected by the L3VNI (`VniInfo.vrf_id`),
-sharing the per-VRF FIB mechanism with the MPLS and SRv6 L3VPN paths — the
-three overlays build that seam once.
+**Slice 1 — the datapath — is implemented** (cradle-native, static-config
+`cradle_evpn_vxlan_irb` BDD; no zebra). `VniInfo` grew `{vrf_id, flags,
+rmac}` with `VNI_F_L2`/`VNI_F_L3`. It reuses the per-VRF FIB
+(`FIB4_VRF`/`FIB6_VRF`, `fib4_lookup(vrf,…)`), the route-in-VRF TC engine
+(`l3_forward`, `bpf_redirect_neigh`), and the End.DT46-style XDP→TC VRF
+handoff (`CradleXdpMeta`, `XDP_META_MAGIC`, `tc_meta_vrf`) that the MPLS and
+SRv6 L3VPN paths already run — the three overlays share the seam.
+
+- **Encap** — a routed packet whose FIB nexthop is flagged `NH_F_VXLAN`
+  (`VXLAN_ENCAP[nh_id] = {vtep, l3vni, rmac}`) runs `vxlan_l3_encap` in TC:
+  give the packet a fresh inner Ethernet header (dst = the remote PE's RMAC
+  from the nexthop, src = this PE's L3VNI RMAC from `VNI_INFO`), then
+  `bpf_skb_adjust_room` in encap mode (`BPF_F_ADJ_ROOM_ENCAP_L3_IPV4 |
+  _L4_UDP | _L2_ETH | _L2(14)`) wraps it in outer Eth/IPv4/UDP-4789/VXLAN
+  with the L3VNI, and `l2_xmit` resolves the underlay adjacency. Dispatched
+  from both `l3_forward_v4` and `l3_forward_v6` (the outer is always IPv4).
+- **Decap** — `try_vxlan_xdp` branches on `VNI_F_L3`: write `XDP_META_MAGIC`
+  (L3) with the L3VNI's `vrf_id` instead of the L2 meta+bd, and strip the
+  50-byte outer. The inner frame keeps its (RMAC) Ethernet header; TC's
+  `l3_forward` reads the inner IP at the normal offset, routes it in the
+  tenant VRF, and rewrites the egress MAC via `redirect_neigh` — so the
+  inner RMAC header is simply overwritten (no decap-side RMAC handling).
+
+**Slice 2 (design)** — the BGP-EVPN Type-5 tee: zebra-rs must parse/originate
+the Router's-MAC extended community (RFC 9135 §6), model an L3VNI bound to a
+VRF (not modeled today — Type-5 imports as a plain MPLS/SRv6 L3VPN route),
+and install the L3VNI VRF route with an `NH_F_VXLAN` nexthop over the tee.
+
+**Slice 3 (design)** — ARP/ND for silent hosts answered locally from
+`ARP_SUPPRESS` (per-(vni,ip)→mac), which needs the Type-2 MAC+IP (dropped by
+zebra today) carried through the tee.
 
 ## Testing (BDD)
 
@@ -320,12 +347,20 @@ teed over gRPC, mirroring `cradle_evpn_srv6_zebra`.
    XDP encap/decap, `FDB_F_VXLAN` remote MACs, the sentinel, `ReplTarget`
    ingress replication, counters, gRPC (`SetVni`/`SetVtepSource` + extended
    `FdbRemote`/`ReplSlot`), static config, and the three BDD features.
-2. **Phase 2 — BGP-EVPN L2 tee.** Wire the `CradleFib` tee for Type-2
-   (`mac_add`) and Type-3 (`mdb_add`) so a real BGP-EVPN session programs
-   the fabric — the integration zebra already supports.
-3. **Phase 3 — symmetric IRB (cradle-native).** Per-VRF FIB, RMAC rewrite,
-   `NH_F_VXLAN` nexthops, and ARP/ND suppression from Type-2 MAC+IP — plus
-   the small zebra-side hooks to drive them.
+2. **Phase 2 — BGP-EVPN L2 tee** *(done)*. The `CradleFib` tee for Type-2
+   (`mac_add` → `AddFdbRemote{remote_vtep}`) and Type-3 (`mdb_add` →
+   `AddReplSlot{remote_vtep}`) + the VNI/VTEP binding (`SetVni`/
+   `SetVtepSource`), so a real BGP-EVPN session programs the fabric.
+   `cradle_evpn_vxlan_zebra{,_age,_mob,_multi}` BDDs.
+3. **Phase 3 — symmetric IRB (cradle-native).**
+   - *Slice 1 (done)* — the datapath: `VniInfo{vrf_id,flags,rmac}` +
+     `VNI_F_L2`/`VNI_F_L3`, `NH_F_VXLAN` + `VXLAN_ENCAP` + `vxlan_l3_encap`
+     (RMAC rewrite + encap-mode `adjust_room`), the L3VNI decap branch,
+     gRPC/config, `cradle_evpn_vxlan_irb` BDD. Reuses the shared per-VRF FIB.
+   - *Slice 2* — the BGP-EVPN Type-5 tee: parse/originate the Router's-MAC
+     ext-community, model L3VNI↔VRF, install the L3VNI route with an
+     `NH_F_VXLAN` nexthop.
+   - *Slice 3* — ARP/ND suppression (`ARP_SUPPRESS`) from the Type-2 MAC+IP.
 4. **Phase 4 — multihoming & multicast.** EVPN Ethernet Segments (Type-4),
    split-horizon / DF election, SMET selective multicast (Type-6 /
    `mdb_install`), and assisted replication.

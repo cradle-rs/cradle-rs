@@ -137,6 +137,10 @@ pub const NH_F_SRV6: u32 = 1 << 3;
 /// (2152) + GTP-U(TEID) around the packet (draft-ietf-dmm-srv6-mobile-uplane
 /// `GTP4.E`, the downlink toward a gNB / peer UPF).
 pub const NH_F_GTP: u32 = 1 << 4;
+/// Nexthop VXLAN-encapsulates the routed inner packet toward a remote VTEP
+/// with an L3VNI + RMAC rewrite (`VXLAN_ENCAP[nexthop_id]`) — EVPN symmetric
+/// IRB (RFC 9135).
+pub const NH_F_VXLAN: u32 = 1 << 5;
 
 /// Maximum out-label stack depth (bounds the datapath's parse/push loops for
 /// the verifier). Covers SR-MPLS depths seen in practice; deeper is rejected
@@ -429,16 +433,45 @@ pub struct GtpPdr {
     pub vrf_id: u32,
 }
 
-/// EVPN/VXLAN L2VNI binding — the decap direction of the VNI ↔ bridge-domain
-/// mapping (`VNI_INFO[vni]`; the encap direction is the `VLAN_VNI` map). A
-/// received VXLAN frame's VNI selects the bridge domain its inner Ethernet
-/// frame is switched in. Phase-3 symmetric IRB grows this struct (vrf_id,
-/// flags, rmac) — maps are unpinned, so the ABI can extend freely.
+/// EVPN/VXLAN VNI binding — the decap direction of the `VNI_INFO[vni]` map
+/// (the encap direction for an L2VNI is `VLAN_VNI`). For an L2VNI
+/// (`VNI_F_L2`) a received frame is bridged in `vlan`; for an L3VNI
+/// (`VNI_F_L3`, symmetric IRB) the inner IP packet is routed in `vrf_id`,
+/// and `rmac` is this PE's router MAC for the L3VNI (the inner source MAC on
+/// encap; the inner destination MAC a received routed frame carries).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct VniInfo {
-    /// Access bridge domain of this L2VNI.
+    /// Access bridge domain (L2VNI); 0 for a pure L3VNI.
     pub vlan: u16,
+    /// `VNI_F_*`.
+    pub flags: u16,
+    /// VRF table the inner IP is routed in (L3VNI); 0 for an L2VNI.
+    pub vrf_id: u32,
+    /// This PE's router MAC for the L3VNI (symmetric IRB).
+    pub rmac: [u8; 6],
+    pub _pad: [u8; 2],
+}
+
+/// [`VniInfo`] is an L2VNI: bridge the inner frame in `vlan`.
+pub const VNI_F_L2: u16 = 1 << 0;
+/// [`VniInfo`] is an L3VNI: route the inner IP in `vrf_id` (symmetric IRB).
+pub const VNI_F_L3: u16 = 1 << 1;
+
+/// Per-nexthop VXLAN L3 encapsulation (the `NH_F_VXLAN` companion side
+/// table `VXLAN_ENCAP`, keyed by nexthop id — mirrors [`GtpEncap`]): the
+/// routed inner packet is given a new inner Ethernet header (dst = `rmac`,
+/// the remote PE's router MAC), then VXLAN-encapsulated with `l3vni` toward
+/// the remote VTEP `vtep`. RFC 9135 symmetric IRB.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VxlanEncap {
+    /// Remote VTEP IPv4, wire bytes.
+    pub vtep: [u8; 4],
+    /// L3VNI stamped into the outer VXLAN header.
+    pub l3vni: u32,
+    /// Remote PE's router MAC — the inner destination MAC.
+    pub rmac: [u8; 6],
     pub _pad: [u8; 2],
 }
 
@@ -957,6 +990,7 @@ mod user {
         GtpPdrKey,
         GtpPdr,
         VniInfo,
+        VxlanEncap,
         ReplTarget,
         FdbKey,
         FdbEntry,

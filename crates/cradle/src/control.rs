@@ -908,6 +908,23 @@ impl Control {
         Ok(())
     }
 
+    /// Install an EVPN symmetric-IRB VXLAN L3 nexthop (`NH_F_VXLAN`).
+    pub async fn set_nexthop_vxlan(
+        &self,
+        id: u32,
+        gateway: Option<Ipv4Addr>,
+        oif: u32,
+        vtep: Ipv4Addr,
+        l3vni: u32,
+        rmac: [u8; 6],
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .nexthop_set_vxlan(id, gateway, oif, vtep, l3vni, rmac)?;
+        Ok(())
+    }
+
     /// Install a GTP-U decap PDR: `(dst, teid)` → strip + forward inner in `vrf`.
     pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, vrf: u32) -> Result<()> {
         self.dp.lock().await.gtp_pdr_add(dst, teid, vrf)?;
@@ -977,6 +994,12 @@ impl Control {
     /// Bind an L2VNI to its bridge domain (both datapath directions).
     pub async fn set_vni(&self, vni: u32, vlan: u16) -> Result<()> {
         self.dp.lock().await.vni_set(vni, vlan)?;
+        Ok(())
+    }
+
+    /// Bind an L3VNI to its VRF with this PE's router MAC (symmetric IRB).
+    pub async fn set_vni_l3(&self, vni: u32, vrf_id: u32, rmac: [u8; 6]) -> Result<()> {
+        self.dp.lock().await.vni_set_l3(vni, vrf_id, rmac)?;
         Ok(())
     }
 
@@ -1982,9 +2005,28 @@ impl Cradle for GrpcService {
                 }
             });
         }
+        // An EVPN symmetric-IRB VXLAN nexthop (non-empty `vxlan_vtep`) imposes
+        // a VXLAN L3 encap toward the remote VTEP with an L3VNI + RMAC rewrite.
+        if !n.vxlan_vtep.is_empty() {
+            let gw = if n.gateway.is_empty() {
+                None
+            } else {
+                Some(n.gateway.parse::<Ipv4Addr>().map_err(st)?)
+            };
+            let oif = if n.oif_index != 0 {
+                n.oif_index
+            } else {
+                util::ifindex_of(&n.oif).map_err(st)?
+            };
+            let vtep = n.vxlan_vtep.parse::<Ipv4Addr>().map_err(st)?;
+            let rmac = util::parse_mac(&n.vxlan_rmac).map_err(st)?;
+            self.control
+                .set_nexthop_vxlan(n.id, gw, oif, vtep, n.vxlan_l3vni, rmac)
+                .await
+                .map_err(st)?;
         // A GTP-U nexthop (non-empty `gtp_dst`) imposes a GTP4.E encap: outer
         // IPv4 + UDP(2152) + GTP-U(gtp_teid) over the v4 underlay `gateway`.
-        if !n.gtp_dst.is_empty() {
+        } else if !n.gtp_dst.is_empty() {
             let gw = if n.gateway.is_empty() {
                 None
             } else {
@@ -2228,10 +2270,18 @@ impl Cradle for GrpcService {
 
     async fn set_vni(&self, req: Request<pb::Vni>) -> Result<Response<pb::Empty>, Status> {
         let v = req.into_inner();
-        self.control
-            .set_vni(v.vni, v.vlan as u16)
-            .await
-            .map_err(st)?;
+        if v.l3 {
+            let rmac = util::parse_mac(&v.rmac).map_err(st)?;
+            self.control
+                .set_vni_l3(v.vni, v.vrf, rmac)
+                .await
+                .map_err(st)?;
+        } else {
+            self.control
+                .set_vni(v.vni, v.vlan as u16)
+                .await
+                .map_err(st)?;
+        }
         Ok(Response::new(pb::Empty {}))
     }
 

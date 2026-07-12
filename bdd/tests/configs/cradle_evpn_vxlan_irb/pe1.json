@@ -1,0 +1,26 @@
+{
+  "ports": [
+    { "name": "pe1c", "l3": true, "vrf": 10 },
+    { "name": "pe1u", "l3": true }
+  ],
+  "vtep_source": "192.0.2.1",
+  "vnis": [
+    { "vni": 5000, "l3": true, "vrf": 10, "rmac": "02:00:00:00:01:ff" }
+  ],
+  "neighbors": [
+    { "oif": "pe1u", "ip": "10.0.12.2", "mac": "02:00:00:00:02:0a" }
+  ],
+  "nexthops": [
+    {
+      "id": 1,
+      "oif": "pe1u",
+      "gateway": "10.0.12.2",
+      "vxlan_vtep": "192.0.2.2",
+      "vxlan_l3vni": 5000,
+      "vxlan_rmac": "02:00:00:00:02:ff"
+    }
+  ],
+  "routes": [
+    { "prefix": "10.2.2.0/24", "nexthop": 1, "vrf": 10 }
+  ]
+}
