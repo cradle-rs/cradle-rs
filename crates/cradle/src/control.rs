@@ -315,26 +315,47 @@ impl Control {
                 .program_mut("cradle_xdp")
                 .context("program cradle_xdp not found")?
                 .try_into()?;
-            // Native mode: generic XDP is skipped for TC-redirected skbs
-            // (netif_receive_generic_xdp bails on skb_is_redirected), so a
-            // frame forwarded by the previous hop's TC stage would bypass a
-            // generic-mode pop. veth supports native XDP; fall back to
-            // generic (with that caveat) on drivers that don't.
-            let id = match xdp.attach(name, XdpMode::Driver) {
-                Ok(id) => {
-                    info!("attached cradle XDP stage to {name} (XDP native)");
-                    id
-                }
-                Err(e) => {
-                    warn!(
-                        "native XDP attach on {name} failed ({e}); falling back to generic \
-                         (frames redirected by an upstream TC hop bypass the pop stage)"
-                    );
-                    let id = xdp
-                        .attach(name, XdpMode::Skb)
-                        .with_context(|| format!("attaching XDP MPLS pop to {name}"))?;
-                    info!("attached cradle XDP stage to {name} (XDP generic)");
-                    id
+            // `CRADLE_XDP_MODE=skb|generic` forces generic (SKB) attach for all
+            // ports. Native `XDP_TX` on a veth only delivers to the *peer's* XDP
+            // RX path, so BFD Echo reflection off a veth whose peer has no XDP —
+            // e.g. a bridge-enslaved veth in the BDD LAN topology — is silently
+            // dropped in native mode. Generic XDP re-injects through the stack
+            // and reflects regardless of the peer (the mode the retired
+            // `xdp-bfd-echo` helper used). Real NICs do native `XDP_TX` fine, so
+            // the override is a test/topology knob, off by default. Caveat: in
+            // generic mode the XDP pop/decap stage is skipped for TC-redirected
+            // skbs, so don't set it for the SRv6/MPLS/EVPN datapaths.
+            let force_skb = std::env::var("CRADLE_XDP_MODE")
+                .map(|m| matches!(m.as_str(), "skb" | "generic" | "SKB" | "GENERIC"))
+                .unwrap_or(false);
+            let id = if force_skb {
+                let id = xdp
+                    .attach(name, XdpMode::Skb)
+                    .with_context(|| format!("attaching XDP stage to {name} (forced generic)"))?;
+                info!("attached cradle XDP stage to {name} (XDP generic, CRADLE_XDP_MODE)");
+                id
+            } else {
+                // Native mode: generic XDP is skipped for TC-redirected skbs
+                // (netif_receive_generic_xdp bails on skb_is_redirected), so a
+                // frame forwarded by the previous hop's TC stage would bypass a
+                // generic-mode pop. veth supports native XDP; fall back to
+                // generic (with that caveat) on drivers that don't.
+                match xdp.attach(name, XdpMode::Driver) {
+                    Ok(id) => {
+                        info!("attached cradle XDP stage to {name} (XDP native)");
+                        id
+                    }
+                    Err(e) => {
+                        warn!(
+                            "native XDP attach on {name} failed ({e}); falling back to generic \
+                             (frames redirected by an upstream TC hop bypass the pop stage)"
+                        );
+                        let id = xdp
+                            .attach(name, XdpMode::Skb)
+                            .with_context(|| format!("attaching XDP MPLS pop to {name}"))?;
+                        info!("attached cradle XDP stage to {name} (XDP generic)");
+                        id
+                    }
                 }
             };
             xdp.take_link(id)?

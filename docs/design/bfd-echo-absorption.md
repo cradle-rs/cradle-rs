@@ -46,8 +46,18 @@ Source: `crates/xdp-bfd-echo-ebpf/src/main.rs` (the XDP program) +
   `bpf_timer`.
 - **Coupling (accepted):** the absorbed reflector only runs where `cradle_xdp` is
   attached, so BFD echo now requires the interface to be a cradle port
-  (`system ebpf enabled` + `SetPort`). `cradle_xdp` `XDP_PASS`es everything it
-  doesn't own, so a BFD-only port is a normal `SetPort` (l3 passthrough).
+  (`system ebpf enabled` + `interface <if> ebpf enabled`, which zebra turns into
+  a `SetPort`). `cradle_xdp` `XDP_PASS`es everything it doesn't own, so a
+  BFD-only port is a normal l3-passthrough `SetPort`.
+- **veth `XDP_TX` caveat (`CRADLE_XDP_MODE`):** native `XDP_TX` on a veth only
+  delivers to the *peer's* XDP RX path. Reflecting a peer's Echo off a veth
+  whose peer has no XDP — e.g. a bridge-enslaved veth in the BDD LAN topology —
+  is silently dropped in native mode. `CRADLE_XDP_MODE=skb` forces generic
+  attach (re-inject through the stack, reflect regardless of peer), the mode the
+  retired `xdp-bfd-echo` helper used on veths. Real NICs do native `XDP_TX`
+  fine, so it is off by default; the BDD sets it for the `isis_bfd*` features
+  only (generic mode skips the XDP pop/decap for TC-redirected skbs, so the
+  SRv6/EVPN datapaths keep native).
 - **Stack budget:** the 448-byte wall is `cradle_tc`'s; `cradle_xdp` is lighter
   and shares the 512-byte ceiling. The reflect path is stack-cheap by
   construction (in-place volatile byte swaps, `DetectState` lives in the map,

@@ -45,7 +45,7 @@ jobs:
         # The *-ebpf crates are excluded: they only build for the BPF target
         # (via their loader's build script); --all-targets would try to give a
         # no_std/no_main binary a host test harness, which it can't have.
-        run: cargo clippy --workspace --exclude cradle-ebpf --exclude xdp-bfd-echo-ebpf --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude cradle-ebpf --all-targets -- -D warnings
 
   test:
     name: cargo test
@@ -65,4 +65,4 @@ jobs:
         # cradle-bdd's cucumber tests require root + Linux network namespaces
         # and are not runnable in the GitHub Actions sandbox; they are
         # intended to be run locally. The *-ebpf crates never build for the host.
-        run: cargo test --workspace --exclude cradle-bdd --exclude cradle-ebpf --exclude xdp-bfd-echo-ebpf
+        run: cargo test --workspace --exclude cradle-bdd --exclude cradle-ebpf
