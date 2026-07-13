@@ -276,6 +276,10 @@ message BfdEcho {
   string peer        = 3;
   uint32 tx_us       = 4;
   uint32 detect_mult = 5;
+  // Egress interface for the transmitted Echo. cradle is multi-port (unlike the
+  // per-interface standalone helper), so the originator needs to be told which
+  // NIC the single-hop peer is on.
+  string oif         = 6;
 }
 
 // Arm the control-packet expiration watchdog (RFC 5880 §6.8.4) for an Up

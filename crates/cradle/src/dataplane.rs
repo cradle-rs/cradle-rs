@@ -1191,6 +1191,24 @@ impl Dataplane {
         down
     }
 
+    /// Bootstrap-timeout echo-down for `discr`: the Echo originator saw no return
+    /// within the detection window before the kernel timer armed (a path broken
+    /// from the outset). Set the `ECHO_TIMERS` entry's `down` flag so the same
+    /// `bfd_poll_down`/`watch_bfd` path reports it, uniform with a kernel-fired
+    /// echo-down — no separate event channel. Guarded on `armed == 0` (the kernel
+    /// hasn't taken over, so its `bpf_timer` is still the zeroed seed and writing
+    /// the value back can't clobber a live timer) and `down == 0` (write once per
+    /// down episode; the kernel clears `down` on the next return).
+    pub fn bfd_echo_mark_down(&mut self, discr: u32) {
+        if let Ok(mut st) = self.bfd_echo_timers.get(&discr, 0)
+            && st.armed == 0
+            && st.down == 0
+        {
+            st.down = 1;
+            let _ = self.bfd_echo_timers.insert(discr, st, 0);
+        }
+    }
+
     /// Register a BUM replication slot (EVPN ingress replication): frames
     /// flooded to `flood_ifindex` (the slot veth's A end, a bridge-domain
     /// member) arrive on `encap_ifindex` (the B end), where the datapath

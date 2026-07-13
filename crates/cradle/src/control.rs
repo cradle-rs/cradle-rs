@@ -161,13 +161,20 @@ pub struct Control {
     /// the RFC 7432 §7.7 move-away that must reach BGP so the previous owner
     /// withdraws before the station reappears elsewhere.
     fdb_hint_tx: tokio::sync::broadcast::Sender<([u8; 6], u16)>,
+    /// Commands to the BFD Echo originator task (transmit + bootstrap timeout).
+    /// The task holds the receiver and a `dp` handle; `ArmBfdEcho`/`DisarmBfdEcho`
+    /// send `Add`/`Del`.
+    bfd_echo_tx: tokio::sync::mpsc::UnboundedSender<crate::bfd_echo::EchoCmd>,
 }
 
 impl Control {
     pub fn new(bpf: Ebpf, dp: Dataplane, state_dir: std::path::PathBuf) -> Self {
+        let dp = Arc::new(Mutex::new(dp));
+        let (bfd_echo_tx, bfd_echo_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::bfd_echo::BfdEchoEngine::spawn(dp.clone(), bfd_echo_rx);
         Self {
             bpf: Arc::new(Mutex::new(bpf)),
-            dp: Arc::new(Mutex::new(dp)),
+            dp,
             attached: Arc::new(Mutex::new(HashMap::new())),
             routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -177,6 +184,7 @@ impl Control {
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
             l7_policies: Arc::new(Mutex::new(HashMap::new())),
             fdb_hint_tx: tokio::sync::broadcast::channel(256).0,
+            bfd_echo_tx,
         }
     }
 
@@ -537,18 +545,39 @@ impl Control {
         Ok(())
     }
 
-    /// Arm the BFD Echo-return detector for `discr` (see `Dataplane::bfd_echo_arm`).
+    /// Arm the BFD Echo originator + return detector for `discr`: seed the XDP
+    /// maps (`Dataplane::bfd_echo_arm`) and start transmitting Echo toward `peer`
+    /// on `oif` every `tx` (jittered), with a `detect` detection window.
     pub async fn bfd_echo_arm(
         &self,
         discr: u32,
+        oif: String,
         local: std::net::IpAddr,
-        detect_ns: u64,
+        peer: std::net::IpAddr,
+        tx: std::time::Duration,
+        detect: std::time::Duration,
     ) -> Result<()> {
-        self.dp.lock().await.bfd_echo_arm(discr, local, detect_ns)
+        self.dp.lock().await.bfd_echo_arm(
+            discr,
+            local,
+            detect.as_nanos().min(u64::MAX as u128) as u64,
+        )?;
+        let _ = self.bfd_echo_tx.send(crate::bfd_echo::EchoCmd::Add {
+            discr,
+            oif,
+            local,
+            peer,
+            tx,
+            detect,
+        });
+        Ok(())
     }
 
-    /// Disarm the BFD Echo detector for `discr`.
+    /// Disarm the BFD Echo originator + detector for `discr`.
     pub async fn bfd_echo_disarm(&self, discr: u32) -> Result<()> {
+        let _ = self
+            .bfd_echo_tx
+            .send(crate::bfd_echo::EchoCmd::Del { discr });
         self.dp.lock().await.bfd_echo_disarm(discr)
     }
 
@@ -2590,12 +2619,13 @@ impl Cradle for GrpcService {
     async fn arm_bfd_echo(&self, req: Request<pb::BfdEcho>) -> Result<Response<pb::Empty>, Status> {
         let e = req.into_inner();
         let local: std::net::IpAddr = e.local.parse().map_err(st)?;
-        // detection time = tx interval x detect multiplier (RFC 5880 §6.8.4),
-        // in nanoseconds. `peer` is used by the Echo transmitter (a later slice);
-        // the detector only needs `local` for OUR_LOCAL_IPS.
-        let detect_ns = e.tx_us as u64 * (e.detect_mult.max(1)) as u64 * 1000;
+        let peer: std::net::IpAddr = e.peer.parse().map_err(st)?;
+        // tx interval and detection time = tx x detect multiplier (RFC 5880
+        // §6.8.4 / §6.8.9). The originator transmits toward `peer` on `oif`.
+        let tx = std::time::Duration::from_micros((e.tx_us as u64).max(1));
+        let detect = tx * e.detect_mult.max(1);
         self.control
-            .bfd_echo_arm(e.discr, local, detect_ns)
+            .bfd_echo_arm(e.discr, e.oif, local, peer, tx, detect)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
