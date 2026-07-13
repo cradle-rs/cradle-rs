@@ -9,7 +9,7 @@
 name: "cradle-rs"
 arch: "amd64"
 platform: "linux"
-version: "0.9.3"
+version: "0.9.4"
 section: "default"
 priority: "extra"
 replaces:
