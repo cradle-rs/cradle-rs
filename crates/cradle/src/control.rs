@@ -34,20 +34,35 @@ use crate::{
     util,
 };
 use cradle_common::{
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3, SRV6_BH_END,
-    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6,
-    SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
-    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
+    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3,
+    REPL_BRANCH_LOCAL, ReplBranch, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U,
+    SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V,
+    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE,
+    SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
 fn srv6_behavior(code: u32) -> Result<u8> {
     match code as u8 {
-        b @ (SRV6_BH_END | SRV6_BH_END_X | SRV6_BH_END_DT4 | SRV6_BH_END_DT6 | SRV6_BH_END_DT46
-        | SRV6_BH_END_B6 | SRV6_BH_UN | SRV6_BH_UA | SRV6_BH_UALIB | SRV6_BH_END_DT2U
-        | SRV6_BH_END_DT2M | SRV6_BH_END_M | SRV6_BH_END_REP | SRV6_BH_END_X_REP
-        | SRV6_BH_END_T | SRV6_BH_END_DX4 | SRV6_BH_END_DX6) => Ok(b),
+        b @ (SRV6_BH_END
+        | SRV6_BH_END_X
+        | SRV6_BH_END_DT4
+        | SRV6_BH_END_DT6
+        | SRV6_BH_END_DT46
+        | SRV6_BH_END_B6
+        | SRV6_BH_UN
+        | SRV6_BH_UA
+        | SRV6_BH_UALIB
+        | SRV6_BH_END_DT2U
+        | SRV6_BH_END_DT2M
+        | SRV6_BH_END_M
+        | SRV6_BH_END_REP
+        | SRV6_BH_END_X_REP
+        | SRV6_BH_END_T
+        | SRV6_BH_END_DX4
+        | SRV6_BH_END_DX6
+        | SRV6_BH_END_REPLICATE) => Ok(b),
         other => anyhow::bail!("unknown SRv6 behavior code {other}"),
     }
 }
@@ -99,6 +114,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "vxlan_encap",
     "vxlan_decap",
     "vxlan_flood",
+    "srv6_replicate",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -141,8 +157,14 @@ pub struct Control {
     /// SID)` → the slot's veth (A-end name, A ifindex, B ifindex). cradle
     /// creates/destroys the pair itself.
     repl_slots: Arc<Mutex<std::collections::HashMap<(u16, Ipv6Addr), ReplSlot>>>,
-    /// Monotonic name counter for slot veth pairs (`crs<N>a`/`crs<N>b`).
+    /// Monotonic name counter for slot veth pairs (`crs<N>a`/`crs<N>b`) and
+    /// Replication-segment leaf veths (`crl<N>a`/`crl<N>b`).
     repl_next: Arc<std::sync::atomic::AtomicU32>,
+    /// RFC 9524 Replication-segment Bud leaf veths: `End.Replicate` SID → the
+    /// leaf veth (A-end name, A ifindex, B ifindex) whose B end `End.DT2M`-
+    /// decaps a locally-delivered copy into the bridge domain. cradle
+    /// creates/destroys the pair as segments gain/lose a local branch.
+    repl_seg_veths: Arc<Mutex<std::collections::HashMap<Ipv6Addr, ReplSlot>>>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
     /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
@@ -179,6 +201,7 @@ impl Control {
             routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            repl_seg_veths: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
@@ -815,6 +838,99 @@ impl Control {
         self.attached.lock().await.remove(&b_idx);
         crate::kernel::del_link(&a)?;
         info!("repl slot {a} removed: bd {bd} -> {remote_sid}");
+        Ok(())
+    }
+
+    /// Install / replace an RFC 9524 Replication segment: the local
+    /// `End.Replicate` SID `sid` fans a received copy out to `branches`. Each
+    /// branch is `(downstream Replication-SID, nexthop_id, local)`; a `local`
+    /// (Bud) branch is delivered into the bridge domain via a cradle-owned leaf
+    /// veth (created on demand, its own `End.DT2M` SID being the branch SID),
+    /// the rest are forwarded over the underlay (explicit `nexthop_id`, or a
+    /// datapath FIB6 lookup on the SID when 0). Replaces any prior segment.
+    pub async fn set_repl_seg(
+        &self,
+        sid: Ipv6Addr,
+        hop_limit_threshold: u8,
+        branches: Vec<(Ipv6Addr, u32, bool)>,
+    ) -> Result<()> {
+        let has_local = branches.iter().any(|(_, _, local)| *local);
+        // A Bud needs its leaf veth; a segment that lost its local branch drops
+        // it. Resolve the leaf A-end ifindex the local copy is cloned toward.
+        let leaf_a_idx = if has_local {
+            Some(self.ensure_repl_leaf_veth(sid).await?)
+        } else {
+            self.remove_repl_leaf_veth(sid).await?;
+            None
+        };
+        let mut out = Vec::with_capacity(branches.len());
+        for (bsid, nh, local) in &branches {
+            out.push(if *local {
+                ReplBranch {
+                    sid: bsid.octets(),
+                    nexthop_id: 0,
+                    local_oif: leaf_a_idx.unwrap_or(0),
+                    flags: REPL_BRANCH_LOCAL,
+                }
+            } else {
+                ReplBranch {
+                    sid: bsid.octets(),
+                    nexthop_id: *nh,
+                    local_oif: 0,
+                    flags: 0,
+                }
+            });
+        }
+        self.dp
+            .lock()
+            .await
+            .repl_seg_set(sid, hop_limit_threshold, has_local, &out)?;
+        info!(
+            "repl seg {sid}: {} branch(es){}",
+            out.len(),
+            if has_local { " (+ local)" } else { "" }
+        );
+        Ok(())
+    }
+
+    /// Remove a Replication segment and any leaf veth it owned.
+    pub async fn del_repl_seg(&self, sid: Ipv6Addr) -> Result<()> {
+        self.dp.lock().await.repl_seg_del(sid)?;
+        self.remove_repl_leaf_veth(sid).await?;
+        info!("repl seg {sid} removed");
+        Ok(())
+    }
+
+    /// Ensure the Bud leaf veth for `sid` exists (create `crl<N>a`/`crl<N>b` and
+    /// attach the datapath to the B end, which `End.DT2M`-decaps the local copy)
+    /// and return its A-end ifindex — the target of the local clone_redirect.
+    async fn ensure_repl_leaf_veth(&self, sid: Ipv6Addr) -> Result<u32> {
+        let mut veths = self.repl_seg_veths.lock().await;
+        if let Some((_, a_idx, _)) = veths.get(&sid) {
+            return Ok(*a_idx);
+        }
+        let n = self
+            .repl_next
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let a = format!("crl{n}a");
+        let b = format!("crl{n}b");
+        crate::kernel::add_veth_pair(&a, &b)?;
+        let a_idx = util::ifindex_of(&a)?;
+        let b_idx = util::ifindex_of(&b)?;
+        // The B end runs the End.DT2M decap in the XDP stage, then TC bridges.
+        self.attach(&b, b_idx, true).await?;
+        info!("repl leaf {a}/{b}: local delivery for {sid}");
+        veths.insert(sid, (a, a_idx, b_idx));
+        Ok(a_idx)
+    }
+
+    /// Tear down the Bud leaf veth for `sid`, if any.
+    async fn remove_repl_leaf_veth(&self, sid: Ipv6Addr) -> Result<()> {
+        let Some((a, _a_idx, b_idx)) = self.repl_seg_veths.lock().await.remove(&sid) else {
+            return Ok(());
+        };
+        self.attached.lock().await.remove(&b_idx);
+        crate::kernel::del_link(&a)?;
         Ok(())
     }
 
@@ -1887,6 +2003,7 @@ fn srv6_behavior_name(b: u8) -> &'static str {
         SRV6_BH_END_DX6 => "End.DX6",
         SRV6_BH_END_DX2 => "End.DX2",
         SRV6_BH_END_DX2V => "End.DX2V",
+        SRV6_BH_END_REPLICATE => "End.Replicate",
         _ => "unknown",
     }
 }
@@ -2524,6 +2641,30 @@ impl Cradle for GrpcService {
             .del_repl_slot_auto(r.bd as u16, key)
             .await
             .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_repl_seg(&self, req: Request<pb::ReplSeg>) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let sid: Ipv6Addr = r.sid.parse().map_err(st)?;
+        let mut branches = Vec::with_capacity(r.branches.len());
+        for b in &r.branches {
+            let bsid: Ipv6Addr = b.sid.parse().map_err(st)?;
+            branches.push((bsid, b.nexthop_id, b.local));
+        }
+        self.control
+            .set_repl_seg(sid, r.hop_limit_threshold as u8, branches)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_repl_seg(
+        &self,
+        req: Request<pb::ReplSegDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let sid: Ipv6Addr = req.into_inner().sid.parse().map_err(st)?;
+        self.control.del_repl_seg(sid).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 

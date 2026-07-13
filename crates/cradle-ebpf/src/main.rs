@@ -45,27 +45,28 @@ use cradle_common::{
     FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
     FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
     FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT,
-    LocalSid, MAX_LABELS, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, MirrorEntry,
-    MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key,
-    Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
-    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
-    PolicyKey, PortConfig, REPL_KIND_VXLAN, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB,
-    SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP,
-    STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
+    LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP,
+    MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
+    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED,
+    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2,
+    PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
+    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
+    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
+    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
+    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
     STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
     STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT,
     STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
     STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
     STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
     STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
-    STAT_SRV6_REPLACE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP,
-    STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
-    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, fibw_unpack,
-    mpls_lse, mpls_lse_unpack,
+    STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
+    STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey,
+    ServiceKey6, Srv6Encap, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL,
+    fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -174,6 +175,13 @@ static FDB: HashMap<FdbKey, FdbEntry> = HashMap::with_max_entries(8192, 0);
 /// frames (EVPN split horizon), the B end for the encap lookup in `try_xdp`.
 #[map]
 static REPL_SID: HashMap<u32, ReplTarget> = HashMap::with_max_entries(256, 0);
+/// RFC 9524 Replication segments, keyed by the local `End.Replicate` SID. The
+/// value ([`ReplSeg`]) holds the downstream branch list; the TC stage clones
+/// the packet to each branch (the XDP stage can't `bpf_clone_redirect`), sets
+/// the outer IPv6 DA to the branch's downstream Replication-SID, and forwards
+/// each copy over the underlay — a Bud also delivers one locally.
+#[map]
+static REPL_SEG: HashMap<[u8; 16], ReplSeg> = HashMap::with_max_entries(256, 0);
 /// VPWS cross-connect (EVPN E-Line, RFC 8214): AC ingress ifindex → the
 /// remote End.DX2/DX2V service SID. Every frame arriving on a bound AC is
 /// MAC-in-SRv6 encapsulated toward the SID — no FDB, no learning.
@@ -663,6 +671,12 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     }
     if let Some(bd) = tc_meta_l2(ctx) {
         return l2_switch(ctx, iif, bd, true);
+    }
+    // End.Replicate (RFC 9524): the XDP stage matched a local Replication SID
+    // and tagged the (still-encapped) frame; fan it out to the segment's
+    // downstream branches — the clone the XDP stage couldn't make.
+    if tc_meta_repl(ctx) {
+        return srv6_replicate(ctx);
     }
     let port: PortConfig = match PORTS.get_ptr(&iif) {
         Some(p) => unsafe { *p },
@@ -1614,6 +1628,21 @@ fn tc_meta_l2(ctx: &TcContext) -> Option<u16> {
     }
 }
 
+/// `true` when the XDP `End.Replicate` stage tagged this frame for the TC
+/// clone fan-out (RFC 9524). The frame is still fully SRv6-encapped; TC
+/// re-reads the outer DA to key `REPL_SEG`.
+#[inline(always)]
+fn tc_meta_repl(ctx: &TcContext) -> bool {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return false;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe { (*m).magic == XDP_META_MAGIC_REPL ^ meta_cookie() }
+}
+
 /// Resolve a nexthop-group member by hashing the flow onto `0..count`.
 #[inline(always)]
 fn ecmp_member(group_id: u32, hash: u32) -> Option<u32> {
@@ -2128,36 +2157,118 @@ fn mpls_l2_xmit(ctx: &TcContext, nh: &NextHop) -> Result<i32, ()> {
 /// it and, via the tee, backfills the map).
 #[inline(always)]
 fn l2_xmit(ctx: &TcContext, nh: &NextHop, ethertype: u16) -> Result<i32, ()> {
-    let dst_mac = if nh.flags & NH_F_V6 != 0 {
-        // Key built in scratch — see `PolicyScratch6::neigh6`.
-        let s = POL6_SCRATCH.get_ptr_mut(0).ok_or(())?;
-        let e = unsafe {
-            (*s).neigh6.ifindex = nh.oif;
-            (*s).neigh6.addr = nh.gateway_v6;
-            NEIGH6.get_ptr(&(*s).neigh6)
-        };
-        match e {
-            Some(e) => unsafe { (*e).mac },
-            None => return Ok(TC_ACT_PIPE as i32),
-        }
-    } else {
-        match NEIGH4.get_ptr(&Neigh4Key {
-            ifindex: nh.oif,
-            addr: nh.gateway_v4,
-        }) {
-            Some(e) => unsafe { (*e).mac },
-            None => return Ok(TC_ACT_PIPE as i32),
-        }
-    };
-    let src_mac = match PORTS.get_ptr(&nh.oif) {
-        Some(p) => unsafe { (*p).mac },
-        None => return Ok(TC_ACT_PIPE as i32),
+    let Some((dst_mac, src_mac)) = tc_resolve_l2(nh) else {
+        return Ok(TC_ACT_PIPE as i32); // neighbor/port miss — punt to the host
     };
     ctx.store(ETH_DST_OFF, &dst_mac, 0).map_err(|_| ())?;
     ctx.store(ETH_SRC_OFF, &src_mac, 0).map_err(|_| ())?;
     ctx.store(ETH_TYPE_OFF, &ethertype.to_be(), 0)
         .map_err(|_| ())?;
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as i32)
+}
+
+/// Resolve a nexthop's egress Ethernet header from the control-plane neighbor
+/// maps: `(dst_mac, src_mac)`, or `None` on a neighbor/port miss. The
+/// destination is the resolved neighbor MAC (`NEIGH6`/`NEIGH4` keyed by the
+/// gateway), the source the egress port's MAC.
+#[inline(always)]
+fn tc_resolve_l2(nh: &NextHop) -> Option<([u8; 6], [u8; 6])> {
+    let dst_mac = if nh.flags & NH_F_V6 != 0 {
+        // Key built in scratch — see `PolicyScratch6::neigh6`.
+        let s = POL6_SCRATCH.get_ptr_mut(0)?;
+        let e = unsafe {
+            (*s).neigh6.ifindex = nh.oif;
+            (*s).neigh6.addr = nh.gateway_v6;
+            NEIGH6.get_ptr(&(*s).neigh6)
+        };
+        unsafe { (*e?).mac }
+    } else {
+        unsafe {
+            (*NEIGH4.get_ptr(&Neigh4Key {
+                ifindex: nh.oif,
+                addr: nh.gateway_v4,
+            })?)
+            .mac
+        }
+    };
+    let src_mac = unsafe { (*PORTS.get_ptr(&nh.oif)?).mac };
+    Some((dst_mac, src_mac))
+}
+
+/// `End.Replicate` (RFC 9524 §5.2): fan the frame out to the Replication
+/// segment's downstream branches. The frame is still fully SRv6-encapped and
+/// its outer DA is this node's Replication SID; for each branch we set the
+/// outer DA to the branch's downstream Replication-SID and `bpf_clone_redirect`
+/// a copy — a remote branch resolves the underlay adjacency and rewrites the
+/// outer Ethernet (`repl_clone_remote`), a local (Bud) branch clones toward
+/// this node's own `End.DT2M` leaf veth for local delivery. The Hop Limit is
+/// decremented once (all copies inherit it) and the original skb is dropped.
+/// All packet access is via skb `store`/`load` so nothing is held across a
+/// clone (which invalidates packet pointers); the `REPL_SEG` value is map
+/// memory, so the borrow survives the clones.
+#[inline(always)]
+fn srv6_replicate(ctx: &TcContext) -> Result<i32, ()> {
+    let da: [u8; 16] = ctx.load(IP6_DST_OFF).map_err(|_| ())?;
+    let rs: &ReplSeg = match REPL_SEG.get_ptr(&da) {
+        Some(r) => unsafe { &*r },
+        None => return Ok(TC_ACT_SHOT as i32), // no state — RFC: discard
+    };
+    // RFC 9524 Hop-Limit checks, then one decrement shared by every copy.
+    let hl: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
+    if hl <= 1 || hl < rs.hop_limit_threshold {
+        return Ok(TC_ACT_SHOT as i32);
+    }
+    ctx.store(IP6_HOP_OFF, &(hl - 1), 0).map_err(|_| ())?;
+
+    // Opaque bound so the verifier keeps the constant `MAX_REPL_BRANCHES`
+    // latch across the map-value walk (see `apply_hencap`).
+    let n = core::hint::black_box(rs.n_branches);
+    let mut slot: usize = 0;
+    while slot < MAX_REPL_BRANCHES {
+        if slot as u32 >= n {
+            break;
+        }
+        let br: &ReplBranch = &rs.branches[slot];
+        // Steer this copy: outer DA = the branch's downstream Replication-SID.
+        ctx.store(IP6_DST_OFF, &br.sid, 0).map_err(|_| ())?;
+        if br.flags & REPL_BRANCH_LOCAL != 0 {
+            // Bud local delivery: clone toward the leaf veth, whose peer XDP
+            // `End.DT2M`-decaps `br.sid` into the bridge domain. No underlay
+            // resolution / Ethernet rewrite (it is a local veth).
+            let _ = ctx.clone_redirect(br.local_oif, 0);
+        } else {
+            let _ = repl_clone_remote(ctx, br);
+        }
+        slot += 1;
+    }
+    stat_inc(STAT_SRV6_REPLICATE);
+    Ok(TC_ACT_SHOT as i32) // original consumed; copies already sent
+}
+
+/// Forward one remote `End.Replicate` branch: resolve the underlay adjacency
+/// (an explicit `nexthop_id`, or a FIB6 lookup on the branch SID — the IGP
+/// locator route, as `l2_srv6_encap` does), rewrite the outer Ethernet toward
+/// it, and `bpf_clone_redirect` one copy out. The caller has already set the
+/// outer IPv6 DA to `br.sid`.
+#[inline(always)]
+fn repl_clone_remote(ctx: &TcContext, br: &ReplBranch) -> Result<(), ()> {
+    let nh_id = if br.nexthop_id != 0 {
+        br.nexthop_id
+    } else {
+        let fib = fib6_lookup(0, br.sid).ok_or(())?;
+        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
+            return Err(()); // ECMP/odd shapes: skip (MVP)
+        }
+        fib.nexthop_id
+    };
+    let (_, nh) = resolve_nh(nh_id).ok_or(())?;
+    let (dst_mac, src_mac) = tc_resolve_l2(&nh).ok_or(())?;
+    ctx.store(ETH_DST_OFF, &dst_mac, 0).map_err(|_| ())?;
+    ctx.store(ETH_SRC_OFF, &src_mac, 0).map_err(|_| ())?;
+    ctx.store(ETH_TYPE_OFF, &(ETH_P_IPV6 as u16).to_be(), 0)
+        .map_err(|_| ())?;
+    let _ = ctx.clone_redirect(nh.oif, 0);
+    Ok(())
 }
 
 // =============================== SRv6 encap =================================
@@ -3217,6 +3328,9 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         SRV6_BH_UN => return srv6_un(ctx, &sid),
         SRV6_BH_UALIB => return srv6_ua(ctx, &sid),
         SRV6_BH_END_REP | SRV6_BH_END_X_REP => return srv6_replace(ctx, &sid),
+        // End.Replicate (RFC 9524): the clone fan-out needs bpf_clone_redirect,
+        // a TC-only helper — leave the frame intact and hand it to the TC stage.
+        SRV6_BH_END_REPLICATE => return replicate_meta(ctx),
         SRV6_BH_END_DX4 | SRV6_BH_END_DX6 => return srv6_dx(ctx, &sid),
         SRV6_BH_END_DX2 | SRV6_BH_END_DX2V => return srv6_dx2(ctx, &sid),
         SRV6_BH_END_B6 => return srv6_b6_encaps(ctx, &sid),
@@ -4091,6 +4205,25 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = sid.vrf_id;
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// `End.Replicate` (RFC 9524): the outer IPv6 DA matched a local Replication
+/// SID. XDP can't `bpf_clone_redirect`, so leave the frame untouched (outer
+/// header intact — the TC stage re-reads the DA to key `REPL_SEG`) and tag it
+/// for the TC fan-out. Mirrors `endt_meta`'s XDP→TC hand-off.
+#[inline(always)]
+fn replicate_meta(ctx: &XdpContext) -> Result<u32, ()> {
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_REPL ^ meta_cookie();
+        (*meta).vrf_id = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }

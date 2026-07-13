@@ -1,0 +1,24 @@
+{
+  "ports": [
+    { "name": "rc", "vlan": 10 },
+    { "name": "ru", "l3": true },
+    { "name": "rra", "vlan": 10 },
+    { "name": "rrb", "l3": true }
+  ],
+  "srv6_source": "fd00:a::1",
+  "nexthops": [
+    { "id": 1, "oif": "ru", "gateway": "2001:db8:0b::b" }
+  ],
+  "neighbors": [
+    { "oif": "ru", "ip": "2001:db8:0b::b", "mac": "02:00:00:00:0b:0a" }
+  ],
+  "localsids": [
+    { "sid": "fd00:a::100", "behavior": "end.dt2u", "vrf": 10 }
+  ],
+  "repl_slots": [
+    { "flood_port": "rra", "encap_port": "rrb", "remote_sid": "fd00:b::5" }
+  ],
+  "routes6": [
+    { "prefix": "fd00:b::/64", "nexthop": 1 }
+  ]
+}

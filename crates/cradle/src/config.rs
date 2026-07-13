@@ -57,6 +57,9 @@ pub struct Config {
     /// BUM ingress-replication slots (EVPN over SRv6, multi-PE).
     #[serde(default)]
     pub repl_slots: Vec<ReplSlotCfg>,
+    /// RFC 9524 Replication segments (`End.Replicate` SR-P2MP tree nodes).
+    #[serde(default)]
+    pub repl_segs: Vec<ReplSegCfg>,
     /// VPWS cross-connects: every frame from `port` is MAC-in-SRv6
     /// encapsulated toward the remote End.DX2/DX2V SID (no FDB).
     #[serde(default)]
@@ -111,6 +114,33 @@ pub struct ReplSlotCfg {
     pub remote_vtep: Option<String>,
     #[serde(default)]
     pub vni: Option<u32>,
+}
+
+/// An RFC 9524 Replication segment: the local `End.Replicate` SID `sid` (also
+/// register it as a `localsids` entry with `behavior: end.replicate`) fans a
+/// received copy out to each `branches` entry.
+#[derive(Debug, Deserialize)]
+pub struct ReplSegCfg {
+    pub sid: String,
+    #[serde(default)]
+    pub branches: Vec<ReplSegBranchCfg>,
+    /// RFC 9524 Hop-Limit Threshold (0 = disabled).
+    #[serde(default)]
+    pub hop_limit_threshold: u8,
+}
+
+/// One downstream branch of a [`ReplSegCfg`]: a copy is steered to `sid` — a
+/// remote leaf's `End.DT2M` SID or the next tier's `End.Replicate` SID
+/// (`nexthop` 0 = FIB6 lookup on the SID) — or, when `local`, delivered into
+/// the bridge domain via a cradle-owned leaf veth (`sid` is this node's own
+/// `End.DT2M` SID).
+#[derive(Debug, Deserialize)]
+pub struct ReplSegBranchCfg {
+    pub sid: String,
+    #[serde(default)]
+    pub nexthop: u32,
+    #[serde(default)]
+    pub local: bool,
 }
 
 /// A static overlay FDB entry: the MAC `mac` in bridge domain `bd` is behind
@@ -475,6 +505,7 @@ pub fn srv6_behavior(s: &str) -> Result<u8> {
         "end.dt2m" => SRV6_BH_END_DT2M,
         "end.replace" => SRV6_BH_END_REP,
         "end.x.replace" => SRV6_BH_END_X_REP,
+        "end.replicate" => SRV6_BH_END_REPLICATE,
         other => anyhow::bail!("unknown SRv6 behavior {other:?}"),
     })
 }
@@ -713,6 +744,22 @@ impl Config {
                     r.flood_port
                 ),
             }
+        }
+        for rs in &self.repl_segs {
+            let sid = rs
+                .sid
+                .parse()
+                .with_context(|| format!("bad End.Replicate SID {:?}", rs.sid))?;
+            let mut branches = Vec::with_capacity(rs.branches.len());
+            for b in &rs.branches {
+                let bsid = b
+                    .sid
+                    .parse()
+                    .with_context(|| format!("bad branch SID {:?}", b.sid))?;
+                branches.push((bsid, b.nexthop, b.local));
+            }
+            ctl.set_repl_seg(sid, rs.hop_limit_threshold, branches)
+                .await?;
         }
         for x in &self.xconnects {
             let remote_sid = x

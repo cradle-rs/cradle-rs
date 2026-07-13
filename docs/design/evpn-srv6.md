@@ -6,7 +6,8 @@
 > bridges it into the local bridge domain. The SRv6 analog of MPLS EVPN /
 > VXLAN, and the L2 counterpart of the `End.DT46` L3VPN already shipped.
 
-Status: **Slices 1–8 implemented**: `End.DT2U` unicast,
+Status: **Slices 1–9 implemented** (Slice 9 = RFC 9524 `End.Replicate`
+SR-P2MP replication, below): `End.DT2U` unicast,
 `End.DT2M` BUM, **the BGP EVPN control-plane tee** — zebra-rs
 (`router bgp afi-safi evpn encapsulation srv6`, RFC 9252) advertises a
 per-VNI `End.DT2U` SID on Type-2 routes and an `End.DT2M` SID on Type-3
@@ -133,6 +134,12 @@ bridge domain, kernel forwarding/seg6 off on the PEs.
   iBGP EVPN full mesh over an IS-IS SRv6 hub; Type-3s become cradle-managed
   replication slots, learned MACs become Type-2s/DT2U entries; fully
   dynamic (no static ARP/FDB/slots anywhere).
+- `cradle_srv6_replicate` — RFC 9524 `End.Replicate` (Slice 9): a root, a
+  bud, and two leaves. The root encapsulates BUM once toward the bud's
+  `End.Replicate` SID; the bud fans out to leaf1, leaf2, and its own local CE
+  (the Bud role). `cr↔c1` (a remote branch) and `cr↔cb` (the Bud local
+  branch) reach; `srv6_replicate` fires on the bud and every branch's
+  `srv6_l2_decap` increments.
 
 Mandatory teardown on each.
 
@@ -239,10 +246,56 @@ Mandatory teardown on each.
    migrates PE1 → PE2 → PE1 across a two-CE-port pe2; pings follow the
    station at every step.
 
+9. **Slice 9 — `End.Replicate` SR-P2MP replication (RFC 9524)** *(done)*. The
+   SR-P2MP tree the head-end slots never built: instead of the root
+   ingress-replicating one copy per remote leaf, the root sends **one** copy
+   into the tree and intermediate **bud** nodes fan it out. A Replication
+   segment is a local `End.Replicate` SID whose state (`REPL_SEG`, keyed by the
+   SID) is a list of downstream branches. On a copy arriving at the SID the
+   node — per RFC 9524 §5.2 — checks/decrements the Hop Limit once, then for
+   each branch sets the outer IPv6 DA to that branch's **downstream
+   Replication-SID** (a remote leaf's `End.DT2M` SID, or the next tier's
+   `End.Replicate` SID) and forwards a copy over the underlay; a **Bud**
+   additionally delivers one copy into its own bridge domain. Composes with the
+   existing decap: the copies keep the original MAC-in-SRv6 payload untouched
+   (only DA + Hop Limit change), so a leaf's `End.DT2M` decap handles them
+   unchanged, and buds chain.
+
+   **Why it straddles XDP and TC.** Replication needs `bpf_clone_redirect`, a
+   TC-only helper (XDP has no clone). But the frame is already IPv6, so no
+   resize is needed — only a 16-byte DA rewrite per copy. So the XDP stage
+   matches the `End.Replicate` SID (`SRV6_LOCALSID`) and hands the intact frame
+   to the TC stage via the `XDP_META_MAGIC_REPL` metadata tag (the same
+   XDP→TC hand-off `End.DT2M` uses); `srv6_replicate` in the TC stage re-reads
+   the DA, walks `REPL_SEG`, and for each branch `store`s the new DA, resolves
+   the underlay adjacency (an explicit per-branch nexthop, or a FIB6 lookup on
+   the branch SID — as `l2_srv6_encap` does), rewrites the outer Ethernet, and
+   `bpf_clone_redirect`s a copy. All packet access is via skb `store`/`load` so
+   nothing is held across a clone (which invalidates packet pointers); the
+   branch list lives in map memory, so its borrow survives the clones. A **Bud
+   local** branch instead clone_redirects the copy — with its DA set to this
+   node's own `End.DT2M` SID — to a cradle-owned **leaf veth** whose peer runs
+   the XDP `End.DT2M` decap, reusing `srv6_dt2u` for local delivery with no new
+   TC decap path.
+
+   **Map / ABI.** Behavior `SRV6_BH_END_REPLICATE`; `REPL_SEG:
+   HashMap<[u8;16], ReplSeg>` (branch list + role + Hop-Limit Threshold);
+   counter `STAT_SRV6_REPLICATE`. gRPC `SetReplSeg` / `DelReplSeg` (cradle owns
+   the Bud leaf-veth lifecycle, `crl<N>a`/`crl<N>b`), static `repl_segs` config
+   (register the SID as a `localsids` entry with `behavior: end.replicate`).
+   `cradle_srv6_replicate` BDD: a root feeds one copy toward a bud's
+   `End.Replicate` SID; the bud fans out to two remote leaves **and** delivers
+   locally to its own CE (`srv6_replicate` on the bud, `srv6_l2_decap` on each
+   leaf and the bud, `cr↔c1` and `cr↔cb` reach).
+
 ## Out of scope (still design)
 
 Refinements to aging (per-BD age knobs, event-driven expiry instead of the
 1s scan), MAC mobility hardening (RFC 7432 §15.1 duplicate-MAC damping for
 flapping stations; the sticky/static bit), symmetric IRB (L3 gateway on the
 SRv6 L2 domain), 802.1Q-tagged bridge domains, and `End.M`
-egress-protection.
+egress-protection. For `End.Replicate`: per-branch **segment lists** (an SRH
+push per copy, for explicit-path branches — today each branch is a single
+downstream SID), non-reduced (SRH-present) replication, and the **BGP tee**
+that programs the tree from the EVPN SR-P2MP PMSI (RFC 9524's tree is
+controller-instantiated; the datapath primitive and gRPC land first).

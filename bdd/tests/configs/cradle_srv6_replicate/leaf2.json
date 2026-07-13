@@ -1,0 +1,10 @@
+{
+  "ports": [
+    { "name": "l2c", "vlan": 10 },
+    { "name": "l2u", "l3": true }
+  ],
+  "srv6_source": "fd00:2::1",
+  "localsids": [
+    { "sid": "fd00:2::100", "behavior": "end.dt2m", "vrf": 10 }
+  ]
+}
