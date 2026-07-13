@@ -19,14 +19,10 @@
 # child ip(8) gets no capabilities from cradle's file caps either. Those
 # paths still want cradle run as root; the routed/zebra-driven datapath
 # (ports, FIB, ILM, SRv6, FDB) is fully covered.
+# cap_net_raw is required for the absorbed BFD Echo originator: cradle transmits
+# self-addressed Echo frames over an AF_PACKET socket (the datapath the retired
+# xdp-bfd-echo helper used to carry). The rest — XDP/TC attach (cap_net_admin),
+# BPF load (cap_bpf, cap_perfmon) — covers the routed/zebra-driven datapath.
 if [ -x /usr/bin/cradle ]; then
-    setcap 'cap_net_admin,cap_bpf,cap_perfmon=ep' /usr/bin/cradle
-fi
-
-# zebra-rs BFD Echo offload helper, spawned without root by zebra-rs's BFD
-# reflector (file capabilities do not inherit across exec, so it needs its own):
-# XDP attach (cap_net_admin) + BPF load (cap_bpf) + AF_PACKET Echo originator
-# (cap_net_raw). This is the proven set from zebra-rs's own install target.
-if [ -x /usr/sbin/xdp-bfd-echo ]; then
-    setcap 'cap_net_admin,cap_bpf,cap_net_raw=ep' /usr/sbin/xdp-bfd-echo
+    setcap 'cap_net_admin,cap_bpf,cap_perfmon,cap_net_raw=ep' /usr/bin/cradle
 fi

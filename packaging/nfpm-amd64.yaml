@@ -29,12 +29,8 @@ contents:
     dst: /usr/bin/cradle-cni
   - src: ../target/release/cradle-k8s
     dst: /usr/bin/cradle-k8s
-  # zebra-rs BFD Echo offload helper, spawned per-interface by zebra-rs. The
-  # path matches zebra-rs's packaged fallback (ZEBRA_XDP_BFD_ECHO_BIN overrides).
-  - src: ../target/release/xdp-bfd-echo
-    dst: /usr/sbin/xdp-bfd-echo
 scripts:
-  # setcap on /usr/bin/cradle and the offload helper so a non-root supervisor
-  # (zebra-rs `system ebpf enabled`, or the BFD reflector) can spawn a working
-  # datapath.
+  # setcap on /usr/bin/cradle so a non-root supervisor (zebra-rs `system ebpf
+  # enabled`) can spawn a working datapath, including the absorbed BFD Echo
+  # originator (AF_PACKET → cap_net_raw).
   postinstall: ./scripts/postinstall.sh
