@@ -132,7 +132,8 @@ proven against the stock Cilium binary/agent, including Hubble observability
 | Push (imposition) | ✅ | up to 3-label stacks (TC, IP payloads) |
 | Pop-to-VRF (VPN label) | ✅ | decap + per-VRF lookup; VRF carried XDP→TC as metadata |
 | ECMP over labeled paths | ✅ | flow-hashed nexthop groups |
-| Entropy / TTL-propagate knobs | ⬜ | label TTL decrements per hop; inner IP TTL preserved (pipe model); no ELI/EL, no pipe/uniform knob |
+| Entropy labels (ELI/EL) | ⬜ | no entropy label imposed or consumed (RFC 6790); transit ECMP hashes by eBPF payload inspection instead; no FAT-PW (RFC 6391) |
+| TTL propagation (pipe/uniform) | ⬜ | pipe model hardwired (RFC 3443): imposition copies IP TTL into the label, label TTL decrements per hop, disposition discards it and preserves the inner IP TTL (LSP core hidden); no uniform-model knob, no forwarded/local split |
 
 ## SRv6 support status
 
