@@ -228,6 +228,26 @@ message ReplSlot {
   string remote_vtep = 3;
 }
 
+// An RFC 9524 Replication segment: the local End.Replicate SID `sid` is a P2MP
+// tree node that fans a received copy out to each downstream branch. A
+// Head/Transit node lists remote branches (each carrying a downstream
+// Replication-SID — a remote leaf's End.DT2M SID or the next tier's
+// End.Replicate SID); a Bud additionally lists a `local` branch, for which
+// cradle creates a leaf veth so the copy is End.DT2M-decapped into the bridge
+// domain. SetReplSeg replaces the whole segment; cradle manages any leaf-veth
+// plumbing itself. See docs/design/evpn-srv6.md.
+message ReplSeg {
+  string sid = 1;                       // local End.Replicate SID (map key)
+  repeated ReplSegBranch branches = 2;
+  uint32 hop_limit_threshold = 3;       // RFC 9524 (0 = disabled)
+}
+message ReplSegBranch {
+  string sid        = 1; // downstream Replication-SID (this node's own End.DT2M SID when local)
+  uint32 nexthop_id = 2; // remote branch: explicit underlay nexthop, 0 = FIB6-on-sid
+  bool   local      = 3; // Bud local delivery — cradle creates the leaf veth
+}
+message ReplSegDel { string sid = 1; }
+
 // An egress-protection mirror route (End.M context): traffic exposed by an
 // End.M decap whose destination falls in `prefix` (the FAILED egress PE's
 // SID space) is served locally with DT-style semantics — decap once more
@@ -688,6 +708,8 @@ service Cradle {
   rpc DelXconnect(XconnectDel) returns (Empty);
   rpc AddReplSlot(ReplSlot) returns (Empty);
   rpc DelReplSlot(ReplSlot) returns (Empty);
+  rpc SetReplSeg(ReplSeg) returns (Empty);
+  rpc DelReplSeg(ReplSegDel) returns (Empty);
   rpc AddMirrorRoute(MirrorRoute) returns (Empty);
   rpc DelMirrorRoute(MirrorRouteDel) returns (Empty);
   rpc AddService(Service) returns (Empty);

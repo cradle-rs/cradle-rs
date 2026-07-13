@@ -22,12 +22,13 @@ use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
     EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_ECMP,
     FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM,
-    LocalSid, MAX_LABELS, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry,
-    NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key,
-    Neigh6Key, NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_SRV6, REPL_KIND_VXLAN,
-    ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey,
+    MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
+    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY,
+    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_SRV6,
+    REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
+    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo,
+    Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -208,6 +209,10 @@ pub struct Dataplane {
     /// BUM ingress-replication slots: ifindex → the slot's remote PE
     /// (`End.DT2M` SID or VTEP+VNI), both ends of each slot's veth pair.
     repl_sid: HashMap<MapData, u32, ReplTarget>,
+    /// RFC 9524 Replication segments: local `End.Replicate` SID → its
+    /// downstream branch list ([`ReplSeg`]). The TC stage clones the packet to
+    /// each branch.
+    repl_seg: HashMap<MapData, [u8; 16], ReplSeg>,
     /// EVPN/VXLAN L2VNI bindings: bridge domain → VNI (encap direction) and
     /// VNI → bridge domain (decap direction), kept in lockstep by `vni_set`.
     vlan_vni: HashMap<MapData, u16, u32>,
@@ -320,6 +325,7 @@ impl Dataplane {
             bfd_ip_refs: std::collections::HashMap::new(),
             bfd_echo_local: std::collections::HashMap::new(),
             repl_sid: HashMap::try_from(bpf.take_map("REPL_SID").context("map REPL_SID missing")?)?,
+            repl_seg: HashMap::try_from(bpf.take_map("REPL_SEG").context("map REPL_SEG missing")?)?,
             vlan_vni: HashMap::try_from(bpf.take_map("VLAN_VNI").context("map VLAN_VNI missing")?)?,
             vni_info: HashMap::try_from(bpf.take_map("VNI_INFO").context("map VNI_INFO missing")?)?,
             vxlan_src: Array::try_from(
@@ -1260,6 +1266,43 @@ impl Dataplane {
     ) -> Result<()> {
         self.repl_sid.insert(flood_ifindex, target, 0)?;
         self.repl_sid.insert(encap_ifindex, target, 0)?;
+        Ok(())
+    }
+
+    /// Program an RFC 9524 Replication segment (`REPL_SEG`), keyed by the local
+    /// `End.Replicate` SID: the TC stage clones a received copy to each
+    /// `branches` entry. A local (Bud) branch must already carry a resolved
+    /// `local_oif` (the leaf veth) — the Control layer owns that plumbing. Any
+    /// prior segment for the SID is replaced.
+    pub fn repl_seg_set(
+        &mut self,
+        sid: Ipv6Addr,
+        hop_limit_threshold: u8,
+        role_leaf: bool,
+        branches: &[ReplBranch],
+    ) -> Result<()> {
+        let n = branches.len().min(MAX_REPL_BRANCHES);
+        let mut arr = [ReplBranch {
+            sid: [0; 16],
+            nexthop_id: 0,
+            local_oif: 0,
+            flags: 0,
+        }; MAX_REPL_BRANCHES];
+        arr[..n].copy_from_slice(&branches[..n]);
+        let seg = ReplSeg {
+            n_branches: n as u32,
+            flags: if role_leaf { REPL_ROLE_LEAF } else { 0 },
+            hop_limit_threshold,
+            _pad: [0; 3],
+            branches: arr,
+        };
+        self.repl_seg.insert(sid.octets(), seg, 0)?;
+        Ok(())
+    }
+
+    /// Remove a Replication segment.
+    pub fn repl_seg_del(&mut self, sid: Ipv6Addr) -> Result<()> {
+        self.repl_seg.remove(&sid.octets())?;
         Ok(())
     }
 

@@ -170,7 +170,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 | End.B6.Insert | 🚫 | deprecated insert form — no plan (End.B6.Encaps.Red supersedes it) |
 | End.BM | ⬜ | |
 | End.M (mirror) | ✅ | egress protection: repair-decap + mirror-context lookup + service decap |
-| End.Replicate | ⬜ | no datapath replication SID — BUM uses per-remote End.DT2M slots (ingress replication at the head-end). The BGP control plane *parses* the SR-P2MP PMSI tunnel type (`bgp-packet/src/attrs/pmsi_tunnel.rs`), but nothing programs a P2MP replication tree from it |
+| End.Replicate | ✅ | RFC 9524 SR-P2MP replication segment: a bud/transit node clones a BUM copy to each downstream branch (outer DA → the branch's Replication-SID, Hop Limit −1), and a Bud also delivers a copy into its own bridge domain. The clone runs in the TC stage (`bpf_clone_redirect`), fed by the XDP End.Replicate SID match; the tree is programmed via `SetReplSeg` / static `repl_segs` config (`docs/design/evpn-srv6.md`) |
 | End.S / End.AN / AS / AD / AM | ⬜ | service programming out of scope |
 
 ### uSID (NEXT-C-SID, RFC 9800) actions

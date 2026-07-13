@@ -199,6 +199,12 @@ pub const XDP_META_MAGIC_DX: u32 = 0xC7AD_1E03;
 /// stage must emit the decapped Ethernet frame out of — raw, no MAC
 /// rewrite (End.DX2/DX2V, RFC 8986 §4.9/§4.10).
 pub const XDP_META_MAGIC_DX2: u32 = 0xC7AD_1E04;
+/// Replicate metadata (`End.Replicate`, RFC 9524): the outer IPv6 DA matched
+/// a local Replication SID. XDP leaves the frame intact and tags it so the TC
+/// stage — which alone can `bpf_clone_redirect` — fans it out to the
+/// segment's downstream branches. `vrf_id` is unused; TC re-reads the DA to
+/// key the `REPL_SEG` map.
+pub const XDP_META_MAGIC_REPL: u32 = 0xC7AD_1E05;
 
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
@@ -322,6 +328,14 @@ pub const SRV6_BH_END_DX2: u8 = 17;
 /// 802.1Q VID selects the AC via the `DX2V` table — `vrf_id` is the
 /// VLAN-table id.
 pub const SRV6_BH_END_DX2V: u8 = 18;
+/// `End.Replicate` (RFC 9524 §5.2): the active SID is a local Replication
+/// SID of an SR P2MP tree. The node clones the packet to each downstream
+/// branch — setting the outer IPv6 DA to the branch's downstream
+/// Replication-SID and decrementing the Hop Limit — and a Bud additionally
+/// delivers a copy into its own bridge domain. The forwarding state (branch
+/// list, role) lives in the `REPL_SEG` map, keyed by this SID. Distinct from
+/// `SRV6_BH_END_REP` (RFC 9800 REPLACE-C-SID) despite the similar name.
+pub const SRV6_BH_END_REPLICATE: u8 = 19;
 
 /// SRv6 endpoint flavors (RFC 8986 §4.16), OR-able in `LocalSid::flavors`.
 /// PSP: pop the SRH at the penultimate segment (this node's decrement hits
@@ -495,6 +509,58 @@ pub struct ReplTarget {
 pub const REPL_KIND_SRV6: u32 = 0;
 /// [`ReplTarget::addr`] is a remote VTEP IPv4 (VXLAN per copy, `vni` set).
 pub const REPL_KIND_VXLAN: u32 = 1;
+
+/// Maximum downstream branches of one Replication segment (RFC 9524).
+pub const MAX_REPL_BRANCHES: usize = 16;
+
+/// One downstream branch of a Replication segment ([`ReplSeg`]). A copy of
+/// the packet is steered to `sid` — the branch's downstream Replication-SID,
+/// which is either a remote leaf's `End.DT2M` SID or another node's
+/// `End.Replicate` SID (a lower tier of the P2MP tree).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ReplBranch {
+    /// Downstream Replication-SID: the copy's new outer IPv6 DA.
+    pub sid: [u8; 16],
+    /// Explicit underlay nexthop id, or 0 to resolve the adjacency by a FIB6
+    /// lookup on `sid` (the IGP locator route — as `l2_srv6_encap` does).
+    /// Unused for a `REPL_BRANCH_LOCAL` branch.
+    pub nexthop_id: u32,
+    /// A `REPL_BRANCH_LOCAL` branch's egress ifindex: the copy is
+    /// clone_redirected here — a cradle-owned leaf veth whose peer runs the
+    /// XDP `End.DT2M` decap — instead of forwarded over the underlay. 0 for a
+    /// remote branch.
+    pub local_oif: u32,
+    /// `REPL_BRANCH_*`.
+    pub flags: u32,
+}
+
+/// A Bud's local-delivery branch: `sid` is this node's own `End.DT2M` SID and
+/// the copy is clone_redirected to `local_oif` (the leaf veth) rather than
+/// forwarded over the underlay, so the veth's XDP stage decaps it into the
+/// bridge domain. No underlay/adjacency resolution.
+pub const REPL_BRANCH_LOCAL: u32 = 1 << 0;
+
+/// A Replication segment's forwarding state — the `REPL_SEG` map value, keyed
+/// by the local `End.Replicate` SID (RFC 9524 §5.2). Held in map memory and
+/// read through a borrow (it is too large for the eBPF stack).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ReplSeg {
+    /// Number of populated `branches` (<= `MAX_REPL_BRANCHES`).
+    pub n_branches: u32,
+    /// `REPL_ROLE_*`.
+    pub flags: u32,
+    /// RFC 9524 Hop-Limit Threshold: discard a copy whose arriving Hop Limit
+    /// is below this (0 = disabled).
+    pub hop_limit_threshold: u8,
+    pub _pad: [u8; 3],
+    pub branches: [ReplBranch; MAX_REPL_BRANCHES],
+}
+
+/// This node is a leaf/Bud of the tree — one of `branches` carries
+/// `REPL_BRANCH_LOCAL` for local delivery.
+pub const REPL_ROLE_LEAF: u32 = 1 << 0;
 
 /// Per-VRF IPv6 LPM key — the v6 mirror of `Vrf4Key`: a route `addr/len` in
 /// VRF `v` is inserted with `prefix_len = 32 + len`.
@@ -906,8 +972,10 @@ pub const STAT_VXLAN_DECAP: u32 = 42;
 /// EVPN/VXLAN: BUM (broadcast/multicast/unknown) frame VXLAN-encapsulated
 /// toward a remote VTEP (sentinel tunnel or ingress-replication copy).
 pub const STAT_VXLAN_FLOOD: u32 = 43;
+/// `End.Replicate` copies forwarded to downstream branches (RFC 9524).
+pub const STAT_SRV6_REPLICATE: u32 = 44;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 44;
+pub const STAT_MAX: u32 = 45;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -992,6 +1060,8 @@ mod user {
         VniInfo,
         VxlanEncap,
         ReplTarget,
+        ReplBranch,
+        ReplSeg,
         FdbKey,
         FdbEntry,
         Dx2vKey,

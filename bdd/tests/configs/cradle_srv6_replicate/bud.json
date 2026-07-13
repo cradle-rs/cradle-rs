@@ -1,0 +1,41 @@
+{
+  "ports": [
+    { "name": "bc", "vlan": 10 },
+    { "name": "bur", "l3": true },
+    { "name": "bul1", "l3": true },
+    { "name": "bul2", "l3": true }
+  ],
+  "srv6_source": "fd00:b::1",
+  "nexthops": [
+    { "id": 1, "oif": "bul1", "gateway": "2001:db8:b1::1" },
+    { "id": 2, "oif": "bul2", "gateway": "2001:db8:b2::2" },
+    { "id": 3, "oif": "bur", "gateway": "2001:db8:0b::a" }
+  ],
+  "neighbors": [
+    { "oif": "bul1", "ip": "2001:db8:b1::1", "mac": "02:00:00:00:01:0a" },
+    { "oif": "bul2", "ip": "2001:db8:b2::2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "bur", "ip": "2001:db8:0b::a", "mac": "02:00:00:00:0a:0a" }
+  ],
+  "localsids": [
+    { "sid": "fd00:b::5", "behavior": "end.replicate" },
+    { "sid": "fd00:b::100", "behavior": "end.dt2m", "vrf": 10 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:00:01", "bd": 10, "remote_sid": "fd00:a::100" }
+  ],
+  "repl_segs": [
+    {
+      "sid": "fd00:b::5",
+      "branches": [
+        { "sid": "fd00:1::100" },
+        { "sid": "fd00:2::100" },
+        { "sid": "fd00:b::100", "local": true }
+      ]
+    }
+  ],
+  "routes6": [
+    { "prefix": "fd00:1::/64", "nexthop": 1 },
+    { "prefix": "fd00:2::/64", "nexthop": 2 },
+    { "prefix": "fd00:a::/64", "nexthop": 3 }
+  ]
+}

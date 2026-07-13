@@ -1,0 +1,22 @@
+{
+  "ports": [
+    { "name": "l1c", "vlan": 10 },
+    { "name": "l1u", "l3": true }
+  ],
+  "srv6_source": "fd00:1::1",
+  "nexthops": [
+    { "id": 1, "oif": "l1u", "gateway": "2001:db8:b1::b" }
+  ],
+  "neighbors": [
+    { "oif": "l1u", "ip": "2001:db8:b1::b", "mac": "02:00:00:00:0b:01" }
+  ],
+  "localsids": [
+    { "sid": "fd00:1::100", "behavior": "end.dt2m", "vrf": 10 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:00:01", "bd": 10, "remote_sid": "fd00:a::100" }
+  ],
+  "routes6": [
+    { "prefix": "fd00:a::/64", "nexthop": 1 }
+  ]
+}
