@@ -1,0 +1,47 @@
+# CHANGELOG.yaml – the single source of truth for the project changelog.
+# nfpm (packaging/nfpm-*.yaml) reads this file to build the Debian changelog.
+# Keep newest entry first.
+# All timestamps must be in full ISO-8601 format.
+# Fields "distribution" and "urgency" are optional per-entry; if you omit
+# them, the defaults from .chglog.yml (or chglog config) are used.
+
+- semver: 0.9.4
+  date: 2026-07-12T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BFD offload (eBPF consolidation)
+        * The standalone XDP BFD Echo reflector and its in-kernel
+          expiration watchdog are folded into the monolithic
+          `cradle_xdp` program, resolving the single-XDP-owner attach
+          conflict; cradle gains its first `bpf_timer` and BTF maps
+          (DetectState, ECHO_TIMERS/CONTROL_TIMERS, OUR_LOCAL_IPS)
+        * BFD detection-offload control plane: arm/disarm per-session
+          detectors keyed by local discriminator, plus a `WatchBfd`
+          stream reporting echo-down / detect-down back to zebra
+        * The BFD Echo originator moves into the cradle control loop —
+          self-addressed Echo transmit over AF_PACKET with in-kernel
+          return timing, a per-egress-interface socket, and a uniform
+          bootstrap echo-down for a session whose kernel timer has not
+          armed yet
+        * The standalone `xdp-bfd-echo` helper is retired;
+          `CRADLE_XDP_MODE=skb|generic` forces generic (SKB) XDP attach
+          so a veth reflects a peer's Echo regardless of the peer's XDP
+          (off by default — real NICs do native XDP_TX)
+
+    - note: |
+        ### EVPN data plane
+        * The standalone `tc-evpn-replicate` TC/clsact offload crates
+          are removed — BUM replication is now the cradle engine's job
+          (AddReplSlot toward each leaf's End.DT2M SID + `srv6_dt2u`
+          decap)
+
+    - note: |
+        ### Packaging / build
+        * `cap_net_raw` added to `/usr/bin/cradle`'s setcap for the
+          absorbed AF_PACKET Echo originator; the `/usr/sbin/xdp-bfd-echo`
+          and `tc-evpn-replicate` deb payloads and their setcaps are
+          dropped
+        * Cargo.lock is no longer tracked (mirrors zebra-rs)
