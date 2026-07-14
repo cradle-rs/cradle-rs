@@ -1,0 +1,35 @@
+# Controller + service-route origin (iBGP AS 65000). Originates the service
+# route 10.99.0.0/24 and the SR Policy <color 100, endpoint 192.168.12.2>
+# with SR-MPLS Binding SID 16100 and segment {16002}, route-target 10.0.0.1
+# (== headend h's router-id, so h consumes it, RFC 9830 §4.2).
+interface:
+- {if-name: cb, ipv4: {address: 192.168.12.2/24}}
+router:
+  static:
+    ipv4:
+      route:
+      - {prefix: 10.99.0.0/24, nexthop: [{address: blackhole}]}
+  bgp:
+    global: {as: 65000, router-id: 10.0.0.9}
+    timer: {adv-interval: {ibgp: 1, ebgp: 1}}
+    sr-policy:
+      policy:
+      - name: DETOUR
+        color: 100
+        endpoint: 192.168.12.2
+        binding-sid-label: 16100
+        route-target: 10.0.0.1
+        segment:
+        - {index: 1, mpls-label: 16002}
+    neighbor:
+    - remote-address: 192.168.12.1
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - {name: ipv4, enabled: true}
+      - {name: sr-policy-v4, enabled: true}
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        static: {}
