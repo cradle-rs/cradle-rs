@@ -90,6 +90,13 @@ pub const DIR24_TBL8_GROUPS: u32 = 4096;
 /// `DP_CONFIG[0]` bits — datapath configuration word, written by user space.
 /// Bit 0: the DIR-24-8 v4 engine is active (else the LPM trie).
 pub const DPC_FIB4_DIR24: u32 = 1 << 0;
+/// Bit 1: single-hook benchmark mode `tc-only` — `cradle_tc` skips the L7 /
+/// NAT / conntrack / policy stages and does plain IPv4 L3 forwarding only, so
+/// its per-packet cost can be compared against `xdp-only`. Set when zebra-rs
+/// launches cradle with `--ebpf-mode tc-only`. Not for production. (The
+/// `xdp-only` mode needs no config bit: it attaches the dedicated
+/// `cradle_xdp_l3` program in place of `cradle_xdp`.)
+pub const DPC_L3_ONLY: u32 = 1 << 1;
 
 /// Member of a nexthop group, keyed by `(group_id, slot)` with a dense slot
 /// index `0..count`. The value is a nexthop id (into the per-nexthop map).
@@ -992,8 +999,11 @@ pub const STAT_VXLAN_DECAP: u32 = 42;
 pub const STAT_VXLAN_FLOOD: u32 = 43;
 /// `End.Replicate` copies forwarded to downstream branches (RFC 9524).
 pub const STAT_SRV6_REPLICATE: u32 = 44;
+/// Plain IPv4 packets forwarded entirely in XDP by the `--ebpf-mode xdp-only`
+/// fast path (`xdp_l3_forward_v4`), never handed to a TC program.
+pub const STAT_XDP_L3_FWD: u32 = 45;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 45;
+pub const STAT_MAX: u32 = 46;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 

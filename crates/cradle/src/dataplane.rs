@@ -1659,6 +1659,15 @@ impl Dataplane {
         Ok(())
     }
 
+    /// OR extra bits into the datapath-config word `DP_CONFIG[0]` (e.g. the
+    /// single-hook benchmark bits `DPC_L3_ONLY` / `DPC_XDP_L3`), preserving any
+    /// already-set bits such as `DPC_FIB4_DIR24`. Load-time only.
+    pub fn add_dp_config(&mut self, bits: u32) -> Result<()> {
+        let cur = self.dp_config.get(&0, 0).unwrap_or(0);
+        self.dp_config.set(0, cur | bits, 0)?;
+        Ok(())
+    }
+
     /// Apply a DIR-24-8 slot-write plan. Plan order is the readers' safety
     /// (fill-then-flip); `Array::set` is a per-element atomic word store.
     fn dir24_apply(&mut self, plan: &[SlotWrite]) -> Result<()> {

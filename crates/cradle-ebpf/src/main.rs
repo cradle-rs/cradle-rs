@@ -40,7 +40,8 @@ use aya_ebpf::{
 };
 use cradle_common::{
     AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
-    CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, Dx2vKey,
+    CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, DPC_L3_ONLY,
+    Dx2vKey,
     EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE,
     FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
     FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
@@ -64,7 +65,8 @@ use cradle_common::{
     STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
     STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE,
     STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP,
-    STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L3,
+    STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
+    Srv6Encap, VNI_F_L3,
     VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX,
     XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, fibw_unpack, mpls_lse,
     mpls_lse_unpack,
@@ -143,6 +145,12 @@ static DEFAULT4: Array<FibWord> = Array::with_max_entries(1, 0);
 // Datapath configuration word(s), written by user space: DPC_* bits.
 #[map]
 static DP_CONFIG: Array<u32> = Array::with_max_entries(1, 0);
+
+/// Test a `DP_CONFIG[0]` datapath-config bit (e.g. `DPC_L3_ONLY`).
+#[inline(always)]
+fn dpc(flag: u32) -> bool {
+    matches!(DP_CONFIG.get(0), Some(w) if *w & flag != 0)
+}
 #[map]
 static NEXTHOPS: HashMap<u32, NextHop> = HashMap::with_max_entries(4096, 0);
 /// Links whose carrier/admin state is down (ifindex present = down), written
@@ -687,25 +695,35 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     if port.flags & PORT_F_L2 != 0 {
         l2_switch(ctx, iif, port.vlan, false)
     } else if port.flags & PORT_F_L3 != 0 {
-        // L7: a TCP flow to an L7-marked VIP is steered to the user-space
-        // transparent proxy via bpf_sk_assign (TC_ACT_OK = deliver locally).
-        if let Some(act) = l7_redirect(ctx) {
-            return Ok(act);
-        }
-        // Pod egress: track the pre-NAT flow so replies pass ingress policy.
-        let masq_src = port.flags & PORT_F_ENDPOINT != 0;
-        if masq_src {
-            // Each tracker no-ops on the other family's ethertype.
-            let _ = pct_track(ctx, PCT_POD_INITIATED);
-            let _ = pct_track6(ctx, PCT_POD_INITIATED);
-        }
-        // L4 NAT is a best-effort pre-routing stage; it rewrites the packet in
-        // place (service DNAT / reverse SNAT / egress masquerade) so routing
-        // then targets the real endpoint. Failures fall through to routing.
-        let _ = l4_nat(ctx, masq_src);
-        // Pod egress carries the endpoint ifindex (0 = not an endpoint):
-        // egress policy enforcement point and the Hubble direction hint.
-        l3_forward(ctx, port.vrf_id, if masq_src { iif } else { 0 })
+        // Single-hook benchmark mode (`--ebpf-mode tc-only`): skip the L7 / NAT
+        // / conntrack / egress-policy stages and forward plain IPv4 only, so
+        // cradle_tc's per-packet cost is comparable to the xdp-only fast path.
+        // Kept as ONE `l3_forward` call site: it is `#[inline(always)]`, and a
+        // second inlined copy blows the near-budget cradle_tc verifier stack.
+        let from_ep = if dpc(DPC_L3_ONLY) {
+            0
+        } else {
+            // L7: a TCP flow to an L7-marked VIP is steered to the user-space
+            // transparent proxy via bpf_sk_assign (TC_ACT_OK = deliver locally).
+            if let Some(act) = l7_redirect(ctx) {
+                return Ok(act);
+            }
+            // Pod egress: track the pre-NAT flow so replies pass ingress policy.
+            let masq_src = port.flags & PORT_F_ENDPOINT != 0;
+            if masq_src {
+                // Each tracker no-ops on the other family's ethertype.
+                let _ = pct_track(ctx, PCT_POD_INITIATED);
+                let _ = pct_track6(ctx, PCT_POD_INITIATED);
+            }
+            // L4 NAT is a best-effort pre-routing stage; it rewrites the packet
+            // in place (service DNAT / reverse SNAT / egress masquerade) so
+            // routing then targets the real endpoint. Failures fall through.
+            let _ = l4_nat(ctx, masq_src);
+            // Pod egress carries the endpoint ifindex (0 = not an endpoint):
+            // egress policy enforcement point and the Hubble direction hint.
+            if masq_src { iif } else { 0 }
+        };
+        l3_forward(ctx, port.vrf_id, from_ep)
     } else {
         Ok(TC_ACT_PIPE as i32)
     }
@@ -2682,6 +2700,29 @@ pub fn cradle_xdp(ctx: XdpContext) -> u32 {
     }
 }
 
+/// `--ebpf-mode xdp-only`: a dedicated, minimal XDP program attached in place
+/// of `cradle_xdp` (and with no TC program) when the operator restricts the
+/// datapath to plain IPv4 L3 forwarding for a single-hook benchmark. It is its
+/// own BPF program with its own 512-byte verifier stack budget, so it does not
+/// share the near-budget `cradle_xdp` monolith. Plain IPv4 is forwarded here
+/// entirely in XDP via `xdp_l3_forward_v4`; everything else (ARP, IPv6,
+/// non-plain routes) is passed to the kernel stack. No overlay / NAT / policy /
+/// L2 — those need the full `cradle_xdp` + `cradle_tc` pipeline.
+#[xdp]
+pub fn cradle_xdp_l3(ctx: XdpContext) -> u32 {
+    let et = match xdp_ptr::<u16>(&ctx, ETH_TYPE_OFF) {
+        Ok(p) => u16::from_be(unsafe { *p }),
+        Err(()) => return xdp_action::XDP_PASS,
+    };
+    if et != ETH_P_IP {
+        return xdp_action::XDP_PASS;
+    }
+    match xdp_l3_forward_v4(&ctx) {
+        Ok(act) => act,
+        Err(()) => xdp_action::XDP_PASS,
+    }
+}
+
 /// The XDP stage hosts the two overlays whose frame-resizing the TC stage
 /// can't do on a non-IP or would-mis-forward skb: MPLS (pops/grow-swaps) and
 /// SRv6 (End.DT* decap). Dispatch on the outer EtherType.
@@ -2794,6 +2835,79 @@ fn try_udp4_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         }
         _ => Ok(xdp_action::XDP_PASS),
     }
+}
+
+/// `--ebpf-mode xdp-only` fast path: forward a plain IPv4 UDP packet entirely
+/// in XDP, bypassing the (unattached) TC stage. A self-contained twin of
+/// `l3_forward_v4`'s plain-unicast path — FIB lookup (LPM or DIR-24-8 via
+/// `fib4_lookup`), nexthop + neighbor resolution, a TTL decrement with an
+/// incremental IPv4 checksum (RFC 1624), Ethernet rewrite, and `bpf_redirect`.
+/// `bpf_redirect_neigh` is a TC-only helper (the XDP verifier rejects it), so
+/// the L2 header is built here from cradle's neighbor/port maps
+/// (`xdp_resolve_l2`), mirroring `pop_and_forward`. Anything that isn't a plain
+/// unicast forward (encap nexthop, local/blackhole/ECMP route, neighbor miss,
+/// TTL<=1) punts to `XDP_PASS` so the kernel stack handles it (ARP, ICMP
+/// time-exceeded). Works for any IHL — it reads only the fixed IPv4 dst / TTL /
+/// checksum offsets, never L4. Called only from the dedicated `cradle_xdp_l3`
+/// program (its own stack budget), so it does not touch the near-budget
+/// `cradle_xdp` monolith.
+#[inline(always)]
+fn xdp_l3_forward_v4(ctx: &XdpContext) -> Result<u32, ()> {
+    let dst = unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_DST_OFF)? };
+    // Read the DIR-24-8 engine directly (xdp-only defaults to dir24). The
+    // generic `fib4_lookup` would also inline the LPM trie + VRF key into this
+    // frame and blow the cradle_xdp call-chain stack budget (512 B), so only a
+    // few `u32` slots are used here — 1–2 flat array loads, no aggregates.
+    let key = u32::from_be_bytes(dst);
+    let Some(&w24) = TBL24.get(key >> 8) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    let mut w = w24;
+    if w & FIBW_TBL8 != 0 {
+        let group = w & FIBW_ID_MASK;
+        let Some(&w8) = TBL8.get(group * 256 + dst[3] as u32) else {
+            return Ok(xdp_action::XDP_PASS);
+        };
+        w = w8;
+    }
+    if w & FIBW_VALID == 0 {
+        match DEFAULT4.get(0) {
+            Some(&wd) if wd & FIBW_VALID != 0 => w = wd,
+            _ => return Ok(xdp_action::XDP_PASS),
+        }
+    }
+    let (nexthop_id, flags) = fibw_unpack(w);
+    if flags & (FIB_F_BLACKHOLE | FIB_F_LOCAL | FIB_F_ECMP) != 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // Borrow the nexthop (no 48-byte copy — the flattened cradle_xdp frame is
+    // near the verifier stack budget). Fast-reroute (`resolve_nh`'s backup) is
+    // not needed on this benchmark path.
+    let Some(nh_ptr) = NEXTHOPS.get_ptr(&nexthop_id) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    let nh: &NextHop = unsafe { &*nh_ptr };
+    if nh.flags & (NH_F_MPLS | NH_F_SRV6 | NH_F_GTP | NH_F_VXLAN) != 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    // TTL decrement + incremental IPv4 header checksum. The 16-bit word at
+    // IP_TTL_OFF is [TTL, protocol] in network order (see `mpls_uniform_to_ip`).
+    let old_word = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, IP_TTL_OFF)? });
+    if old_word >> 8 <= 1 {
+        return Ok(xdp_action::XDP_PASS); // TTL<=1: let the stack send time-exceeded
+    }
+    let new_word = old_word - (1 << 8);
+    let hc = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, IP_CSUM_OFF)? });
+    let new_hc = csum16_update(hc, old_word, new_word);
+    unsafe { *xdp_ptr::<u16>(ctx, IP_TTL_OFF)? = new_word.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, IP_CSUM_OFF)? = new_hc.to_be() };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    stat_inc(STAT_XDP_L3_FWD);
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
 /// BFD over IPv6 on a base header (no extension headers): `Some(action)` when

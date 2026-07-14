@@ -115,6 +115,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "vxlan_decap",
     "vxlan_flood",
     "srv6_replicate",
+    "xdp_l3_fwd",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -140,9 +141,12 @@ type L7Programmed = HashMap<u32, Vec<(Ipv4Addr, u16)>>;
 /// L3 (so a role/VRF/address change or a `del_port` removes exactly them).
 struct PortAttachment {
     name: String,
-    _tc_ingress: SchedClassifierLink,
-    _tc_egress: SchedClassifierLink,
-    _xdp: XdpLink,
+    // `Option` because single-hook benchmark mode (`--ebpf-mode`) attaches only
+    // one hook: `tc-only` leaves `_xdp`/`_tc_egress` `None`, `xdp-only` leaves
+    // the TC links `None`. Dropping the `Some` links still detaches on `del_port`.
+    _tc_ingress: Option<SchedClassifierLink>,
+    _tc_egress: Option<SchedClassifierLink>,
+    _xdp: Option<XdpLink>,
     derived: crate::kernel::DerivedPort,
 }
 
@@ -187,10 +191,19 @@ pub struct Control {
     /// The task holds the receiver and a `dp` handle; `ArmBfdEcho`/`DisarmBfdEcho`
     /// send `Add`/`Del`.
     bfd_echo_tx: tokio::sync::mpsc::UnboundedSender<crate::bfd_echo::EchoCmd>,
+    /// Single-hook benchmark mode (`--ebpf-mode`): when set, `attach` wires up
+    /// only one eBPF hook — `TcOnly` → `cradle_tc`, `XdpOnly` → `cradle_xdp` —
+    /// instead of the full XDP+TC+egress pipeline. `None` = normal (all hooks).
+    ebpf_mode: Option<crate::EbpfMode>,
 }
 
 impl Control {
-    pub fn new(bpf: Ebpf, dp: Dataplane, state_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        bpf: Ebpf,
+        dp: Dataplane,
+        state_dir: std::path::PathBuf,
+        ebpf_mode: Option<crate::EbpfMode>,
+    ) -> Self {
         let dp = Arc::new(Mutex::new(dp));
         let (bfd_echo_tx, bfd_echo_rx) = tokio::sync::mpsc::unbounded_channel();
         crate::bfd_echo::BfdEchoEngine::spawn(dp.clone(), bfd_echo_rx);
@@ -208,6 +221,7 @@ impl Control {
             l7_policies: Arc::new(Mutex::new(HashMap::new())),
             fdb_hint_tx: tokio::sync::broadcast::channel(256).0,
             bfd_echo_tx,
+            ebpf_mode,
         }
     }
 
@@ -289,26 +303,32 @@ impl Control {
             return Ok(());
         }
         let mut bpf = self.bpf.lock().await;
-        if let Err(e) = tc::qdisc_add_clsact(name) {
-            warn!("qdisc_add_clsact({name}): {e} (continuing; may already exist)");
-        }
-        // Predecessor cleanup. On TCX-capable kernels (≥6.6) aya attaches via
-        // a bpf_link, which dies with the owning process — a killed daemon
-        // leaves nothing behind. On older kernels the fallback is a netlink
-        // cls_bpf filter, which DOES outlive the process and would keep
-        // forwarding with the dead instance's maps, ahead of ours. Detach any
-        // stale cradle_tc by program name so only this instance's datapath
-        // runs. NotFound (the common case) is not an error.
-        if let Err(e) = tc::qdisc_detach_program(name, TcAttachType::Ingress, "cradle_tc") {
-            let benign = matches!(&e, tc::TcError::IoError(io)
-                if io.kind() == std::io::ErrorKind::NotFound);
-            if !benign {
-                warn!("detaching stale cradle_tc from {name}: {e} (continuing)");
+        // Single-hook benchmark mode (`--ebpf-mode`) selects which hooks to
+        // wire; `None` (the normal case) attaches the full pipeline. `tc-only`
+        // keeps just cradle_tc ingress; `xdp-only` keeps just cradle_xdp.
+        let want_tc = matches!(self.ebpf_mode, None | Some(crate::EbpfMode::TcOnly));
+        let want_egress = self.ebpf_mode.is_none();
+        let want_xdp = matches!(self.ebpf_mode, None | Some(crate::EbpfMode::XdpOnly));
+        let tc_ingress = if want_tc {
+            if let Err(e) = tc::qdisc_add_clsact(name) {
+                warn!("qdisc_add_clsact({name}): {e} (continuing; may already exist)");
             }
-        } else {
-            info!("detached a stale cradle_tc filter from {name} (predecessor cleanup)");
-        }
-        let tc_ingress = {
+            // Predecessor cleanup. On TCX-capable kernels (≥6.6) aya attaches via
+            // a bpf_link, which dies with the owning process — a killed daemon
+            // leaves nothing behind. On older kernels the fallback is a netlink
+            // cls_bpf filter, which DOES outlive the process and would keep
+            // forwarding with the dead instance's maps, ahead of ours. Detach any
+            // stale cradle_tc by program name so only this instance's datapath
+            // runs. NotFound (the common case) is not an error.
+            if let Err(e) = tc::qdisc_detach_program(name, TcAttachType::Ingress, "cradle_tc") {
+                let benign = matches!(&e, tc::TcError::IoError(io)
+                    if io.kind() == std::io::ErrorKind::NotFound);
+                if !benign {
+                    warn!("detaching stale cradle_tc from {name}: {e} (continuing)");
+                }
+            } else {
+                info!("detached a stale cradle_tc filter from {name} (predecessor cleanup)");
+            }
             let prog: &mut SchedClassifier = bpf
                 .program_mut("cradle_tc")
                 .context("program cradle_tc not found")?
@@ -317,13 +337,15 @@ impl Control {
                 .attach(name, TcAttachType::Ingress)
                 .with_context(|| format!("attaching to {name}"))?;
             info!("attached cradle datapath to {name} (clsact ingress)");
-            prog.take_link(id)?
+            Some(prog.take_link(id)?)
+        } else {
+            None
         };
         // Egress reverse-NAT: rewrite a host-network/node-local service
         // reply's source back to the VIP as it leaves toward the client
         // (its 5-tuple hits a reverse CT entry; a pod-backed reply already
         // un-NATed at ingress won't match — no double-NAT).
-        let tc_egress = {
+        let tc_egress = if want_egress {
             let eg: &mut SchedClassifier = bpf
                 .program_mut("cradle_egress")
                 .context("program cradle_egress not found")?
@@ -331,12 +353,21 @@ impl Control {
             let id = eg
                 .attach(name, TcAttachType::Egress)
                 .with_context(|| format!("attaching egress reverse-NAT to {name}"))?;
-            eg.take_link(id)?
+            Some(eg.take_link(id)?)
+        } else {
+            None
         };
-        let xdp_link = {
+        let xdp_link = if want_xdp {
+            // `xdp-only` attaches the dedicated plain-IPv4 forwarder in place of
+            // the full cradle_xdp monolith (matching main.rs's load choice).
+            let xdp_prog = if self.ebpf_mode == Some(crate::EbpfMode::XdpOnly) {
+                "cradle_xdp_l3"
+            } else {
+                "cradle_xdp"
+            };
             let xdp: &mut Xdp = bpf
-                .program_mut("cradle_xdp")
-                .context("program cradle_xdp not found")?
+                .program_mut(xdp_prog)
+                .with_context(|| format!("program {xdp_prog} not found"))?
                 .try_into()?;
             // `CRADLE_XDP_MODE=skb|generic` forces generic (SKB) attach for all
             // ports. Native `XDP_TX` on a veth only delivers to the *peer's* XDP
@@ -381,7 +412,9 @@ impl Control {
                     }
                 }
             };
-            xdp.take_link(id)?
+            Some(xdp.take_link(id)?)
+        } else {
+            None
         };
         attached.insert(
             ifindex,
