@@ -1,0 +1,48 @@
+system:
+  cradle:
+    enabled: true
+vrf:
+- name: Ndl
+- name: Nul
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1n3
+  ipv4:
+    address: 10.0.12.1/24
+- if-name: z1dl
+  vrf: Ndl
+  ipv4:
+    address: 10.0.61.1/24
+- if-name: z1ul
+  vrf: Nul
+  ipv4:
+    address: 10.0.60.1/24
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: Ndl
+      rd: "65000:1"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st1
+            network-instance: internet
+    - name: Nul
+      rd: "65000:2"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st2
+            network-instance: internet
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 127.0.0.1
