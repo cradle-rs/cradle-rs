@@ -548,6 +548,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     // nexthops fail over to their backups (TI-LFA fast-reroute).
     control.start_link_monitor();
 
+    // Re-derive an L3 port's local/connected routes when its kernel
+    // addresses change after attach (the control plane assigns them later).
+    control.start_addr_monitor();
+
     // Serve the gRPC control API (default `unix:cradle/grpc`, a per-netns
     // abstract socket); runs until Ctrl-C.
     control.serve(GrpcEndpoint::parse(&args.grpc)?).await?;

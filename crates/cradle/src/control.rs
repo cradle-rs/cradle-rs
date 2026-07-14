@@ -148,6 +148,45 @@ struct PortAttachment {
     _tc_egress: Option<SchedClassifierLink>,
     _xdp: Option<XdpLink>,
     derived: crate::kernel::DerivedPort,
+    /// Role/VRF as of the last `set_port`, so the address monitor can re-run
+    /// the same derivation when the port's kernel addresses change later
+    /// (a control plane like zebra-rs assigns addresses *after* the port
+    /// was attached — the attach-time derivation then saw none).
+    l3: bool,
+    vrf_id: u32,
+}
+
+/// Swap a port's derived local/connected FIB artifacts for `new_derived`,
+/// removing only the leftovers (different VRF, addresses, or an L3→L2 role
+/// change). The new set must already be installed in `dp`.
+fn reconcile_derived(
+    att: &mut PortAttachment,
+    dp: &mut Dataplane,
+    new_derived: crate::kernel::DerivedPort,
+) {
+    for r in att
+        .derived
+        .v4
+        .iter()
+        .filter(|r| !new_derived.v4.contains(r))
+    {
+        let _ = dp.route4_del(r.0, r.1, r.2);
+    }
+    for r in att
+        .derived
+        .v6
+        .iter()
+        .filter(|r| !new_derived.v6.contains(r))
+    {
+        let _ = dp.route6_del(r.0, r.1, r.2);
+    }
+    if let Some(nh) = att.derived.nh4.filter(|_| new_derived.nh4.is_none()) {
+        let _ = dp.nexthop_del(nh);
+    }
+    if let Some(nh) = att.derived.nh6.filter(|_| new_derived.nh6.is_none()) {
+        let _ = dp.nexthop_del(nh);
+    }
+    att.derived = new_derived;
 }
 
 #[derive(Clone)]
@@ -297,7 +336,7 @@ impl Control {
     /// so `del_port` can detach by dropping them. A failed attach rolls back
     /// (links taken so far drop → detach) and leaves the port unattached, so
     /// a retry re-runs the full sequence.
-    async fn attach(&self, name: &str, ifindex: u32, _l3: bool) -> Result<()> {
+    async fn attach(&self, name: &str, ifindex: u32, l3: bool) -> Result<()> {
         let mut attached = self.attached.lock().await;
         if attached.contains_key(&ifindex) {
             return Ok(());
@@ -424,6 +463,8 @@ impl Control {
                 _tc_egress: tc_egress,
                 _xdp: xdp_link,
                 derived: Default::default(),
+                l3,
+                vrf_id: 0,
             },
         );
         Ok(())
@@ -461,29 +502,9 @@ impl Control {
         // addresses, or an L3→L2 role change): the new set was just
         // (re-)inserted above, so remove only the leftovers.
         if let Some(att) = attached.get_mut(&ifindex) {
-            for r in att
-                .derived
-                .v4
-                .iter()
-                .filter(|r| !new_derived.v4.contains(r))
-            {
-                let _ = dp.route4_del(r.0, r.1, r.2);
-            }
-            for r in att
-                .derived
-                .v6
-                .iter()
-                .filter(|r| !new_derived.v6.contains(r))
-            {
-                let _ = dp.route6_del(r.0, r.1, r.2);
-            }
-            if let Some(nh) = att.derived.nh4.filter(|_| new_derived.nh4.is_none()) {
-                let _ = dp.nexthop_del(nh);
-            }
-            if let Some(nh) = att.derived.nh6.filter(|_| new_derived.nh6.is_none()) {
-                let _ = dp.nexthop_del(nh);
-            }
-            att.derived = new_derived;
+            reconcile_derived(att, &mut dp, new_derived);
+            att.l3 = l3;
+            att.vrf_id = vrf_id;
         }
         Ok(())
     }
@@ -1218,6 +1239,66 @@ impl Control {
             }
         });
         info!("link monitor started (protected-nexthop failover)");
+    }
+
+    /// Start the address monitor: an `ip -o monitor address` subprocess
+    /// re-derives an attached L3 port's local/connected FIB routes whenever
+    /// its kernel addresses change. Ports are usually attached before the
+    /// control plane (zebra-rs) assigns their addresses — the attach-time
+    /// derivation then found nothing, and without this the port's VRF table
+    /// never learns its connected subnets.
+    pub fn start_addr_monitor(&self) {
+        let dp = self.dp.clone();
+        let attached = self.attached.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let child = tokio::process::Command::new("ip")
+                .args(["-o", "monitor", "address"])
+                .stdout(std::process::Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("address monitor disabled: spawning `ip monitor address`: {e}");
+                    return;
+                }
+            };
+            let Some(stdout) = child.stdout.take() else {
+                return;
+            };
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // `ip -o monitor address` lines start "IDX: name inet …";
+                // removals are prefixed "Deleted ". Either way the port's
+                // full current address set is re-read, so only the ifindex
+                // matters here.
+                let rest = line.strip_prefix("Deleted ").unwrap_or(&line);
+                let Some((idx_str, _)) = rest.split_once(':') else {
+                    continue;
+                };
+                let Ok(ifindex) = idx_str.trim().parse::<u32>() else {
+                    continue;
+                };
+                // Lock order: attached → dp (same as set_port/del_port).
+                let mut attached = attached.lock().await;
+                let Some(att) = attached.get_mut(&ifindex) else {
+                    continue;
+                };
+                if !att.l3 {
+                    continue;
+                }
+                let (name, vrf_id) = (att.name.clone(), att.vrf_id);
+                let mut dp = dp.lock().await;
+                match crate::kernel::derive_port(&mut dp, &name, ifindex, vrf_id) {
+                    Ok(new_derived) => {
+                        reconcile_derived(att, &mut dp, new_derived);
+                        info!("port {name}: addresses changed — routes re-derived (vrf {vrf_id})");
+                    }
+                    Err(e) => warn!("address monitor: re-derive {name}: {e:#}"),
+                }
+            }
+        });
+        info!("address monitor started (L3 port route re-derivation)");
     }
 
     pub async fn set_srv6_encap_source(&self, addr: Ipv6Addr) -> Result<()> {
