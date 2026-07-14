@@ -34,12 +34,12 @@ use crate::{
     util,
 };
 use cradle_common::{
-    MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3,
-    REPL_BRANCH_LOCAL, ReplBranch, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U,
-    SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V,
-    SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE,
-    SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    SRV6_ENCAP_MODE_INSERT, STAT_MAX,
+    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2,
+    PORT_F_L3, REPL_BRANCH_LOCAL, ReplBranch, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M,
+    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2,
+    SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
+    SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
+    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -975,14 +975,16 @@ impl Control {
         oif: &str,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> Result<()> {
         let oif = util::ifindex_of(oif)?;
-        self.set_nexthop_idx(id, gateway, oif, labels, backup_id)
+        self.set_nexthop_idx(id, gateway, oif, labels, backup_id, pipe)
             .await
     }
 
     /// Set a nexthop by output ifindex directly (used by control planes such as
-    /// zebra-rs that already work in ifindex space).
+    /// zebra-rs that already work in ifindex space). `pipe` selects the RFC 3443
+    /// pipe TTL model for any imposed label stack.
     pub async fn set_nexthop_idx(
         &self,
         id: u32,
@@ -990,11 +992,12 @@ impl Control {
         oif: u32,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .nexthop_set(id, gateway, oif, labels, backup_id)?;
+            .nexthop_set(id, gateway, oif, labels, backup_id, pipe)?;
         Ok(())
     }
 
@@ -1036,11 +1039,12 @@ impl Control {
         oif: u32,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .nexthop_set_v6(id, gateway, oif, labels, backup_id)?;
+            .nexthop_set_v6(id, gateway, oif, labels, backup_id, pipe)?;
         Ok(())
     }
 
@@ -1261,12 +1265,20 @@ impl Control {
         Ok(())
     }
 
-    /// Install an ILM (incoming-label map) entry.
-    pub async fn add_ilm(&self, in_label: u32, nexthop_id: u32, op: u8, vrf_id: u32) -> Result<()> {
+    /// Install an ILM (incoming-label map) entry. `flags` carries the
+    /// `MPLS_E_*` disposition bits (e.g. `MPLS_E_TTL_UNIFORM`).
+    pub async fn add_ilm(
+        &self,
+        in_label: u32,
+        nexthop_id: u32,
+        op: u8,
+        vrf_id: u32,
+        flags: u8,
+    ) -> Result<()> {
         self.dp
             .lock()
             .await
-            .ilm_add(in_label, nexthop_id, op, vrf_id)?;
+            .ilm_add(in_label, nexthop_id, op, vrf_id, flags)?;
         Ok(())
     }
 
@@ -1385,13 +1397,13 @@ impl Control {
         {
             let mut dp = self.dp.lock().await;
             let nh = crate::kernel::CONNECTED_NH_BASE_V4 + ifindex;
-            dp.nexthop_set(nh, None, ifindex, &[], 0)?;
+            dp.nexthop_set(nh, None, ifindex, &[], 0, false)?;
             dp.route4_add(vrf, ip, 32, nh, 0)?;
             // Dual-stack: point the pod /128 at a v6 connected nexthop on
             // the same veth (FIB6), mirroring the v4 path.
             if let Some(ip6) = ip6 {
                 let nh6 = crate::kernel::CONNECTED_NH_BASE_V6 + ifindex;
-                dp.nexthop_set_v6(nh6, None, ifindex, &[], 0)?;
+                dp.nexthop_set_v6(nh6, None, ifindex, &[], 0, false)?;
                 dp.route6_add(vrf, ip6, 128, nh6, 0)?;
             }
         }
@@ -2276,7 +2288,7 @@ impl Cradle for GrpcService {
                 util::ifindex_of(&n.oif).map_err(st)?
             };
             self.control
-                .set_nexthop_idx_v6(n.id, gw, oif, &n.labels, n.backup_id)
+                .set_nexthop_idx_v6(n.id, gw, oif, &n.labels, n.backup_id, n.mpls_pipe_ttl)
                 .await
                 .map_err(st)?;
         } else {
@@ -2289,12 +2301,19 @@ impl Cradle for GrpcService {
                 // oif_index 0 with no name: an oif-less nexthop (e.g. an ILM
                 // decap target that never egresses through it) — store as-is.
                 self.control
-                    .set_nexthop_idx(n.id, gw, n.oif_index, &n.labels, n.backup_id)
+                    .set_nexthop_idx(
+                        n.id,
+                        gw,
+                        n.oif_index,
+                        &n.labels,
+                        n.backup_id,
+                        n.mpls_pipe_ttl,
+                    )
                     .await
                     .map_err(st)?;
             } else {
                 self.control
-                    .set_nexthop(n.id, gw, &n.oif, &n.labels, n.backup_id)
+                    .set_nexthop(n.id, gw, &n.oif, &n.labels, n.backup_id, n.mpls_pipe_ttl)
                     .await
                     .map_err(st)?;
             }
@@ -2922,8 +2941,9 @@ impl Cradle for GrpcService {
                 return Err(Status::invalid_argument(format!("bad ILM action {other}")));
             }
         };
+        let flags = if i.ttl_uniform { MPLS_E_TTL_UNIFORM } else { 0 };
         self.control
-            .add_ilm(i.in_label, i.nexthop_id, op, i.vrf_table_id)
+            .add_ilm(i.in_label, i.nexthop_id, op, i.vrf_table_id, flags)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

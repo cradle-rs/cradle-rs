@@ -1,0 +1,17 @@
+{
+  "ports": [
+    { "name": "ler1a", "l3": true },
+    { "name": "ler1b", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "ler1b", "gateway": "10.0.1.2", "labels": [16] },
+    { "id": 2, "oif": "ler1b", "gateway": "10.0.1.2", "labels": [46], "mpls_pipe": true }
+  ],
+  "neighbors": [
+    { "oif": "ler1b", "ip": "10.0.1.2", "mac": "02:00:00:00:02:0a" }
+  ],
+  "routes": [
+    { "prefix": "10.0.3.0/24", "nexthop": 1 },
+    { "prefix": "10.0.5.0/24", "nexthop": 2 }
+  ]
+}

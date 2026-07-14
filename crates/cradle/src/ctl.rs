@@ -87,6 +87,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         vxlan_vtep: nh.vxlan_vtep.clone().unwrap_or_default(),
                         vxlan_l3vni: nh.vxlan_l3vni,
                         vxlan_rmac: nh.vxlan_rmac.clone().unwrap_or_default(),
+                        mpls_pipe_ttl: nh.mpls_pipe,
                     })
                     .await?;
             }
@@ -154,6 +155,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         nexthop_id: i.nexthop,
                         action: op as u32,
                         vrf_table_id: i.vrf,
+                        ttl_uniform: i.ttl_uniform,
                     })
                     .await?;
             }

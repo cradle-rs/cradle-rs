@@ -1,0 +1,18 @@
+{
+  "ports": [
+    { "name": "per3a", "l3": true },
+    { "name": "per3b", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "per3b", "gateway": "10.0.3.1" },
+    { "id": 2, "oif": "per3a", "gateway": "10.0.2.1" }
+  ],
+  "ilm": [
+    { "in_label": 17, "nexthop": 1, "action": "pop-l3", "ttl_uniform": true },
+    { "in_label": 47, "nexthop": 1, "action": "pop-l3" }
+  ],
+  "routes": [
+    { "prefix": "10.0.5.0/24", "nexthop": 1 },
+    { "prefix": "10.0.0.0/24", "nexthop": 2 }
+  ]
+}

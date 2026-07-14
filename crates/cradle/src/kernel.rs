@@ -70,7 +70,7 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
                 };
                 let net = Ipv4Addr::from(u32::from(ip) & mask_bits);
                 let nh = CONNECTED_NH_BASE_V4 + ifindex;
-                dp.nexthop_set(nh, None, ifindex, &[], 0)?;
+                dp.nexthop_set(nh, None, ifindex, &[], 0, false)?;
                 dp.route4_add(vrf, net, plen, nh, 0)?;
                 derived.v4.push((vrf, net, plen));
                 derived.nh4 = Some(nh);
@@ -95,7 +95,7 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
             if plen < 128 {
                 let net = mask_v6(ip, plen);
                 let nh = CONNECTED_NH_BASE_V6 + ifindex;
-                dp.nexthop_set_v6(nh, None, ifindex, &[], 0)?;
+                dp.nexthop_set_v6(nh, None, ifindex, &[], 0, false)?;
                 dp.route6_add(vrf, net, plen, nh, 0)?;
                 derived.v6.push((vrf, net, plen));
                 derived.nh6 = Some(nh);

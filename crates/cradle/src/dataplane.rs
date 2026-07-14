@@ -23,8 +23,8 @@ use cradle_common::{
     EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_ECMP,
     FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM,
     LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey,
-    MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
-    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY,
+    MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6,
+    NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY,
     POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_SRV6,
     REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
     SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo,
@@ -1614,9 +1614,10 @@ impl Dataplane {
         oif: u32,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> Result<()> {
         let gateway_v4 = gateway.map(|a| u32::from_be_bytes(a.octets())).unwrap_or(0);
-        let (labels, num_labels, flags) = pack_labels(labels)?;
+        let (labels, num_labels, flags) = pack_labels(labels, pipe)?;
         let nh = NextHop {
             gateway_v4,
             gateway_v6: [0; 16],
@@ -1778,8 +1779,9 @@ impl Dataplane {
         oif: u32,
         labels: &[u32],
         backup_id: u32,
+        pipe: bool,
     ) -> Result<()> {
-        let (labels, num_labels, label_flags) = pack_labels(labels)?;
+        let (labels, num_labels, label_flags) = pack_labels(labels, pipe)?;
         let nh = NextHop {
             gateway_v4: 0,
             gateway_v6: gateway.map(|a| a.octets()).unwrap_or([0; 16]),
@@ -2135,7 +2137,14 @@ impl Dataplane {
 
     /// Install/replace an incoming-label map (ILM) entry: frames arriving with
     /// top label `in_label` get `op` applied via `nexthop_id`.
-    pub fn ilm_add(&mut self, in_label: u32, nexthop_id: u32, op: u8, vrf_id: u32) -> Result<()> {
+    pub fn ilm_add(
+        &mut self,
+        in_label: u32,
+        nexthop_id: u32,
+        op: u8,
+        vrf_id: u32,
+        flags: u8,
+    ) -> Result<()> {
         if in_label >= 1 << 20 {
             anyhow::bail!("MPLS label {in_label} exceeds 20 bits");
         }
@@ -2145,7 +2154,8 @@ impl Dataplane {
                 nexthop_id,
                 vrf_id,
                 op,
-                _pad: [0; 3],
+                flags,
+                _pad: [0; 2],
             },
             0,
         )?;
@@ -2160,8 +2170,10 @@ impl Dataplane {
 }
 
 /// Validate and pack an out-label stack into the fixed `NextHop` fields:
-/// `(labels array, num_labels, NH_F_MPLS-or-0)`.
-fn pack_labels(labels: &[u32]) -> Result<([u32; MAX_LABELS], u8, u32)> {
+/// `(labels array, num_labels, NH_F_MPLS[|NH_F_MPLS_PIPE]-or-0)`. `pipe`
+/// selects the RFC 3443 pipe TTL model at imposition (only meaningful with a
+/// non-empty stack).
+fn pack_labels(labels: &[u32], pipe: bool) -> Result<([u32; MAX_LABELS], u8, u32)> {
     if labels.len() > MAX_LABELS {
         anyhow::bail!("label stack too deep: {} > {}", labels.len(), MAX_LABELS);
     }
@@ -2172,6 +2184,12 @@ fn pack_labels(labels: &[u32]) -> Result<([u32; MAX_LABELS], u8, u32)> {
     }
     let mut arr = [0u32; MAX_LABELS];
     arr[..labels.len()].copy_from_slice(labels);
-    let flags = if labels.is_empty() { 0 } else { NH_F_MPLS };
+    let flags = if labels.is_empty() {
+        0
+    } else if pipe {
+        NH_F_MPLS | NH_F_MPLS_PIPE
+    } else {
+        NH_F_MPLS
+    };
     Ok((arr, labels.len() as u8, flags))
 }

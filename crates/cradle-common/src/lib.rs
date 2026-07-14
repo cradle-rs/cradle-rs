@@ -141,6 +141,15 @@ pub const NH_F_GTP: u32 = 1 << 4;
 /// with an L3VNI + RMAC rewrite (`VXLAN_ENCAP[nexthop_id]`) — EVPN symmetric
 /// IRB (RFC 9135).
 pub const NH_F_VXLAN: u32 = 1 << 5;
+/// MPLS imposition uses the **pipe** TTL model (RFC 3443): seed the outer
+/// label TTL with a fixed `255` instead of copying the inner IP TTL, hiding
+/// the LSP hop count from the payload. Absent (default) = the outer label TTL
+/// is seeded from the inner IP TTL (uniform-style imposition). See
+/// [`docs/design/mpls-ttl-propagation.md`]. Only meaningful with `NH_F_MPLS`.
+pub const NH_F_MPLS_PIPE: u32 = 1 << 6;
+
+/// Outer label TTL seed for pipe-model imposition (RFC 3443).
+pub const MPLS_PIPE_TTL: u8 = 255;
 
 /// Maximum out-label stack depth (bounds the datapath's parse/push loops for
 /// the verifier). Covers SR-MPLS depths seen in practice; deeper is rejected
@@ -236,7 +245,9 @@ pub struct MplsEntry {
     pub vrf_id: u32,
     /// `MPLS_OP_*`.
     pub op: u8,
-    pub _pad: [u8; 3],
+    /// `MPLS_E_*` disposition flags.
+    pub flags: u8,
+    pub _pad: [u8; 2],
 }
 
 /// Pop the incoming label, impose the nexthop's out-label stack, stay MPLS.
@@ -245,6 +256,13 @@ pub const MPLS_OP_SWAP: u8 = 0;
 pub const MPLS_OP_POP_L3: u8 = 1;
 /// Pop one label, forward the remaining (still labeled) stack.
 pub const MPLS_OP_POP: u8 = 2;
+
+/// Disposition uses the **uniform** TTL model (RFC 3443): when this ILM pops
+/// the last label to expose IP, copy the popped label's TTL into the inner IP
+/// header (recomputing the IPv4 checksum) so the LSP hop count is reflected
+/// end to end. Absent (default) = **pipe**: the label TTL is discarded and the
+/// inner IP TTL is preserved. See [`docs/design/mpls-ttl-propagation.md`].
+pub const MPLS_E_TTL_UNIFORM: u8 = 1 << 0;
 
 // ============================== SRv6 =======================================
 

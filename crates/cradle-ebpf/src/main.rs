@@ -45,28 +45,29 @@ use cradle_common::{
     FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
     FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
     FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT,
-    LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP,
-    MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
-    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED,
-    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2,
-    PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
-    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
-    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
-    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
-    STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
-    STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
-    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
-    STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
-    STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey,
-    ServiceKey6, Srv6Encap, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
-    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL,
-    fibw_unpack, mpls_lse, mpls_lse_unpack,
+    LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS, MPLS_E_TTL_UNIFORM, MPLS_OP_POP,
+    MPLS_OP_POP_L3, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP,
+    NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry,
+    NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, PolicyKey,
+    PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_VXLAN, ReplBranch, ReplSeg, ReplTarget, SRV6_BH_END,
+    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6,
+    SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
+    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT,
+    SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT,
+    STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP,
+    STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
+    STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
+    STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT,
+    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
+    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE,
+    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP,
+    STAT_VXLAN_FLOOD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L3,
+    VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX,
+    XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, fibw_unpack, mpls_lse,
+    mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -2118,6 +2119,14 @@ fn mpls_push(ctx: &TcContext, nh: &NextHop, ttl: u8) -> Result<i32, ()> {
     if n == 0 || n > MAX_LABELS {
         return Ok(TC_ACT_PIPE as i32);
     }
+    // TTL model (RFC 3443). Pipe: seed the outer label TTL with a fixed 255 so
+    // the LSP hop count stays hidden from the payload. Uniform (default): seed
+    // from the inner IP TTL, exposing the LSP hops end to end.
+    let seed_ttl = if nh.flags & NH_F_MPLS_PIPE != 0 {
+        MPLS_PIPE_TTL
+    } else {
+        ttl
+    };
     ctx.skb
         .adjust_room((4 * n) as i32, BPF_ADJ_ROOM_MAC, 0)
         .map_err(|_| ())?;
@@ -2127,7 +2136,7 @@ fn mpls_push(ctx: &TcContext, nh: &NextHop, ttl: u8) -> Result<i32, ()> {
             break;
         }
         let s = if i == n - 1 { 1 } else { 0 };
-        let lse = mpls_lse(nh.labels[i], 0, s, ttl).to_be();
+        let lse = mpls_lse(nh.labels[i], 0, s, seed_ttl).to_be();
         ctx.store(MPLS_LSE_OFF + 4 * i, &lse, 0).map_err(|_| ())?;
     }
     let ethertype = ETH_P_MPLS_UC.to_be();
@@ -3080,21 +3089,24 @@ fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             None => return Ok(xdp_action::XDP_PASS),
         };
 
+        // Uniform TTL disposition (RFC 3443) is a per-ILM property; `ttl` is
+        // the popped label's TTL (>= 2 here, past the `ttl <= 1` guard).
+        let uniform = ent.flags & MPLS_E_TTL_UNIFORM != 0;
         match ent.op {
             // Explicit decap (gRPC / zebra DecapVrf): pop to IP and route
             // locally — in the entry's VRF when set — whatever the nexthop.
-            MPLS_OP_POP_L3 if s == 1 => return pop_decap_local(ctx, ent.vrf_id),
+            MPLS_OP_POP_L3 if s == 1 => return pop_decap_local(ctx, ent.vrf_id, ttl, uniform),
             // PHP shapes — a pop with a *real* nexthop means "pop and
             // forward the remaining stack there". The labels underneath
             // belong to the next hop (label spaces are per-node): they must
             // never be looked up here.
             MPLS_OP_SWAP | MPLS_OP_POP if nh.num_labels == 0 && nh.oif != 0 => {
-                return pop_and_forward(ctx, &nh, s);
+                return pop_and_forward(ctx, &nh, s, ttl, uniform);
             }
             // Nexthop-less pops: this node owns whatever is underneath.
             MPLS_OP_SWAP | MPLS_OP_POP if nh.num_labels == 0 => {
                 if s == 1 {
-                    return pop_decap_local(ctx, ent.vrf_id);
+                    return pop_decap_local(ctx, ent.vrf_id, ttl, uniform);
                 }
                 pop_head(ctx, ETH_P_MPLS_UC)?; // and loop: the next label is ours
             }
@@ -3161,7 +3173,7 @@ fn xdp_meta_ptr(ctx: &XdpContext) -> Result<*mut CradleXdpMeta, ()> {
 /// stage reads — failure to attach drops rather than mis-routing a VPN
 /// packet in the global table.
 #[inline(always)]
-fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
+fn pop_decap_local(ctx: &XdpContext, vrf_id: u32, ttl: u8, uniform: bool) -> Result<u32, ()> {
     let et = match popped_ethertype(ctx) {
         Ok(et) => et,
         Err(()) => {
@@ -3170,6 +3182,12 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
         }
     };
     pop_head(ctx, et)?;
+    // Uniform disposition (RFC 3443): expose the LSP hop count by copying the
+    // popped label's TTL into the IP header. The TC FIB stage applies the
+    // onward-hop decrement, so no `-1` here. Pipe (default) leaves it untouched.
+    if uniform {
+        mpls_uniform_to_ip(ctx, et, ttl)?;
+    }
     if vrf_id != 0 {
         if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
             != 0
@@ -4247,11 +4265,54 @@ fn decap_head(ctx: &XdpContext, strip: usize, new_ethertype: u16) -> Result<(), 
     Ok(())
 }
 
-/// PHP: pop one label and forward the remaining frame — still-MPLS or the
-/// exposed IP — via the ILM's nexthop. Pipe-model TTL: nothing inner is
-/// touched.
+/// RFC 1624 incremental one's-complement checksum update: given the current
+/// header checksum `hc` and a 16-bit word changing from `old` to `new` (all in
+/// host order), return the adjusted checksum. `HC' = ~(~HC + ~old + new)`.
 #[inline(always)]
-fn pop_and_forward(ctx: &XdpContext, nh: &NextHop, s: u8) -> Result<u32, ()> {
+fn csum16_update(hc: u16, old: u16, new: u16) -> u16 {
+    let mut sum: u32 = (!hc as u32) + (!old as u32 & 0xffff) + (new as u32);
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum = (sum & 0xffff) + (sum >> 16);
+    !(sum as u16)
+}
+
+/// Uniform-model disposition (RFC 3443): write `ttl` into the IP header a pop
+/// just exposed. `et` selects the family — IPv4 gets an incremental header
+/// checksum fixup, IPv6 only the hop-limit byte; anything else (still MPLS)
+/// no-ops. Must be called *after* `pop_head`, so offsets are relative to the
+/// shifted frame.
+#[inline(always)]
+fn mpls_uniform_to_ip(ctx: &XdpContext, et: u16, ttl: u8) -> Result<(), ()> {
+    if et == ETH_P_IP {
+        // The 16-bit word at IP_TTL_OFF is [TTL, protocol] in network order.
+        let old_word = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, IP_TTL_OFF)? });
+        let new_word = (old_word & 0x00ff) | ((ttl as u16) << 8);
+        if new_word == old_word {
+            return Ok(());
+        }
+        let hc = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, IP_CSUM_OFF)? });
+        let new_hc = csum16_update(hc, old_word, new_word);
+        unsafe { *xdp_ptr::<u16>(ctx, IP_TTL_OFF)? = new_word.to_be() };
+        unsafe { *xdp_ptr::<u16>(ctx, IP_CSUM_OFF)? = new_hc.to_be() };
+    } else if et == ETH_P_IPV6 {
+        unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = ttl };
+    }
+    Ok(())
+}
+
+/// PHP: pop one label and forward the remaining frame — still-MPLS or the
+/// exposed IP — via the ILM's nexthop. Pipe-model TTL (default): nothing inner
+/// is touched. Uniform: when the pop exposes IP, the popped label's TTL is
+/// copied into the IP header, less one for this node's forward (this path
+/// redirects directly, so it stands in for the IP FIB decrement).
+#[inline(always)]
+fn pop_and_forward(
+    ctx: &XdpContext,
+    nh: &NextHop,
+    s: u8,
+    ttl: u8,
+    uniform: bool,
+) -> Result<u32, ()> {
     // Resolve egress L2 first: a miss punts with the frame untouched.
     let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
         return Ok(xdp_action::XDP_PASS);
@@ -4268,6 +4329,12 @@ fn pop_and_forward(ctx: &XdpContext, nh: &NextHop, s: u8) -> Result<u32, ()> {
         }
     };
     pop_head(ctx, et)?;
+    // Uniform disposition (RFC 3443) only when the pop exposed IP (s == 1); the
+    // helper no-ops for a still-labeled frame. `ttl` is >= 2 (the caller's
+    // `ttl <= 1` guard), so `ttl - 1` stays >= 1.
+    if uniform && s == 1 {
+        mpls_uniform_to_ip(ctx, et, ttl - 1)?;
+    }
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
     unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
