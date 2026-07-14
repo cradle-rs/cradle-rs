@@ -12,11 +12,18 @@ override are all in tree; the datapath is exercised by the `cradle_mpls_ttl`
 BDD (pipe imposition seeds label TTL 255; uniform disposition writes the
 popped label TTL back into the inner IP with an IPv4 checksum fixup). Pipe is
 the default, so nothing changes for existing configs until the knob is set.
-**Still to do:** the IOS-style forwarded/local split (`propagate-local`) — the
-datapath has no local-origin distinction yet, so that leaf was deliberately
-not modeled. The "baseline behavior" section is retained as the pre-work
-starting point. Tracked as the `TTL propagation (pipe/uniform)` 🔶 row in the
-MPLS support table ([`mpls.md`](mpls.md)).
+The IOS-style forwarded/local split (`propagate-local`) is **now shipped**,
+but *not* as a cradle datapath change: cradle's imposition path (`cradle_tc`
+→ `mpls_push`) only ever runs on forwarded/transit traffic from the wire —
+locally-originated packets never traverse it and are imposed by the host
+kernel's own MPLS stack (the lwtunnel encap routes zebra installs). So the
+forwarded half already lives in cradle (the per-nexthop pipe flag) and the
+local half belongs in the kernel: zebra-rs adds `mpls ttl propagate-local
+{pipe|uniform}`, which drives the global `net.mpls.ip_ttl_propagate` sysctl
+(covered by the `mpls_ttl_propagate_local` zebra-rs BDD). The "baseline
+behavior" section is retained as the pre-work starting point. Tracked as the
+`TTL propagation (pipe/uniform)` row in the MPLS support table
+([`mpls.md`](mpls.md)).
 
 ### What shipped
 
@@ -114,9 +121,16 @@ set mpls ttl propagate {pipe | uniform}
 ```
 
 `propagate-local` (the IOS forwarded/local split, `mpls ip propagate-ttl
-[forwarded | local]`) was **not** shipped: the cradle datapath has no
-local-origin distinction at imposition, so the leaf would be a silent no-op.
-It is left as a follow-up gated on a datapath change.
+[forwarded | local]`) **shipped** as a sibling leaf `mpls ttl propagate-local
+{pipe|uniform}` — but in the *kernel*, not the cradle datapath. The
+investigation that unblocked it: cradle's imposition (`cradle_tc` →
+`mpls_push`) only ever runs on forwarded/transit traffic; a locally-originated
+packet never reaches it (it is imposed by the host kernel's lwtunnel MPLS
+encap route). So a "local" flag on the cradle nexthop would never fire. The
+leaf instead drives the global `net.mpls.ip_ttl_propagate` sysctl (uniform →
+1, pipe → 0), governing the kernel's own imposition of the router's traffic.
+Global only — the kernel knob has no per-VRF form. The `propagate` leaf
+(forwarded) stays teed to cradle; the two together give the RFC 3443 split.
 
 ### Per-VRF override (shipped)
 
@@ -227,8 +241,10 @@ follow-up.
 2. **Per-VRF override in the first slice?** → no; global-only shipped first,
    then the per-VRF override followed (zebra-rs `mpls-ttl-per-vrf`), applied
    at both LSP ends.
-3. **`propagate-local` (forwarded/local split)?** → not shipped; the datapath
-   has no local-origin distinction, so the leaf would be a no-op.
+3. **`propagate-local` (forwarded/local split)?** → shipped, kernel-side. The
+   cradle datapath imposes only forwarded traffic (local-origin is the host
+   kernel's lwtunnel imposition), so `mpls ttl propagate-local {pipe|uniform}`
+   drives `net.mpls.ip_ttl_propagate` rather than a cradle nexthop flag.
 
 Still open: **ICMP-tunneling** (RFC 3032 §3.4) — under pipe a P-router
 TTL-exceeded has no route back to hidden customer space, so operator
