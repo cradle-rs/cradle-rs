@@ -1,0 +1,37 @@
+# Headend PE (iBGP AS 65000), teeing its FIB into cradle. Consumes the SR
+# Policy (route-target == our router-id 10.0.0.1), so it owns the Binding SID
+# ILM (16100 -> {16002}); with `steering-mode binding-sid` a colored service
+# route is steered by pushing only the BSID label. The COLOR100 route-map is
+# attached inbound from startup, so 10.99.0.0/24 arrives already coloured. The
+# service route can arrive before its SAFI-73 policy — when the Binding SID
+# then activates, the headend re-installs the colour-matched winner so it
+# steers onto the fresh BSID (SR-policy BSID-activation resync).
+system:
+  cradle:
+    enabled: true
+policy:
+- name: COLOR100
+  entry:
+  - number: 10
+    action: permit
+    set:
+      color: 100
+interface:
+- {if-name: bc, ipv4: {address: 192.168.12.1/24}}
+router:
+  bgp:
+    global: {as: 65000, router-id: 10.0.0.1}
+    timer: {adv-interval: {ibgp: 1, ebgp: 1}}
+    sr-policy:
+      steering-mode: binding-sid
+    neighbor:
+    - remote-address: 192.168.12.2
+      remote-as: 65000
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        policy:
+          in: COLOR100
+      - {name: sr-policy-v4, enabled: true}

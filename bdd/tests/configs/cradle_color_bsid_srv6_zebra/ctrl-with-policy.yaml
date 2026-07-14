@@ -1,0 +1,40 @@
+# Runtime superset of ctrl.yaml, applied once the service route is installed
+# plain at the headend. Adds the SR Policy DETOUR <color 100, endpoint
+# 2001:db8:9::2> with SRv6 Binding SID fd00:b::b6 and the one-SID segment
+# list {fd00:e::e1}, route-target 10.0.0.1 (== headend h's router-id, so h
+# consumes it, RFC 9830 §4.2). The endpoint matches the service route's BGP
+# next-hop, so the colored route steers onto this policy (RFC 9256 §8.5).
+# `vtyctl apply -f` is a declarative whole-config replace, so this restates
+# ctrl.yaml in full and just adds the `sr-policy` block.
+interface:
+- {if-name: cb, ipv6: {address: 2001:db8:9::2/64}}
+router:
+  static:
+    ipv6:
+      route:
+      - {prefix: fc00:99::/64, nexthop: [{address: blackhole}]}
+  bgp:
+    global: {as: 65000, router-id: 10.0.0.9}
+    timer: {adv-interval: {ibgp: 1, ebgp: 1}}
+    sr-policy:
+      policy:
+      - name: DETOUR
+        color: 100
+        endpoint: 2001:db8:9::2
+        binding-sid-sid: fd00:b::b6
+        route-target: 10.0.0.1
+        segment:
+        - {index: 1, srv6-sid: fd00:e::e1}
+    neighbor:
+    - remote-address: 2001:db8:9::1
+      remote-as: 65000
+      update-source: 2001:db8:9::2
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - {name: ipv6, enabled: true}
+      - {name: sr-policy-v6, enabled: true}
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        static: {}
