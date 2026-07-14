@@ -175,6 +175,13 @@ struct ServeArgs {
     /// the JSON config's `fib4_mode` applies when this flag is not given.
     #[arg(long, value_enum)]
     fib4_mode: Option<Fib4Mode>,
+    /// Single-hook benchmark mode: `tc-only` (attach only cradle_tc, L3-only
+    /// fast path) or `xdp-only` (attach only cradle_xdp, forward in XDP).
+    /// Restricts the datapath to plain IPv4 L3 forwarding and defaults the FIB
+    /// engine to dir24. Load-time only; for performance root-causing
+    /// (`xdp-tc-fast-path.md`), not production.
+    #[arg(long, value_enum)]
+    ebpf_mode: Option<EbpfMode>,
 }
 
 /// IPv4 FIB engine selector (`docs/design/large-fib.md`).
@@ -182,6 +189,18 @@ struct ServeArgs {
 pub(crate) enum Fib4Mode {
     Lpm,
     Dir24,
+}
+
+/// Single-hook benchmark mode (`--ebpf-mode`, `xdp-tc-fast-path.md`). Restricts
+/// the datapath to plain IPv4 L3 forwarding through ONE eBPF hook so each
+/// hook's cost can be measured in isolation. `tc-only` attaches only
+/// `cradle_tc` (which then runs an L3-only fast path); `xdp-only` attaches only
+/// `cradle_xdp` (which forwards in XDP). Also defaults the FIB engine to dir24.
+/// A performance-investigation knob — non-L3 features are unsupported while set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum EbpfMode {
+    TcOnly,
+    XdpOnly,
 }
 
 #[derive(Debug, Parser)]
@@ -401,8 +420,12 @@ async fn serve(args: ServeArgs) -> Result<()> {
     ) {
         (Some(m), _) => m, // explicit flag wins
         (None, Some("dir24")) => Fib4Mode::Dir24,
-        (None, Some("lpm")) | (None, None) => Fib4Mode::Lpm,
+        (None, Some("lpm")) => Fib4Mode::Lpm,
         (None, Some(other)) => anyhow::bail!("bad fib4_mode {other:?} (want lpm|dir24)"),
+        // A single-hook benchmark mode defaults to dir24 (fixed-latency
+        // fast lookup); plain deployments stay on lpm (dir24 sizes ~68 MiB).
+        (None, None) if args.ebpf_mode.is_some() => Fib4Mode::Dir24,
+        (None, None) => Fib4Mode::Lpm,
     };
 
     let mut loader = aya::EbpfLoader::new();
@@ -436,13 +459,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
         prog.load().context("loading cradle_egress")?;
     }
     {
-        // XDP stage — XDP, because a TC program cannot shrink an MPLS
-        // frame (bpf_skb_adjust_room is IP-only). Attached per L3 port.
+        // XDP stage — XDP, because a TC program cannot shrink an MPLS frame
+        // (bpf_skb_adjust_room is IP-only). Attached per L3 port. `--ebpf-mode
+        // xdp-only` swaps in the dedicated plain-IPv4 forwarder `cradle_xdp_l3`.
+        let xdp_prog = if args.ebpf_mode == Some(EbpfMode::XdpOnly) {
+            "cradle_xdp_l3"
+        } else {
+            "cradle_xdp"
+        };
         let prog: &mut aya::programs::Xdp = bpf
-            .program_mut("cradle_xdp")
-            .context("program cradle_xdp not found")?
+            .program_mut(xdp_prog)
+            .with_context(|| format!("program {xdp_prog} not found"))?
             .try_into()?;
-        prog.load().context("loading cradle_xdp")?;
+        prog.load().with_context(|| format!("loading {xdp_prog}"))?;
     }
 
     let mut dp = Dataplane::from_ebpf(&mut bpf)?;
@@ -450,6 +479,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
     if fib4_mode == Fib4Mode::Dir24 {
         dp.set_fib4_mode_dir24()?;
         info!("IPv4 FIB engine: dir24 (DIR-24-8 direct index)");
+    }
+    // Single-hook benchmark mode. tc-only needs the `DPC_L3_ONLY` datapath bit
+    // so cradle_tc takes its L3-only fast path; xdp-only needs no bit — it
+    // attaches the dedicated `cradle_xdp_l3` program in place of `cradle_xdp`.
+    if let Some(mode) = args.ebpf_mode {
+        if mode == EbpfMode::TcOnly {
+            dp.add_dp_config(cradle_common::DPC_L3_ONLY)?;
+        }
+        info!("eBPF single-hook mode: {mode:?} (plain IPv4 L3 forwarding only)");
     }
     // Take the Hubble flow ring buffer out of the object before `Control`
     // consumes `bpf` (only when the Observer API is enabled).
@@ -459,7 +497,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         None
     };
 
-    let control = Control::new(bpf, dp, args.state_dir.clone());
+    let control = Control::new(bpf, dp, args.state_dir.clone(), args.ebpf_mode);
 
     if let Some(cfg) = &cfg {
         cfg.apply_control(&control).await?;
