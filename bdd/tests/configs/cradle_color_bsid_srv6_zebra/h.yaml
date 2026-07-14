@@ -1,0 +1,39 @@
+# Headend PE (iBGP AS 65000), teeing its FIB into cradle. Consumes the SR
+# Policy (route-target == our router-id 10.0.0.1), so it owns the SRv6
+# Binding SID End.B6.Encaps local SID fd00:b::b6; with `steering-mode
+# binding-sid` a colored service route is steered by H.Encap toward the
+# BSID (which then pushes the policy segment list). The COLOR100 route-map
+# is attached inbound from startup, so fc00:99::/64 arrives already
+# coloured. The service route can arrive before its SAFI-73 policy — when
+# the Binding SID then activates, the headend re-installs the colour-matched
+# winner so it steers onto the fresh BSID (SRv6 BSID-activation resync).
+system:
+  cradle:
+    enabled: true
+policy:
+- name: COLOR100
+  entry:
+  - number: 10
+    action: permit
+    set:
+      color: 100
+interface:
+- {if-name: bc, ipv6: {address: 2001:db8:9::1/64}}
+router:
+  bgp:
+    global: {as: 65000, router-id: 10.0.0.1}
+    timer: {adv-interval: {ibgp: 1, ebgp: 1}}
+    sr-policy:
+      steering-mode: binding-sid
+    neighbor:
+    - remote-address: 2001:db8:9::2
+      remote-as: 65000
+      update-source: 2001:db8:9::1
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        policy:
+          in: COLOR100
+      - {name: sr-policy-v6, enabled: true}

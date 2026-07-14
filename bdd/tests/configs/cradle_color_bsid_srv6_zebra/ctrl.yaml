@@ -1,0 +1,28 @@
+# Controller + service-route origin (iBGP AS 65000). At startup it
+# originates ONLY the IPv6 service route fc00:99::/64 — no SR Policy yet, so
+# the colored route installs plain at the headend. The SR Policy DETOUR is
+# added at runtime via `ctrl-with-policy.yaml`, forcing the route-before-
+# policy ordering that the SRv6 BSID-activation resync must handle.
+interface:
+- {if-name: cb, ipv6: {address: 2001:db8:9::2/64}}
+router:
+  static:
+    ipv6:
+      route:
+      - {prefix: fc00:99::/64, nexthop: [{address: blackhole}]}
+  bgp:
+    global: {as: 65000, router-id: 10.0.0.9}
+    timer: {adv-interval: {ibgp: 1, ebgp: 1}}
+    neighbor:
+    - remote-address: 2001:db8:9::1
+      remote-as: 65000
+      update-source: 2001:db8:9::2
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - {name: ipv6, enabled: true}
+      - {name: sr-policy-v6, enabled: true}
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        static: {}
