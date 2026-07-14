@@ -1,0 +1,21 @@
+{
+  "ports": [
+    { "name": "lsr2a", "l3": true },
+    { "name": "lsr2b", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "lsr2b", "gateway": "10.0.2.2", "labels": [17] },
+    { "id": 2, "oif": "lsr2b", "gateway": "10.0.2.2", "labels": [47] },
+    { "id": 3, "oif": "lsr2a", "gateway": "10.0.1.1" }
+  ],
+  "neighbors": [
+    { "oif": "lsr2b", "ip": "10.0.2.2", "mac": "02:00:00:00:03:0a" }
+  ],
+  "ilm": [
+    { "in_label": 16, "nexthop": 1, "action": "swap" },
+    { "in_label": 46, "nexthop": 2, "action": "swap" }
+  ],
+  "routes": [
+    { "prefix": "10.0.0.0/24", "nexthop": 3 }
+  ]
+}

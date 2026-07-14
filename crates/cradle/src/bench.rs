@@ -153,7 +153,7 @@ fn run_mode(dir24: bool, n_routes: u64, seed: u64, repeat: u32) -> Result<()> {
     // ingress_ifindex 0 = the test-run default; nexthop oif 1 (lo) — the
     // redirect target never actually transmits under test_run.
     dp.port_set(0, [2, 0, 0, 0, 0, 2], PORT_F_L3, 0, 0)?;
-    dp.nexthop_set(1, Some(Ipv4Addr::new(198, 51, 100, 1)), 1, &[], 0)?;
+    dp.nexthop_set(1, Some(Ipv4Addr::new(198, 51, 100, 1)), 1, &[], 0, false)?;
     dp.route4_add(0, Ipv4Addr::UNSPECIFIED, 0, 1, 0)?; // default route
 
     let prefixes = util::gen_dfz_prefixes(n_routes, seed);

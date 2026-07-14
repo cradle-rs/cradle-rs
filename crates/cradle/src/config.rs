@@ -314,6 +314,11 @@ pub struct Nexthop {
     pub vxlan_l3vni: u32,
     #[serde(default)]
     pub vxlan_rmac: Option<String>,
+    /// MPLS TTL model at imposition (RFC 3443). `false` (default) = uniform
+    /// (seed the label TTL from the inner IP TTL); `true` = pipe (seed 255,
+    /// hiding the LSP hop count). Only meaningful with a non-empty `labels`.
+    #[serde(default)]
+    pub mpls_pipe: bool,
 }
 
 /// A GTP-U decap PDR (`H.M.GTP4.D`).
@@ -336,6 +341,11 @@ pub struct Ilm {
     pub action: String,
     #[serde(default)]
     pub vrf: u32,
+    /// MPLS TTL model at disposition (RFC 3443). `false` (default) = pipe
+    /// (discard the label TTL, preserve the inner IP TTL); `true` = uniform
+    /// (copy the popped label TTL into the inner IP header on pop-to-IP).
+    #[serde(default)]
+    pub ttl_uniform: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,14 +661,14 @@ impl Config {
                     Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                     None => None,
                 };
-                ctl.set_nexthop_idx_v6(nh.id, gw, oif, &nh.labels, nh.backup)
+                ctl.set_nexthop_idx_v6(nh.id, gw, oif, &nh.labels, nh.backup, nh.mpls_pipe)
                     .await?;
             } else {
                 let gw = match &nh.gateway {
                     Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
                     None => None,
                 };
-                ctl.set_nexthop_idx(nh.id, gw, oif, &nh.labels, nh.backup)
+                ctl.set_nexthop_idx(nh.id, gw, oif, &nh.labels, nh.backup, nh.mpls_pipe)
                     .await?;
             }
         }
@@ -784,7 +794,12 @@ impl Config {
         }
         for i in &self.ilm {
             let op = ilm_action(&i.action)?;
-            ctl.add_ilm(i.in_label, i.nexthop, op, i.vrf).await?;
+            let flags = if i.ttl_uniform {
+                cradle_common::MPLS_E_TTL_UNIFORM
+            } else {
+                0
+            };
+            ctl.add_ilm(i.in_label, i.nexthop, op, i.vrf, flags).await?;
         }
         // Bulk-install: the bootstrap config is an initial load, so all
         // routes go down in one plan (one block sync per affected /24).

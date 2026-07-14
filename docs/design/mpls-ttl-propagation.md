@@ -4,12 +4,28 @@
 > `uniform` (LSP hops visible end to end) vs `pipe` (LSP core hidden) —
 > driven by a zebra-rs YANG leaf and teed to the eBPF push/pop paths.
 
-Status: **Design / proposed — not implemented.** The datapath hardwires the
-pipe model today (see below). This note captures the schema, defaults, and
-tee shape so an implementation can follow the existing SRv6-flavor /
-locator-behavior pattern (a control-plane leaf → codepoint/flag → tee →
-eBPF gate). Tracked as the `TTL propagation (pipe/uniform)` ⬜ row in the
-MPLS support table ([`mpls.md`](mpls.md)).
+Status: **Datapath + static control implemented (BDD-proven); zebra-rs YANG
+producer pending.** The eBPF gates, the two flags, and the static gRPC/JSON
+config path are in tree and exercised by the `cradle_mpls_ttl` BDD (pipe
+imposition seeds label TTL 255; uniform disposition writes the popped label
+TTL back into the inner IP with an IPv4 checksum fixup). Pipe stays the
+per-LSP default, so nothing changes for existing configs. **Still to do:** the
+zebra-rs YANG leaf below (the production CLI surface) and the per-VRF
+override. The "current behavior" section is retained as the *baseline* the
+work started from. Tracked as the `TTL propagation (pipe/uniform)` 🔶 row in
+the MPLS support table ([`mpls.md`](mpls.md)).
+
+### What shipped
+
+- `cradle-common`: `NH_F_MPLS_PIPE` (imposition), `MplsEntry.flags` +
+  `MPLS_E_TTL_UNIFORM` (disposition), `MPLS_PIPE_TTL` (255).
+- `cradle-ebpf`: `mpls_push` seeds 255 under pipe; `pop_decap_local` /
+  `pop_and_forward` copy the popped label TTL into the exposed IPv4/IPv6 header
+  under uniform (`mpls_uniform_to_ip` + `csum16_update`, RFC 1624). PHP writes
+  `ttl-1` since it redirects directly; the pop-to-local path writes `ttl` and
+  lets the TC FIB apply the onward-hop decrement.
+- `cradle` control: `mpls_pipe_ttl` on `Nexthop`, `ttl_uniform` on `Ilm`
+  (proto + JSON config), threaded through `nexthop_set*` / `ilm_add`.
 
 ## Goal and scope
 
@@ -31,10 +47,12 @@ Scope of this note: the **TTL** knob only. The companion class (TC/EXP)
 model and ICMP-tunneling are noted under [Companions](#companion-features)
 but are out of scope for the first slice.
 
-## Current behavior (hardwired pipe)
+## Baseline behavior (the pre-work starting point)
 
-cradle is pipe on disposition and uniform-*style* on imposition — i.e. it
-seeds the label TTL from the inner but never writes it back:
+Before this work cradle was pipe on disposition and uniform-*style* on
+imposition — i.e. it seeded the label TTL from the inner but never wrote it
+back. This is now the behavior when neither flag is set (pipe disposition +
+uniform-style imposition seed), preserved for backward compatibility:
 
 - **Imposition (ingress LER).** `l3_forward_*` pushes a labeled nexthop via
   `mpls_push(ctx, &nh, ttl)` where `ttl` is the inner IP TTL
