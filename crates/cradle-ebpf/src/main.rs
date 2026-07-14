@@ -376,10 +376,9 @@ const L4_OFF: usize = EthHdr::LEN + 20;
 /// GTP-U over UDP port (3GPP TS 29.281).
 const GTP_PORT: u16 = 2152;
 /// Bytes a `GTP4.E` encap pushes: outer IPv4(20) + UDP(8) + GTP-U G-PDU(8).
+/// (The decap side handles longer received headers — optional fields and a
+/// PDU Session Container — see `try_gtp_xdp`.)
 const GTP_ENCAP_HDR_LEN: usize = 36;
-/// Offset of the inner packet in a received no-options G-PDU:
-/// eth(14) + IPv4(20) + UDP(8) + GTP-U(8).
-const GTP_INNER_OFF: usize = L4_OFF + 16;
 /// VXLAN over UDP port (RFC 7348).
 const VXLAN_PORT: u16 = 4789;
 /// BFD Echo (RFC 5881 §4) and single-hop control destination ports. Echo is
@@ -3316,12 +3315,19 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32, ttl: u8, uniform: bool) -> Res
     Ok(xdp_action::XDP_PASS)
 }
 
-/// GTP-U tunnel decap (`H.M.GTP4.D`): match a received no-options G-PDU on its
-/// (local outer dst, TEID) in `GTP_PDR`, strip the 36-byte outer IPv4+UDP+GTP-U,
+/// GTP-U tunnel decap (`H.M.GTP4.D`): match a received G-PDU on its
+/// (local outer dst, TEID) in `GTP_PDR`, strip the outer IPv4+UDP+GTP-U,
 /// and hand the inner packet to the TC FIB stage (routed in the PDR's VRF via
 /// `CradleXdpMeta`, exactly like an `End.DT*` decap). A non-matching or non-GTP
 /// v4 packet returns `XDP_PASS` for normal forwarding. Mirrors `try_srv6_xdp`;
-/// the 36-byte strip is below `decap_head`'s IPv6 floor so it is inlined here.
+/// the strip is below `decap_head`'s IPv6 floor so it is inlined here.
+///
+/// Real gNBs do not send the minimal 8-byte G-PDU: the optional
+/// seq/N-PDU/next-ext fields (4 bytes, any of the S/PN/E flags) are common
+/// (free-ran-ue sends S=1), and 3GPP TS 38.415 puts a PDU Session Container
+/// extension header (4 bytes carrying the QFI) on every N3 G-PDU (UERANSIM,
+/// real RAN). QoS-less forwarding ignores the QFI, so both shapes decap;
+/// anything longer (chained or oversized extensions) passes to the kernel.
 #[inline(always)]
 fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // No-options IPv4 only — the L4 / GTP offsets assume IHL == 5.
@@ -3336,12 +3342,37 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     if dport != GTP_PORT {
         return Ok(xdp_action::XDP_PASS);
     }
-    // Plain G-PDU only: no S/PN/E optional fields (flags & 0x07 == 0), type 0xFF.
-    let gflags = unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 8)? };
+    // G-PDU (type 0xFF) only; resolve the GTP header length from the
+    // optional-field flags and the extension chain. Header layout: 8 fixed
+    // bytes; +4 (seq/N-PDU/next-ext) if any of S/PN/E; +4 per extension,
+    // of which only a single PDU Session Container (0x85, length 1 unit,
+    // no further extension) is accepted.
     let mtype = unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 9)? };
-    if gflags & 0x07 != 0 || mtype != 0xFF {
+    if mtype != 0xFF {
         return Ok(xdp_action::XDP_PASS);
     }
+    let gflags = unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 8)? };
+    let gtp_hdr_len: usize = if gflags & 0x07 == 0 {
+        8
+    } else {
+        // next-extension-header type, last of the 4 optional bytes.
+        match unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 19)? } {
+            0 => 12,
+            0x85 => {
+                // PDU Session Container: length (in 4-byte units), 2 info
+                // bytes (QFI — ignored), then the next-extension type.
+                if unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 20)? } != 1
+                    || unsafe { *xdp_ptr::<u8>(ctx, L4_OFF + 23)? } != 0
+                {
+                    return Ok(xdp_action::XDP_PASS);
+                }
+                16
+            }
+            _ => return Ok(xdp_action::XDP_PASS),
+        }
+    };
+    // Outer IPv4(20) + UDP(8) + the actual GTP-U header.
+    let strip = GTP_ENCAP_HDR_LEN - 8 + gtp_hdr_len;
     // PDR lookup keyed by (local tunnel endpoint, TEID) — both on-wire bytes.
     let dst = unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_DST_OFF)? };
     let teid = unsafe { *xdp_ptr::<[u8; 4]>(ctx, L4_OFF + 12)? };
@@ -3350,7 +3381,7 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         None => return Ok(xdp_action::XDP_PASS),
     };
     // Inner ethertype from the decapped packet's IP version nibble.
-    let inner_et = match unsafe { *xdp_ptr::<u8>(ctx, GTP_INNER_OFF)? } >> 4 {
+    let inner_et = match unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + strip)? } >> 4 {
         4 => ETH_P_IP,
         6 => ETH_P_IPV6,
         _ => {
@@ -3358,12 +3389,12 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             return Ok(xdp_action::XDP_DROP);
         }
     };
-    // Strip the 36-byte outer headers: slide the MAC header forward over them
+    // Strip the outer headers: slide the MAC header forward over them
     // and advance `data`, leaving a fresh Ethernet header on the inner packet.
     let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
-    unsafe { *xdp_ptr::<[u8; 12]>(ctx, GTP_ENCAP_HDR_LEN)? = macs };
-    unsafe { *xdp_ptr::<u16>(ctx, GTP_ENCAP_HDR_LEN + ETH_TYPE_OFF)? = inner_et.to_be() };
-    if unsafe { bpf_xdp_adjust_head(ctx.ctx, GTP_ENCAP_HDR_LEN as i32) } != 0 {
+    unsafe { *xdp_ptr::<[u8; 12]>(ctx, strip)? = macs };
+    unsafe { *xdp_ptr::<u16>(ctx, strip + ETH_TYPE_OFF)? = inner_et.to_be() };
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip as i32) } != 0 {
         return Err(());
     }
     stat_inc(STAT_GTP_DECAP);
