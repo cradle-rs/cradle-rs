@@ -1,0 +1,15 @@
+# Router control plane: teeing static routes to an external cradle running in
+# xdp-only mode. `system ebpf mode` surfaces the mode in `show ebpf` (the
+# datapath mode itself is set by cradle's `--ebpf-mode`).
+system:
+  cradle:
+    enabled: true
+  ebpf:
+    mode: xdp-only
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.9.9.0/24
+        nexthop:
+        - address: 10.0.2.1

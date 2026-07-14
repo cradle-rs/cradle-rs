@@ -1127,6 +1127,49 @@ async fn start_cradle_grpc_cfg(world: &mut World, namespace: String, config: Str
     println!("✓ cradle started in {} serving gRPC at {}", scoped, ep);
 }
 
+/// Start cradle in a single-hook benchmark mode (`--ebpf-mode tc-only|xdp-only`)
+/// — the standalone counterpart of what zebra-rs's supervisor passes for
+/// `system ebpf mode`. Used by `cradle_ebpf_mode` to exercise the per-mode
+/// program attach + datapath directly, without the managed-engine path.
+#[when(
+    expr = "I start cradle in namespace {string} with config {string} ebpf-mode {string} serving gRPC as {string}"
+)]
+async fn start_cradle_grpc_cfg_mode(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    mode: String,
+    sock: String,
+) {
+    let scoped = world.ns(&namespace);
+    let pid = world.pid_file(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    let log = format!("logs/{}.cradle.log", scoped);
+    let cmd = format!(
+        "exec {} serve --config {} --grpc {} --ebpf-mode {} --pid-file {} >> {} 2>&1",
+        cradle_bin(),
+        cfg,
+        ep,
+        mode,
+        pid,
+        log
+    );
+    netns::spawn_in_netns_env(
+        &scoped,
+        &[("RUST_LOG", "info,cradle=debug")],
+        "sh",
+        &["-c", &cmd],
+    )
+    .await
+    .expect("Failed to start cradle");
+    await_cradle(&scoped, &pid).await;
+    println!(
+        "✓ cradle started in {} serving gRPC at {} (ebpf-mode {})",
+        scoped, ep, mode
+    );
+}
+
 #[when(expr = "I start cradle in namespace {string} serving gRPC as {string}")]
 async fn start_cradle_grpc(world: &mut World, namespace: String, sock: String) {
     let scoped = world.ns(&namespace);
