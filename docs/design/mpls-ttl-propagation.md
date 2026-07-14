@@ -4,16 +4,18 @@
 > `uniform` (LSP hops visible end to end) vs `pipe` (LSP core hidden) —
 > driven by a zebra-rs YANG leaf and teed to the eBPF push/pop paths.
 
-Status: **Datapath + static control implemented (BDD-proven); zebra-rs YANG
-producer pending.** The eBPF gates, the two flags, and the static gRPC/JSON
-config path are in tree and exercised by the `cradle_mpls_ttl` BDD (pipe
+Status: **Implemented end to end (BDD-proven), datapath + static config +
+zebra-rs producer.** The eBPF gates, the two flags, the static gRPC/JSON
+config path, and the zebra-rs `mpls ttl propagate {pipe|uniform}` YANG leaf
+are all in tree; the datapath is exercised by the `cradle_mpls_ttl` BDD (pipe
 imposition seeds label TTL 255; uniform disposition writes the popped label
-TTL back into the inner IP with an IPv4 checksum fixup). Pipe stays the
-per-LSP default, so nothing changes for existing configs. **Still to do:** the
-zebra-rs YANG leaf below (the production CLI surface) and the per-VRF
-override. The "current behavior" section is retained as the *baseline* the
-work started from. Tracked as the `TTL propagation (pipe/uniform)` 🔶 row in
-the MPLS support table ([`mpls.md`](mpls.md)).
+TTL back into the inner IP with an IPv4 checksum fixup). Pipe is the default,
+so nothing changes for existing configs until the knob is set. **Still to
+do:** a per-VRF override, and the IOS-style forwarded/local split
+(`propagate-local`) — the datapath has no local-origin distinction yet, so
+that leaf was deliberately not modeled. The "baseline behavior" section is
+retained as the pre-work starting point. Tracked as the `TTL propagation
+(pipe/uniform)` 🔶 row in the MPLS support table ([`mpls.md`](mpls.md)).
 
 ### What shipped
 
@@ -26,6 +28,11 @@ the MPLS support table ([`mpls.md`](mpls.md)).
   lets the TC FIB apply the onward-hop decrement.
 - `cradle` control: `mpls_pipe_ttl` on `Nexthop`, `ttl_uniform` on `Ilm`
   (proto + JSON config), threaded through `nexthop_set*` / `ilm_add`.
+- **zebra-rs producer** (`mpls-ttl-propagate`, merged): the global
+  `mpls ttl propagate {pipe|uniform}` YANG leaf → a `TtlModel` on the RIB →
+  `CradleFib` sets `Nexthop.mpls_pipe_ttl` at labeled-nexthop imposition and
+  `Ilm.ttl_uniform` at pop-to-IP disposition. Default `pipe`; see the schema
+  section for the (revised) shape that actually shipped.
 
 ## Goal and scope
 
@@ -72,12 +79,11 @@ So the *defining* end is disposition, and it is pipe. A real knob has to
 gate **both** ends, because uniform needs imposition to seed (already does)
 **and** disposition to write the label TTL back into the inner header.
 
-## Proposed schema (zebra-rs YANG)
+## Schema (as shipped in zebra-rs)
 
 The model lives in zebra-rs (YANG-driven CLI) and reaches cradle over the
-`FibHandle` tee, exactly like locator `flavor` / `behavior` /
-`vrf`. Mirror IOS semantics — operators already know
-`mpls ip propagate-ttl [forwarded | local]`.
+`FibHandle` tee, exactly like locator `flavor` / `behavior` / `vrf`. The
+shipped leaf is a single global enum (top-level `container mpls`):
 
 ```yang
 container mpls {
@@ -85,16 +91,10 @@ container mpls {
     // RFC 3443 label-stack TTL processing model.
     leaf propagate {
       type enumeration {
-        enum uniform;  // copy TTL both directions; LSP hops visible
         enum pipe;     // outer label TTL independent (seed 255); inner preserved; core hidden
+        enum uniform;  // copy TTL both directions; LSP hops visible
       }
-      default uniform;
-    }
-    // Even under pipe, still propagate for packets THIS router originates,
-    // so the local PE's own traceroute traverses the LSP. IOS "local" knob.
-    leaf propagate-local {
-      type boolean;
-      default true;
+      default "pipe";
     }
   }
 }
@@ -103,11 +103,15 @@ container mpls {
 Generated CLI:
 
 ```
-mpls ttl propagate {uniform | pipe}
-mpls ttl propagate-local
+set mpls ttl propagate {pipe | uniform}
 ```
 
-### Per-VRF override
+`propagate-local` (the IOS forwarded/local split, `mpls ip propagate-ttl
+[forwarded | local]`) was **not** shipped: the cradle datapath has no
+local-origin distinction at imposition, so the leaf would be a silent no-op.
+It is left as a follow-up gated on a datapath change.
+
+### Per-VRF override (follow-up, not yet shipped)
 
 The model is enforced at **disposition**, and for L3VPN the egress PE knows
 the VRF from the VPN label at pop-to-VRF. That makes a per-VRF override
@@ -126,25 +130,30 @@ Transit swaps carry no VRF, so they always take the global value.
 
 ## Default and rationale
 
-Recommended global default: **`uniform`**, despite it changing cradle's
-current observable behavior. Reasons:
+Shipped global default: **`pipe`**. During design this was weighed against a
+`uniform` default (the RFC 3443 / vendor least-surprise value), but `pipe`
+won for the implementation:
 
-1. It is the RFC 3443 / vendor least-surprise default; someone who sets the
-   knob expects other-vendor semantics.
-2. It makes plain global-table MPLS transit `traceroute` correct — today
-   cradle hides core hops even for non-VPN traffic, which is non-standard.
-3. The flagship L3VPN case that *wants* hiding is better served by the
-   per-VRF `pipe` override than by inverting the global default.
+1. **No behavior change on upgrade.** cradle's per-entry datapath default is
+   already pipe, and zebra-rs's prior MPLS behavior is pipe-equivalent (the
+   label TTL was discarded at disposition). A `uniform` default would
+   silently alter every existing L3VPN / IS-IS-SR deployment's delivered TTL
+   and traceroute on upgrade — the wrong default for a routing daemon.
+2. **The flagship case wants it.** L3VPN (cradle's main MPLS use) wants the
+   core hidden; pipe is the appropriate default there.
+3. **Uniform is one keystroke away** (`set mpls ttl propagate uniform`) for
+   the global-table transit case that wants hop visibility.
 
-If backward-compat outweighs the above, `pipe` default is defensible — but
-then the divergence from every other stack must be documented. This is the
-one decision to confirm before implementing.
+The cost is a documented divergence from the "vendor least-surprise"
+argument, accepted in exchange for a no-op upgrade. The `README` MPLS row and
+the zebra-rs CHANGELOG both record `pipe` as the default.
 
 ## Datapath / tee design
 
 Because the two enforcement points differ, carry **two flags** rather than a
-hot-path global-map read. zebra-rs resolves the leaf (+ VRF override) and
-stamps them when it builds the tee:
+hot-path global-map read. zebra-rs resolves the global leaf into a `TtlModel`
+on the RIB and stamps the flags when it builds the tee (a per-VRF override
+would refine this later):
 
 - **Imposition → per-nexthop flag.** Add `NH_F_MPLS_PIPE` alongside
   `NH_F_MPLS` (next free bit `1 << 6` in `crates/cradle-common/src/lib.rs`;
@@ -160,8 +169,9 @@ stamps them when it builds the tee:
   addition.
 
 Keeping the state per-entry (not a global settings map) means the eBPF hot
-path reads it from the FIB/ILM entry it already loaded, and the per-VRF
-override falls out for free.
+path reads it from the FIB/ILM entry it already loaded, and a future per-VRF
+override falls out for free (the producer just stamps different per-entry
+values without any datapath change).
 
 ## Companion features (out of scope, noted)
 
@@ -175,25 +185,36 @@ override falls out for free.
   propagate` once the TTL leaf lands, with a `short-pipe` variant where the
   egress PE forwards on the inner class rather than the tunnel class.
 
-## Testing sketch
+## Testing (as shipped)
 
-A `cradle_mpls_ttl` BDD over the existing `cradle_mpls` topology:
+The `cradle_mpls_ttl` BDD runs two single-label LSPs over the `cradle_mpls`
+topology (`cl → ler1 → lsr2 → per3 → srv`), a client packet starting at TTL
+64. It observes the concrete TTLs with `tcpdump` rather than relying on
+traceroute (cradle has no kernel-MPLS ICMP path):
 
-- **uniform**: push at the ingress LER, verify the egress inner IP TTL is
-  `ingress_ttl − hop_count` (label TTL written back); a `traceroute` across
-  the LSP lists the P hops.
-- **pipe**: same path, verify the egress inner IP TTL is `ingress_ttl − 1`
-  (LSP counts as one hop) and the P hops are absent from `traceroute`.
-- **per-VRF override**: an L3VPN topology (`cradle_l3vpn`) with global
-  `uniform` but the VRF set `pipe` — customer `traceroute` hides the core
-  while global-table transit on the same node shows it.
-- Teardown per the standard topology-cleanup convention.
+- **uniform LSP** (dst `10.0.3.1`): the server sees the request at **TTL 62**
+  — the lsr2 transit hop is counted (label TTL written back at per3, then one
+  IP-forward decrement).
+- **pipe LSP** (dst `10.0.5.1`, `mpls_pipe`): the server sees **TTL 63** — the
+  LSP is hidden, only per3's IP-forward decrement applies.
+- **pipe imposition on the wire**: on the ler1→lsr2 link the label carries
+  **TTL 255** (the pipe seed).
+- Ends with an explicit teardown asserting a clean environment.
 
-## Open questions
+The zebra-rs producer side is verified by build / clippy / `ttl_model_tests`
+and a live daemon loading the new YANG; a zebra-driven end-to-end BDD (which
+would need the flag surfaced in cradle's nexthop/ILM dump) is a follow-up.
 
-1. Global default `uniform` vs `pipe` (see [Rationale](#default-and-rationale)).
-2. Is per-VRF override needed in slice 1, or is the global leaf enough to
-   start? (Global-only is the smaller change and matches the single
-   hardwired setting cradle has now.)
-3. ICMP-tunneling: ship with pipe, or accept swallowed errors until a
-   follow-up? Pipe without it degrades operator `traceroute` diagnostics.
+## Open questions — resolved
+
+1. **Global default `pipe` vs `uniform`** → shipped `pipe` (no-op upgrade;
+   see [Rationale](#default-and-rationale)).
+2. **Per-VRF override in the first slice?** → no; global-only shipped, the
+   override is a follow-up.
+3. **`propagate-local` (forwarded/local split)?** → not shipped; the datapath
+   has no local-origin distinction, so the leaf would be a no-op.
+
+Still open: **ICMP-tunneling** (RFC 3032 §3.4) — under pipe a P-router
+TTL-exceeded has no route back to hidden customer space, so operator
+`traceroute` diagnostics are degraded until this lands; and **TC/EXP
+propagation** (see [Companions](#companion-features-out-of-scope-noted)).
