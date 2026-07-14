@@ -35,6 +35,11 @@ interleaved on the same host within ~30 minutes.
   throughput is flat across TBL24-hit / TBL8 two-lookup / default-route
   destinations for eBPF (15.20 / 15.15 / 15.13 Gbps) and for the kernel
   fib_trie (77.6 / 77.2 / 74.3 Gbps at P4).
+- **Collapsing the two-hook pipeline to one hook beats the kernel on veth.**
+  With the datapath reduced to a single eBPF hook (`--ebpf-mode`, per-packet
+  pktgen pps), xdp-only forwards ~1.63 Mpps and tc-only ~1.53 Mpps vs the
+  kernel's ~1.39 Mpps — xdp-only is ~6–7 % over tc-only, isolating the XDP-hook
+  vs TC-hook cost (see [single-hook modes](#single-hook-modes)).
 
 ## Baseline suite — offloads disabled (per-MTU, apples-to-apples)
 
@@ -76,6 +81,43 @@ hop), not per-packet forwarding; shown for completeness.
 
 eBPF-mode numbers are the same in both variants (XDP already forces per-MTU
 frames), which is itself the measurement of the offload asymmetry.
+
+## Single-hook modes
+
+The suites above run the full `cradle_xdp → cradle_tc → cradle_egress`
+pipeline. The `--ebpf-mode {tc-only|xdp-only}` knob (`system ebpf mode`, design
+in [`ebpf-mode-benchmark.md`](ebpf-mode-benchmark.md)) restricts the datapath to
+plain IPv4 L3 forwarding through a **single** eBPF hook, so the XDP-hook and
+TC-hook costs can be compared directly. This is a different measurement from the
+bulk-TCP suites: pktgen floods 60 B IPv4/UDP `src → router → dst` over veth
+(offloads off, `scratchpad/{topo.sh,perf.sh,router.json}`), and throughput is
+the loss-free per-packet forwarding rate — where the router (not aggregation or
+parallelism) is the work. 3 runs:
+
+| mode | pps (3 runs) | mean | vs kernel |
+|---|---|---|---|
+| kernel (`ip_forward=1`) | 1.405 / 1.380 / 1.395 M | ~1.39 M | baseline |
+| cradle **tc-only** | 1.539 / 1.518 / 1.542 M | ~1.53 M | **+10 %** |
+| cradle **xdp-only** | 1.614 / 1.661 / 1.611 M | ~1.63 M | **+17 %** |
+
+~zero loss in every run (≈20 M/20 M forwarded).
+
+- **xdp-only beats tc-only by ~6–7 %** — the XDP hook is leaner than the TC hook
+  for plain L3 (no `sk_buff`, earliest RX point), so collapsing the two-hook
+  pipeline to one XDP hook is fastest. Direct evidence that the double hook is a
+  real cost.
+- **Both single-hook modes exceed the kernel here**, the opposite of the
+  full-pipeline single-flow bulk-TCP result (0.63×). This measures per-packet
+  forwarding on small frames, where the kernel's FIB + netfilter path has no
+  offload to lean on; veth is pure software. So the physical-NIC gap is
+  NIC-offload advantage **plus** the two-hook overhead this knob isolates — a
+  hardware rerun of these modes would quantify the latter (see
+  [physical-nic-benchmark.md](physical-nic-benchmark.md)).
+- Both modes default the IPv4 FIB engine to DIR-24-8; a `STAT_XDP_L3_FWD`
+  counter confirms the xdp-only fast path is taken.
+
+Benchmark-only — non-L3 features (NAT, policy, overlay, L2) are unsupported
+while a mode is set.
 
 ## Large-FIB suite — 1M routes (seed=1), offloads disabled
 
