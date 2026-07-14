@@ -5,6 +5,32 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 0.9.5
+  date: 2026-07-13T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### SRv6
+        * End.Replicate (RFC 9524 SR-P2MP): a replication-segment SID
+          fans a received copy out to each downstream branch via
+          `bpf_clone_redirect`, with Bud (local + downstream) support;
+          driven by zebra-rs's operator `replication-segment` config
+          over the new `SetReplSeg`/`DelReplSeg` gRPC
+
+    - note: |
+        ### MPLS
+        * Per-LSP TTL propagation (RFC 3443 pipe / uniform mode)
+
+    - note: |
+        ### Packaging / release
+        * First stable, versioned release: a `Stable Release` workflow
+          (push tag `v<X.Y.Z>` matching the `version` file) builds all
+          six .debs and publishes a `v<X.Y.Z>` GitHub Release for direct
+          download and for ingestion into the zebra-rs APT repository, so
+          `apt install zebra-rs` pulls the matching `cradle-rs` engine
+
 - semver: 0.9.4
   date: 2026-07-12T18:00:00+09:00
   distribution: unstable
