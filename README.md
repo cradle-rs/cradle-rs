@@ -133,7 +133,7 @@ proven against the stock Cilium binary/agent, including Hubble observability
 | Pop-to-VRF (VPN label) | ✅ | decap + per-VRF lookup; VRF carried XDP→TC as metadata |
 | ECMP over labeled paths | ✅ | flow-hashed nexthop groups |
 | Entropy labels (ELI/EL) | ⬜ | no entropy label imposed or consumed (RFC 6790); transit ECMP hashes by eBPF payload inspection instead; no FAT-PW (RFC 6391) |
-| TTL propagation (pipe/uniform) | 🔶 | per-LSP pipe/uniform selectable (RFC 3443): pipe imposition seeds the label TTL 255 (`NH_F_MPLS_PIPE`), uniform disposition writes the popped label TTL back into the inner IP header (per-ILM, IPv4 csum fixup); pipe is the default; driven by static gRPC/JSON config and zebra-rs `set mpls ttl propagate {pipe\|uniform}`; `cradle_mpls_ttl` BDD. Pending: a per-VRF override + the forwarded/local split ([design](docs/design/mpls-ttl-propagation.md)) |
+| TTL propagation (pipe/uniform) | 🔶 | per-LSP pipe/uniform selectable (RFC 3443): pipe imposition seeds the label TTL 255 (`NH_F_MPLS_PIPE`), uniform disposition writes the popped label TTL back into the inner IP header (per-ILM, IPv4 csum fixup); pipe is the default; driven by static gRPC/JSON config and zebra-rs `set mpls ttl propagate {pipe\|uniform}` with a per-VRF `vrf <name> mpls ttl propagate` override; `cradle_mpls_ttl` BDD. Pending: the forwarded/local split ([design](docs/design/mpls-ttl-propagation.md)) |
 
 ## SRv6 support status
 
