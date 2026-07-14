@@ -802,6 +802,147 @@ async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String,
     panic!("cradle stat {} did not become nonzero in {}", stat, scoped);
 }
 
+/// Poll `cradle stats` over gRPC and assert the named counter reached at
+/// least `want` — for scenarios that drive the same counter more than once
+/// and must prove each event landed (a plain nonzero can't tell one
+/// successful decap from two).
+#[then(
+    expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should reach {int}"
+)]
+async fn cradle_stat_reach(
+    world: &mut World,
+    stat: String,
+    namespace: String,
+    sock: String,
+    want: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let mut last = 0u64;
+    for _ in 0..15 {
+        if let Ok(out) = netns::exec_in_netns(&scoped, &cradle, &["stats", "--grpc", &ep]).await {
+            for line in out.lines() {
+                let mut it = line.split_whitespace();
+                if it.next() == Some(stat.as_str())
+                    && let Some(v) = it.next().and_then(|s| s.parse::<u64>().ok())
+                {
+                    last = v;
+                    if v >= want {
+                        println!("✓ cradle stat {} = {} (>= {}) in {}", stat, v, want, scoped);
+                        return;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!(
+        "cradle stat {} reached only {} (< {}) in {}",
+        stat, last, want, scoped
+    );
+}
+
+/// One's-complement 16-bit checksum over `data` (IPv4 / ICMP).
+fn inet_csum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for chunk in data.chunks(2) {
+        let word = ((chunk[0] as u32) << 8) | (*chunk.get(1).unwrap_or(&0) as u32);
+        sum += word;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Send one hand-crafted GTP-U G-PDU over UDP from inside a namespace — the
+/// wire shapes a real gNB emits that the static cradle mirror's GTP4.E encap
+/// cannot produce (it always writes the minimal 8-byte header). `flags` is
+/// the GTP-U flags octet: `0x32` = S set (free-ran-ue's shape, 12-byte
+/// header), `0x34` = E set with one PDU Session Container extension
+/// (UERANSIM / TS 38.415, 16-byte header). The payload is a fixed ICMP echo
+/// request `inner_src -> inner_dst`. Sent via bash's `/dev/udp` from an
+/// ephemeral source port — the decap keys only on outer (dst, TEID).
+#[when(
+    expr = "I send a GTP-U G-PDU flags {string} teid {string} carrying ICMP from {string} to {string} toward {string} in namespace {string}"
+)]
+async fn send_gtpu_gpdu(
+    world: &mut World,
+    flags: String,
+    teid: String,
+    inner_src: String,
+    inner_dst: String,
+    outer_dst: String,
+    namespace: String,
+) {
+    let parse_u32 = |s: &str| -> u32 {
+        let s = s.trim();
+        match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16).expect("hex u32"),
+            None => s.parse().expect("u32"),
+        }
+    };
+    let flags = parse_u32(&flags) as u8;
+    let teid = parse_u32(&teid);
+    let src: std::net::Ipv4Addr = inner_src.parse().expect("inner src IPv4");
+    let dst: std::net::Ipv4Addr = inner_dst.parse().expect("inner dst IPv4");
+
+    // Inner ICMP echo request: 8-byte header + 8 bytes of data.
+    let mut icmp = vec![8u8, 0, 0, 0, 0xbe, 0xef, 0, 1];
+    icmp.extend_from_slice(b"cradlers");
+    let csum = inet_csum(&icmp).to_be_bytes();
+    icmp[2] = csum[0];
+    icmp[3] = csum[1];
+    // Inner IPv4 header (no options).
+    let tot_len = (20 + icmp.len()) as u16;
+    let mut ip = vec![0x45u8, 0, 0, 0, 0, 0, 0, 0, 64, 1, 0, 0];
+    ip[2..4].copy_from_slice(&tot_len.to_be_bytes());
+    ip.extend_from_slice(&src.octets());
+    ip.extend_from_slice(&dst.octets());
+    let csum = inet_csum(&ip).to_be_bytes();
+    ip[10] = csum[0];
+    ip[11] = csum[1];
+    ip.extend_from_slice(&icmp);
+
+    // GTP-U header: 8 fixed bytes, + 4 optional (any of S/PN/E), + one
+    // 4-byte PDU Session Container when E is set.
+    let mut opt: Vec<u8> = Vec::new();
+    if flags & 0x07 != 0 {
+        // seq, N-PDU, next-extension type.
+        opt.extend_from_slice(&[0, 0, 0, if flags & 0x04 != 0 { 0x85 } else { 0 }]);
+        if flags & 0x04 != 0 {
+            // PDU Session Container: len 1 unit, UL PDU SESSION INFORMATION
+            // (type 1) + QFI 9, no further extension.
+            opt.extend_from_slice(&[0x01, 0x10, 0x09, 0x00]);
+        }
+    }
+    let gtp_len = (opt.len() + ip.len()) as u16;
+    let mut pkt = vec![flags, 0xff];
+    pkt.extend_from_slice(&gtp_len.to_be_bytes());
+    pkt.extend_from_slice(&teid.to_be_bytes());
+    pkt.extend_from_slice(&opt);
+    pkt.extend_from_slice(&ip);
+
+    // One sendto = one datagram (bash's `/dev/udp` + printf can split the
+    // write, fragmenting the G-PDU across datagrams).
+    let hex: String = pkt.iter().map(|b| format!("{b:02x}")).collect();
+    let script = format!(
+        "import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\
+         .sendto(bytes.fromhex('{hex}'), ('{outer_dst}', 2152))"
+    );
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "python3", &["-c", &script])
+        .await
+        .unwrap_or_else(|e| panic!("send G-PDU in {}: {}", scoped, e));
+    println!(
+        "✓ Sent GTP-U G-PDU flags 0x{flags:02x} teid 0x{teid:08x} ({} bytes) toward {} from {}",
+        pkt.len(),
+        outer_dst,
+        scoped
+    );
+}
+
 /// Run `cradle dump <table>` over gRPC and assert its output contains
 /// `expect`. Polls a few times so control-plane programming has settled.
 #[then(
