@@ -200,7 +200,7 @@ REPLACE-C-SID) and the RFC 8986 flavors. ✅ = implemented (BDD-proven),
 
 Producers that program the eBPF data plane: cradle's own gRPC/JSON API for
 static entries, and zebra-rs protocol machinery through the `FibHandle` tee
-for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet,
+for everything else. ✅ = implemented (BDD-proven), 🔶 = partial, ⬜ = not yet,
 🚫 = no plan.
 
 | Producer | Data plane | Status | Notes |
@@ -216,7 +216,7 @@ for everything else. ✅ = implemented (BDD-proven), ⬜ = not yet,
 | BGP EVPN over SRv6 (RFC 9252) | SRv6 | ✅ | Type-2→End.DT2U, Type-3→End.DT2M (+ BUM slots), MAC mobility seq, `WatchFdb` learn/age channel |
 | BGP EVPN VPWS (RFC 8214) | SRv6 | ✅ | per-EVI Type-1 ⇄ End.DX2, `vpws` service config, one-RPC AC bind (xconnect + local decap); `cradle_vpws_zebra` |
 | BGP SR Policy Binding SID (SAFI 73) | SRv6 | ✅ | controller-originated candidate path → headend BSID + policy list via tee; `cradle_b6_zebra` |
-| BGP color steering to a BSID | SRv6 | ⬜ | steering imposes raw segment lists today |
+| BGP color steering to a BSID | SRv6 | 🔶 | `bgp sr-policy steering-mode {segment-list\|binding-sid}` (RFC 9256 §8.5): binding-sid steers a colored service route onto the policy's SR-MPLS BSID label (the ILM expands it) or SRv6 End.B6.Encaps BSID (H.Encap), with CO-bit endpoint fallback; segment-list (raw stack) stays the default. Proven at the zebra-rs FIB (`bgp_sr_policy_bsid_forwarding`); no cradle datapath BDD yet |
 | SRv6 TI-LFA | SRv6 | ✅ | uSID repair carriers: protected-nexthop tee + link-down failover; `cradle_tilfa_srv6` |
 | Mirror SID egress protection (End.M) | SRv6 | ✅ | mirror-route tee + PLR post-encap re-lookup; `cradle_endm` |
 | Locator flavors (PSP/USP/USD) | SRv6 | ✅ | `flavor` leaf-list → flavored IANA codepoints (IS-IS + OSPFv3) + kernel flavor ops + tee; `cradle_tilfa_psp` |
