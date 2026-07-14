@@ -6,16 +6,17 @@
 
 Status: **Implemented end to end (BDD-proven), datapath + static config +
 zebra-rs producer.** The eBPF gates, the two flags, the static gRPC/JSON
-config path, and the zebra-rs `mpls ttl propagate {pipe|uniform}` YANG leaf
-are all in tree; the datapath is exercised by the `cradle_mpls_ttl` BDD (pipe
-imposition seeds label TTL 255; uniform disposition writes the popped label
-TTL back into the inner IP with an IPv4 checksum fixup). Pipe is the default,
-so nothing changes for existing configs until the knob is set. **Still to
-do:** a per-VRF override, and the IOS-style forwarded/local split
-(`propagate-local`) — the datapath has no local-origin distinction yet, so
-that leaf was deliberately not modeled. The "baseline behavior" section is
-retained as the pre-work starting point. Tracked as the `TTL propagation
-(pipe/uniform)` 🔶 row in the MPLS support table ([`mpls.md`](mpls.md)).
+config path, the zebra-rs global `mpls ttl propagate {pipe|uniform}` YANG
+leaf, and the per-VRF `vrf <name> mpls ttl propagate {inherit|pipe|uniform}`
+override are all in tree; the datapath is exercised by the `cradle_mpls_ttl`
+BDD (pipe imposition seeds label TTL 255; uniform disposition writes the
+popped label TTL back into the inner IP with an IPv4 checksum fixup). Pipe is
+the default, so nothing changes for existing configs until the knob is set.
+**Still to do:** the IOS-style forwarded/local split (`propagate-local`) — the
+datapath has no local-origin distinction yet, so that leaf was deliberately
+not modeled. The "baseline behavior" section is retained as the pre-work
+starting point. Tracked as the `TTL propagation (pipe/uniform)` 🔶 row in the
+MPLS support table ([`mpls.md`](mpls.md)).
 
 ### What shipped
 
@@ -33,6 +34,12 @@ retained as the pre-work starting point. Tracked as the `TTL propagation
   `CradleFib` sets `Nexthop.mpls_pipe_ttl` at labeled-nexthop imposition and
   `Ilm.ttl_uniform` at pop-to-IP disposition. Default `pipe`; see the schema
   section for the (revised) shape that actually shipped.
+- **zebra-rs per-VRF override** (`mpls-ttl-per-vrf`, merged): `vrf <name> mpls
+  ttl propagate {inherit|pipe|uniform}` — a per-table override resolved to a
+  `pipe: bool` at the two tee entry points (`route_install` / `ilm_install`)
+  and threaded through the nexthop builders (and the dedup key), so a VRF's
+  imposition seed and pop-to-IP disposition follow the same model. No datapath
+  change — it already reads the per-entry flags.
 
 ## Goal and scope
 
@@ -111,22 +118,28 @@ set mpls ttl propagate {pipe | uniform}
 local-origin distinction at imposition, so the leaf would be a silent no-op.
 It is left as a follow-up gated on a datapath change.
 
-### Per-VRF override (follow-up, not yet shipped)
+### Per-VRF override (shipped)
 
-The model is enforced at **disposition**, and for L3VPN the egress PE knows
-the VRF from the VPN label at pop-to-VRF. That makes a per-VRF override
-clean and matches real deployments (internet-in-global = `uniform`, each VPN
-= `pipe`):
+For L3VPN, a per-VRF override matches real deployments (internet-in-global =
+`uniform`, each VPN = `pipe`). The shipped leaf sits under `list vrf`:
 
 ```yang
-// under the existing vrf/table config
+// under list vrf
 leaf mpls-ttl-propagate {
-  type enumeration { enum inherit; enum uniform; enum pipe; }
-  default inherit;   // take the global mpls/ttl/propagate value
+  type enumeration { enum inherit; enum pipe; enum uniform; }
+  default "inherit";   // take the global mpls/ttl/propagate value
 }
 ```
 
-Transit swaps carry no VRF, so they always take the global value.
+Unlike the design's first sketch, the override is applied at **both** ends,
+not just disposition — under `uniform` the delivered TTL *is* the popped
+label TTL, so imposition (seed) and disposition (writeback) must agree, or
+the egress writes garbage. zebra-rs resolves the effective model per
+`table_id` at `route_install` / `ilm_install` and threads a `pipe: bool`
+through the nexthop builders (and the dedup key). Configure the same model on
+the ingress and egress PEs of a VRF — the two ends of an LSP must agree
+(like RD/RT). Transit swaps carry no VRF, so they always take the global
+value.
 
 ## Default and rationale
 
@@ -151,9 +164,9 @@ the zebra-rs CHANGELOG both record `pipe` as the default.
 ## Datapath / tee design
 
 Because the two enforcement points differ, carry **two flags** rather than a
-hot-path global-map read. zebra-rs resolves the global leaf into a `TtlModel`
-on the RIB and stamps the flags when it builds the tee (a per-VRF override
-would refine this later):
+hot-path global-map read. zebra-rs resolves the effective model into a
+`pipe: bool` — the per-VRF override if set, else the global `TtlModel` — and
+stamps the flags when it builds the tee:
 
 - **Imposition → per-nexthop flag.** Add `NH_F_MPLS_PIPE` alongside
   `NH_F_MPLS` (next free bit `1 << 6` in `crates/cradle-common/src/lib.rs`;
@@ -169,8 +182,8 @@ would refine this later):
   addition.
 
 Keeping the state per-entry (not a global settings map) means the eBPF hot
-path reads it from the FIB/ILM entry it already loaded, and a future per-VRF
-override falls out for free (the producer just stamps different per-entry
+path reads it from the FIB/ILM entry it already loaded, and the per-VRF
+override fell out for free (the producer just stamps different per-entry
 values without any datapath change).
 
 ## Companion features (out of scope, noted)
@@ -201,16 +214,19 @@ traceroute (cradle has no kernel-MPLS ICMP path):
   **TTL 255** (the pipe seed).
 - Ends with an explicit teardown asserting a clean environment.
 
-The zebra-rs producer side is verified by build / clippy / `ttl_model_tests`
-and a live daemon loading the new YANG; a zebra-driven end-to-end BDD (which
-would need the flag surfaced in cradle's nexthop/ILM dump) is a follow-up.
+The zebra-rs producer side (global and per-VRF) is verified by build /
+clippy / `ttl_model_tests` + `vrf::builder` tests (pipe/uniform/inherit
+round-trip) and a live daemon loading the new YANG; a zebra-driven end-to-end
+BDD (which would need the flag surfaced in cradle's nexthop/ILM dump) is a
+follow-up.
 
 ## Open questions — resolved
 
 1. **Global default `pipe` vs `uniform`** → shipped `pipe` (no-op upgrade;
    see [Rationale](#default-and-rationale)).
-2. **Per-VRF override in the first slice?** → no; global-only shipped, the
-   override is a follow-up.
+2. **Per-VRF override in the first slice?** → no; global-only shipped first,
+   then the per-VRF override followed (zebra-rs `mpls-ttl-per-vrf`), applied
+   at both LSP ends.
 3. **`propagate-local` (forwarded/local split)?** → not shipped; the datapath
    has no local-origin distinction, so the leaf would be a no-op.
 
