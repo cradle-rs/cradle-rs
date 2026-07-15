@@ -4,8 +4,43 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "cradle-rs user-space control plane: loads/attaches the eBPF data plane and programs its maps"
+authors.workspace = true
+description = "eBPF data-plane accelerator and Kubernetes CNI plug-in for zebra-rs"
+homepage = "https://cradle.rs"
 default-run = "cradle"
+
+# Debian packaging (cargo-deb). Replaces the former packaging/nfpm-*.yaml.
+# `cargo deb -p cradle` reads this table; the version comes from the workspace
+# `version` (kept in sync with the top-level `version` file by
+# packaging/version-update.sh). The package is named cradle-rs (not the crate
+# name `cradle`): the zebra-rs APT pipeline ingests cradle-rs_*.deb, so the
+# package name and the revision-less filename must stay stable.
+[package.metadata.deb]
+name = "cradle-rs"
+maintainer = "Kunihiro Ishiguro <kunihiro@zebra.rs>"
+section = "net"
+priority = "optional"
+# Automatic shared-library Depends via dpkg-shlibdeps over the built binaries.
+depends = "$auto"
+# Keep the artifact as cradle-rs_<version>_<arch>.deb (no -1 revision) — the
+# build-debs dist-suffix rename and zebra-rs's `cradle-rs_*-<codename>_*.deb`
+# ingest glob both expect that shape.
+revision = ""
+# Debian-format changelog generated from the single-source CHANGELOG.yaml by
+# packaging/changelog-gen.sh (the packaging Makefile runs it before cargo deb).
+changelog = "../../packaging/out/changelog"
+extended-description = """
+cradle-rs is the eBPF data-plane accelerator for zebra-rs and a Kubernetes CNI
+plug-in. The cradle engine loads and attaches the XDP/TC programs and programs
+their maps (ports, FIB, ILM, SRv6, FDB, BFD Echo, GTP-U); cradle-cni and
+cradle-k8s provide the CNI and Kubernetes integration."""
+# Custom postinst: setcap the eBPF capabilities onto /usr/bin/cradle.
+maintainer-scripts = "../../packaging/maintainer"
+assets = [
+  ["target/release/cradle",     "usr/bin/", "755"],
+  ["target/release/cradle-cni", "usr/bin/", "755"],
+  ["target/release/cradle-k8s", "usr/bin/", "755"],
+]
 
 [[bin]]
 name = "cradle"
