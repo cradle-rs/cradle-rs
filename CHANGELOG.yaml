@@ -11,6 +11,31 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 0.9.8
+  date: 2026-07-15T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Debian packaging
+        * The Debian package is now built with cargo-deb instead of
+          nfpm; the workspace `Cargo.toml` is the single source of the
+          package version and metadata, and the retired nfpm YAML
+          manifests are gone
+        * The shipped Debian changelog is generated from
+          `CHANGELOG.yaml` at build time, keeping it in step with the
+          version being packaged
+
+    - note: |
+        ### Release automation
+        * GitHub release notes are rendered straight from
+          `CHANGELOG.yaml` — nightly builds use the top entry and a
+          `v<X.Y.Z>` tag uses its matching entry — with the boilerplate
+          preamble dropped so the release page shows only the notes
+        * The release workflow bumps `softprops/action-gh-release`
+          from v2 to v3 (Node 24 runtime)
+
 - semver: 0.9.7
   date: 2026-07-15T08:30:00+09:00
   distribution: unstable
