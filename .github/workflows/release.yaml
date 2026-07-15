@@ -81,20 +81,13 @@ jobs:
       - name: List collected .deb files
         run: ls -la artifacts/
 
-      # Body = fixed preamble (what cradle-rs is / how it's normally consumed)
-      # + CHANGELOG.yaml's entry for this tag (the `check` job already verified
-      # it matches the version file) + the fixed downloads table.
+      # Body = CHANGELOG.yaml's entry for this tag (the `check` job already
+      # verified it matches the version file) + the fixed downloads table.
       - name: Build release notes
         env:
           TAG: ${{ github.ref_name }}
         run: |
           {
-            cat <<'EOF'
-          The eBPF data-plane engine for zebra-rs. On a zebra-rs host these
-          .debs are pulled automatically via `apt install zebra-rs`
-          (Recommends: cradle-rs); the table below is for direct download.
-
-          EOF
             packaging/release-notes.sh "${TAG#v}"
             cat <<'EOF'
 
