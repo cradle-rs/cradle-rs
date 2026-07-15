@@ -26,3 +26,11 @@ arm64 amd64: changelog
 .PHONY: changelog
 changelog:
 	./changelog-gen.sh
+
+# Preview the GitHub release body rendered from CHANGELOG.yaml's newest entry
+# (what nightly.yaml/release.yaml publish, minus the fixed preamble/downloads).
+# Pass VERSION=<X.Y.Z> to preview a specific past entry instead of the top one.
+# Not part of the .deb build — this feeds the GitHub Releases page, not the package.
+.PHONY: release-notes
+release-notes:
+	./release-notes.sh $(VERSION)
