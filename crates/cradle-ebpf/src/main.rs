@@ -67,7 +67,8 @@ use cradle_common::{
     STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD, SVC_F_AFFINITY,
     ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key,
     VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
-    XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, fibw_unpack, mpls_lse, mpls_lse_unpack,
+    XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse,
+    mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -1617,11 +1618,31 @@ fn tc_meta_vrf(ctx: &TcContext) -> u32 {
     }
     let m = meta as *const CradleXdpMeta;
     unsafe {
-        if (*m).magic != XDP_META_MAGIC ^ meta_cookie() {
+        // Accept both the plain L3-decap magic (VXLAN-L3VNI, MPLS-VPN) and the
+        // SRv6-endpoint variant — the VRF field is identical; the SRv6 marker
+        // only matters to `tc_meta_from_srv6`.
+        let cookie = meta_cookie();
+        if (*m).magic != XDP_META_MAGIC ^ cookie && (*m).magic != XDP_META_MAGIC_SRV6 ^ cookie {
             return 0;
         }
         (*m).vrf_id
     }
+}
+
+/// True when the inner packet was decapsulated by an SRv6 endpoint this pass
+/// (`XDP_META_MAGIC_SRV6`: `End.DT*`, `End.T`, `uN`(uT), `End.M`). Used to block
+/// the SRv6→GTP4.E stitch — an SRv6-decapped packet must not be re-imposed into
+/// a GTP-U tunnel. VXLAN-L3VNI / MPLS-VPN decaps use the plain magic → `false`.
+#[inline(always)]
+fn tc_meta_from_srv6(ctx: &TcContext) -> bool {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return false;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe { (*m).magic == XDP_META_MAGIC_SRV6 ^ meta_cookie() }
 }
 
 /// Bridge domain attached by the XDP `End.DT2U` decap (EVPN over SRv6):
@@ -1855,6 +1876,13 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     // GTP-U imposition (GTP4.E): wrap the inner v4 packet in outer IPv4 + UDP
     // (2152) + GTP-U(TEID). Tunnel/pipe model — the inner TTL is left as-is.
     if nh.flags & NH_F_GTP != 0 {
+        // Block the SRv6→GTP4.E stitch: a packet decapsulated by an SRv6
+        // endpoint this pass must not be re-imposed into a GTP-U tunnel. Native
+        // and VXLAN/MPLS-decapped GTP downlinks (no SRv6 marker) still encap.
+        if tc_meta_from_srv6(ctx) {
+            stat_inc(STAT_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
         return gtp_encap(ctx, nh_id, &nh);
     }
 
@@ -2034,6 +2062,12 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     // GTP-U imposition (GTP4.E): an inner v6 packet wrapped in outer IPv4 + UDP
     // (2152) + GTP-U(TEID). Tunnel/pipe model — the inner hop limit is kept.
     if nh.flags & NH_F_GTP != 0 {
+        // Block the SRv6→GTP4.E stitch (see the v4 sibling): SRv6-decapped
+        // traffic must not be re-imposed into a GTP-U tunnel.
+        if tc_meta_from_srv6(ctx) {
+            stat_inc(STAT_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
         return gtp_encap(ctx, nh_id, &nh);
     }
 
@@ -3541,7 +3575,8 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         }
         let meta = xdp_meta_ptr(ctx)?;
         unsafe {
-            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
+            // SRv6-endpoint provenance (End.DT4/6/46) — see XDP_META_MAGIC_SRV6.
+            (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
             (*meta).vrf_id = sid.vrf_id;
         }
     }
@@ -3658,7 +3693,8 @@ fn endt_meta(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     }
     let meta = xdp_meta_ptr(ctx)?;
     unsafe {
-        (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
+        // SRv6-endpoint provenance (End.T / uN uT) — see XDP_META_MAGIC_SRV6.
+        (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
         (*meta).vrf_id = sid.vrf_id;
     }
     stat_inc(STAT_SRV6_ENDT);
@@ -4239,7 +4275,8 @@ fn srv6_endm(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         }
         let meta = xdp_meta_ptr(ctx)?;
         unsafe {
-            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
+            // SRv6-endpoint provenance (End.M) — see XDP_META_MAGIC_SRV6.
+            (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
             (*meta).vrf_id = ment.vrf_id;
         }
     }

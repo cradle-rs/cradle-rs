@@ -221,6 +221,14 @@ pub const XDP_META_MAGIC_DX2: u32 = 0xC7AD_1E04;
 /// segment's downstream branches. `vrf_id` is unused; TC re-reads the DA to
 /// key the `REPL_SEG` map.
 pub const XDP_META_MAGIC_REPL: u32 = 0xC7AD_1E05;
+/// L3 decap from an **SRv6 endpoint** (`End.DT4/6/46`, `End.T`, `uN`(uT),
+/// `End.M`): identical to [`XDP_META_MAGIC`] for VRF resolution — `tc_meta_vrf`
+/// accepts either — but it additionally marks the inner packet as
+/// SRv6-decapped, so the TC stage can special-case SRv6-origin traffic. Used to
+/// block the SRv6→GTP4.E stitch: an SRv6-decapped packet resolving to a GTP
+/// nexthop is dropped rather than re-imposed into a GTP-U tunnel. VXLAN-L3VNI
+/// and MPLS-VPN decaps keep the plain [`XDP_META_MAGIC`] and are unaffected.
+pub const XDP_META_MAGIC_SRV6: u32 = 0xC7AD_1E06;
 
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
