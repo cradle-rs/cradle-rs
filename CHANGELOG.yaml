@@ -5,6 +5,53 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit
 # them, the defaults from .chglog.yml (or chglog config) are used.
 
+- semver: 0.9.7
+  date: 2026-07-15T08:30:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Mobile User Plane (GTP-U / MUP)
+        * GTP-U G-PDU decapsulation handles the optional header
+          fields (sequence number, N-PDU number, next-extension-header
+          flag) and a PDU Session Container extension header
+          (5G N3/N9), not just the minimal 8-byte GTP header
+        * BDD MUP GTP round-trip feature: a real UE ping traverses
+          the GTP tunnel, with free5GC-shaped PFCP session
+          establishment
+
+    - note: |
+        ### Control plane
+        * L3 port routes are re-derived when kernel interface
+          addresses change, keeping the eBPF FIB in sync after an
+          address add/remove
+
+- semver: 0.9.6
+  date: 2026-07-14T19:15:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### eBPF data plane
+        * Single-hook benchmark modes: the datapath can run
+          tc-only or xdp-only (a single BPF hook) end to end, with
+          a DIR-24-8 LPM FIB as the default; BDD coverage for both
+          the xdp-only and tc-only single-hook paths
+
+    - note: |
+        ### SRv6 / BGP
+        * BGP color steering to an SRv6 Binding SID (binding-sid
+          mode) reaches the cradle eBPF FIB, proven end to end in
+          BDD
+
+    - note: |
+        ### MPLS
+        * MPLS TTL propagation gains a forwarded/local split with
+          kernel-side propagate-local, a per-VRF TTL override, and
+          ICMP tunneling (label-stack ICMP) support
+
 - semver: 0.9.5
   date: 2026-07-13T18:00:00+09:00
   distribution: unstable
