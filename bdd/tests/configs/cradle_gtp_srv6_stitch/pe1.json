@@ -1,0 +1,36 @@
+{
+  "ports": [
+    { "name": "pe1a", "l3": true },
+    { "name": "pe1b", "l3": true }
+  ],
+  "srv6_source": "fd00:1::1",
+  "nexthops": [
+    {
+      "id": 1,
+      "oif": "pe1b",
+      "gateway": "10.0.12.2",
+      "gtp_src": "10.0.12.1",
+      "gtp_dst": "10.0.12.2",
+      "gtp_teid": 256
+    },
+    { "id": 2, "oif": "pe1b", "gateway": "2001:db8:12::2", "segs": ["fd00:2::100"] },
+    {
+      "id": 3,
+      "oif": "pe1b",
+      "gateway": "2001:db8:12::2",
+      "gtp_src": "2001:db8:12::1",
+      "gtp_dst": "2001:db8:12::2",
+      "gtp_teid": 1024
+    }
+  ],
+  "neighbors": [
+    { "oif": "pe1b", "ip": "10.0.12.2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "pe1b", "ip": "2001:db8:12::2", "mac": "02:00:00:00:02:0a" }
+  ],
+  "routes": [
+    { "prefix": "10.0.2.0/24", "nexthop": 1 },
+    { "prefix": "10.0.3.0/24", "nexthop": 2 },
+    { "prefix": "10.0.4.0/24", "nexthop": 3 },
+    { "prefix": "10.0.5.0/24", "nexthop": 2 }
+  ]
+}

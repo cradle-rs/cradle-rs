@@ -69,8 +69,8 @@ use cradle_common::{
     STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD,
     SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
     VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC,
-    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL,
-    XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
+    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2,
+    XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -1647,11 +1647,14 @@ fn tc_meta_vrf(ctx: &TcContext) -> u32 {
     }
     let m = meta as *const CradleXdpMeta;
     unsafe {
-        // Accept both the plain L3-decap magic (VXLAN-L3VNI, MPLS-VPN) and the
-        // SRv6-endpoint variant — the VRF field is identical; the SRv6 marker
-        // only matters to `tc_meta_from_srv6`.
+        // Accept the plain L3-decap magic (VXLAN-L3VNI, MPLS-VPN) and the
+        // SRv6-endpoint / GTP-decap variants — the VRF field is identical; the
+        // origin markers only matter to `tc_meta_from_srv6`/`tc_meta_from_gtp`.
         let cookie = meta_cookie();
-        if (*m).magic != XDP_META_MAGIC ^ cookie && (*m).magic != XDP_META_MAGIC_SRV6 ^ cookie {
+        if (*m).magic != XDP_META_MAGIC ^ cookie
+            && (*m).magic != XDP_META_MAGIC_SRV6 ^ cookie
+            && (*m).magic != XDP_META_MAGIC_GTP ^ cookie
+        {
             return 0;
         }
         (*m).vrf_id
@@ -1660,8 +1663,8 @@ fn tc_meta_vrf(ctx: &TcContext) -> u32 {
 
 /// True when the inner packet was decapsulated by an SRv6 endpoint this pass
 /// (`XDP_META_MAGIC_SRV6`: `End.DT*`, `End.T`, `uN`(uT), `End.M`). Used to block
-/// the SRv6→GTP4.E stitch — an SRv6-decapped packet must not be re-imposed into
-/// a GTP-U tunnel. VXLAN-L3VNI / MPLS-VPN decaps use the plain magic → `false`.
+/// the SRv6→GTP4.E/GTP6.E stitch — an SRv6-decapped packet must not be re-imposed
+/// into a GTP-U tunnel. VXLAN-L3VNI / MPLS-VPN decaps use the plain magic → `false`.
 #[inline(always)]
 fn tc_meta_from_srv6(ctx: &TcContext) -> bool {
     let skb = ctx.skb.skb;
@@ -1672,6 +1675,22 @@ fn tc_meta_from_srv6(ctx: &TcContext) -> bool {
     }
     let m = meta as *const CradleXdpMeta;
     unsafe { (*m).magic == XDP_META_MAGIC_SRV6 ^ meta_cookie() }
+}
+
+/// True when the inner packet was decapsulated by the GTP-U stage this pass
+/// (`XDP_META_MAGIC_GTP`: `H.M.GTP4.D` / `H.M.GTP6.D`). The mirror of [`tc_meta_from_srv6`],
+/// used to block the GTP→SRv6 stitch — a GTP-decapped packet must not be
+/// re-imposed with an SRv6 H.Encaps. Other decaps use different magics → `false`.
+#[inline(always)]
+fn tc_meta_from_gtp(ctx: &TcContext) -> bool {
+    let skb = ctx.skb.skb;
+    let meta = unsafe { (*skb).data_meta } as usize;
+    let data = unsafe { (*skb).data } as usize;
+    if meta + core::mem::size_of::<CradleXdpMeta>() > data {
+        return false;
+    }
+    let m = meta as *const CradleXdpMeta;
+    unsafe { (*m).magic == XDP_META_MAGIC_GTP ^ meta_cookie() }
 }
 
 /// Bridge domain attached by the XDP `End.DT2U` decap (EVPN over SRv6):
@@ -1899,6 +1918,13 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     // SRv6 imposition (H.Encaps) of a v4-inner packet: impose an outer IPv6
     // header toward the SID. Pipe-model — the inner IPv4 TTL is left as-is.
     if nh.flags & NH_F_SRV6 != 0 {
+        // Block the GTP→SRv6 stitch (the mirror of the SRv6→GTP4.E guard
+        // below): a packet decapsulated by the GTP-U stage this pass must not
+        // be re-imposed with H.Encaps.
+        if tc_meta_from_gtp(ctx) {
+            stat_inc(STAT_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
         let ttl: u8 = ctx.load(IP_TTL_OFF).map_err(|_| ())?;
         if ttl <= 1 {
             return Ok(TC_ACT_PIPE as i32);
@@ -2095,6 +2121,12 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
 
     // SRv6 imposition (H.Encaps): impose an outer IPv6 header toward the SID.
     if nh.flags & NH_F_SRV6 != 0 {
+        // Block the GTP→SRv6 stitch (see the v4 sibling): GTP-decapped
+        // traffic must not be re-imposed with H.Encaps.
+        if tc_meta_from_gtp(ctx) {
+            stat_inc(STAT_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
         let hop: u8 = ctx.load(IP6_HOP_OFF).map_err(|_| ())?;
         if hop <= 1 {
             return Ok(TC_ACT_PIPE as i32);
@@ -3711,7 +3743,8 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32, ttl: u8, uniform: bool) -> Res
 /// GTP-U tunnel decap (`H.M.GTP4.D`): match a received G-PDU on its
 /// (local outer dst, TEID) in `GTP_PDR`, strip the outer IPv4+UDP+GTP-U,
 /// and hand the inner packet to the TC FIB stage (routed in the PDR's VRF via
-/// `CradleXdpMeta`, exactly like an `End.DT*` decap). A non-matching or non-GTP
+/// `CradleXdpMeta` like an `End.DT*` decap, but tagged `XDP_META_MAGIC_GTP` so
+/// TC can block the GTP→SRv6 stitch). A non-matching or non-GTP
 /// v4 packet returns `XDP_PASS` for normal forwarding. Mirrors `try_srv6_xdp`;
 /// the strip is below `decap_head`'s IPv6 floor so it is inlined here.
 ///
@@ -3799,19 +3832,19 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Err(());
     }
     stat_inc(STAT_GTP_DECAP);
-    // Route the inner packet in the PDR's VRF (0 = global; no metadata needed).
-    if pdr.vrf_id != 0 {
-        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-            != 0
-        {
-            stat_inc(STAT_DROP);
-            return Ok(xdp_action::XDP_DROP);
-        }
-        let meta = xdp_meta_ptr(ctx)?;
-        unsafe {
-            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
-            (*meta).vrf_id = pdr.vrf_id;
-        }
+    // Tag the inner packet GTP-decapped and carry the PDR's VRF (0 = global).
+    // The metadata is attached unconditionally — the GTP marker is what lets
+    // the TC stage drop the GTP→SRv6 stitch, and that guard must also hold
+    // for inner packets routed in the global table.
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_GTP ^ meta_cookie();
+        (*meta).vrf_id = pdr.vrf_id;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -3819,7 +3852,8 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 /// GTP-U tunnel decap over an IPv6 outer (`H.M.GTP6.D`): match a received
 /// G-PDU on its (ingress VRF, local outer dst, TEID) in `GTP_PDR6`, strip
 /// the outer IPv6+UDP+GTP-U, and hand the inner packet to the TC FIB stage
-/// in the PDR's VRF — the v6-outer twin of [`try_gtp_xdp`], sharing its GTP
+/// in the PDR's VRF, tagged `XDP_META_MAGIC_GTP` so TC can block the
+/// GTP→SRv6 stitch — the v6-outer twin of [`try_gtp_xdp`], sharing its GTP
 /// header parsing rules. Base IPv6 header only (the dispatch established
 /// next-header == UDP and dport == 2152; extension headers pass to the
 /// kernel untouched).
@@ -3885,19 +3919,19 @@ fn try_gtp6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Err(());
     }
     stat_inc(STAT_GTP_DECAP);
-    // Route the inner packet in the PDR's VRF (0 = global; no metadata needed).
-    if pdr.vrf_id != 0 {
-        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-            != 0
-        {
-            stat_inc(STAT_DROP);
-            return Ok(xdp_action::XDP_DROP);
-        }
-        let meta = xdp_meta_ptr(ctx)?;
-        unsafe {
-            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
-            (*meta).vrf_id = pdr.vrf_id;
-        }
+    // Tag the inner packet GTP-decapped and carry the PDR's VRF (0 = global).
+    // The metadata is attached unconditionally — the GTP marker is what lets
+    // the TC stage drop the GTP→SRv6 stitch, and that guard must also hold
+    // for inner packets routed in the global table (as in `try_gtp_xdp`).
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_GTP ^ meta_cookie();
+        (*meta).vrf_id = pdr.vrf_id;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -4126,21 +4160,9 @@ fn try_srv6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 
     decap_head(ctx, strip, inner_et)?;
     stat_inc(STAT_SRV6_DECAP);
-    if sid.vrf_id != 0 {
-        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-            != 0
-        {
-            stat_inc(STAT_DROP);
-            return Ok(xdp_action::XDP_DROP);
-        }
-        let meta = xdp_meta_ptr(ctx)?;
-        unsafe {
-            // SRv6-endpoint provenance (End.DT4/6/46) — see XDP_META_MAGIC_SRV6.
-            (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
-            (*meta).vrf_id = sid.vrf_id;
-        }
-    }
-    Ok(xdp_action::XDP_PASS)
+    // SRv6-endpoint provenance (End.DT4/6/46) — unconditional, vrf 0 (global)
+    // included, so the SRv6→GTP4.E stitch guard covers every decap.
+    srv6_decap_meta(ctx, sid.vrf_id)
 }
 
 /// SRv6 `End` / `End.X` transit: the outer IPv6 DA matched a local endpoint
@@ -4173,7 +4195,7 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
             };
             decap_head(ctx, IP6_HDR_LEN, inner_et)?;
             stat_inc(STAT_SRV6_USD);
-            return endt_meta(ctx, sid);
+            return endt_meta(ctx, sid, true);
         }
         return Ok(xdp_action::XDP_PASS);
     }
@@ -4197,7 +4219,7 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
             if let Some(et) = inner_et {
                 decap_head(ctx, IP6_HDR_LEN + 8 * (ext_len as usize + 1), et)?;
                 stat_inc(STAT_SRV6_USD);
-                return endt_meta(ctx, sid);
+                return endt_meta(ctx, sid, true);
             }
         }
         if sid.flavors & SRV6_FLAVOR_USP != 0 && ult_ok {
@@ -4230,22 +4252,18 @@ fn srv6_end(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         // the TC FIB stage does the redirect + hop limit decrement. End.T
         // (and a table-bound uN — zebra's uT) scopes that lookup to the
         // SID's table (RFC 8986 §4.3 S15.1).
-        return endt_meta(ctx, sid);
+        return endt_meta(ctx, sid, false);
     }
 
     // End.X / uA: forward straight out the SID's cross-connect adjacency.
     srv6_forward_adjacency(ctx, sid.nexthop_id)
 }
 
-/// RFC 8986 §4.3 S15.1 — scope the upcoming TC forward to the SID's table.
-/// Applies to `End.T` and to a `uN` whose `vrf_id` is set (zebra's uT);
-/// everything else (including table 0) passes untouched. Uses the same
-/// XDP→TC metadata channel as the DT decap path.
+/// Attach SRv6-endpoint provenance (`XDP_META_MAGIC_SRV6`) and the forwarding
+/// table for the TC stage. Unconditional — vrf 0 (global) included — so the
+/// SRv6→GTP4.E stitch guard also covers decaps into the global table.
 #[inline(always)]
-fn endt_meta(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
-    if sid.vrf_id == 0 || !matches!(sid.behavior, SRV6_BH_END_T | SRV6_BH_UN) {
-        return Ok(xdp_action::XDP_PASS);
-    }
+fn srv6_decap_meta(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
     if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
     {
         stat_inc(STAT_DROP);
@@ -4253,12 +4271,29 @@ fn endt_meta(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     }
     let meta = xdp_meta_ptr(ctx)?;
     unsafe {
-        // SRv6-endpoint provenance (End.T / uN uT) — see XDP_META_MAGIC_SRV6.
         (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
-        (*meta).vrf_id = sid.vrf_id;
+        (*meta).vrf_id = vrf_id;
     }
-    stat_inc(STAT_SRV6_ENDT);
     Ok(xdp_action::XDP_PASS)
+}
+
+/// RFC 8986 §4.3 S15.1 — scope the upcoming TC forward to the SID's table.
+/// Applies to `End.T` and to a `uN` whose `vrf_id` is set (zebra's uT).
+/// `decap` marks a USD decapsulation: the exposed inner packet then always
+/// carries SRv6 provenance — table-less (vrf 0) included — so the SRv6→GTP4.E
+/// stitch guard can see it. Transit (`End` segment advance, `decap == false`)
+/// stays untagged when unscoped: the packet is still SRv6-encapped, so there
+/// is no exposed inner to protect.
+#[inline(always)]
+fn endt_meta(ctx: &XdpContext, sid: &LocalSid, decap: bool) -> Result<u32, ()> {
+    let scoped = sid.vrf_id != 0 && matches!(sid.behavior, SRV6_BH_END_T | SRV6_BH_UN);
+    if !scoped && !decap {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if scoped {
+        stat_inc(STAT_SRV6_ENDT);
+    }
+    srv6_decap_meta(ctx, if scoped { sid.vrf_id } else { 0 })
 }
 
 /// Pop the SRH from an IPv6 packet whose Routing header immediately follows
@@ -4425,6 +4460,9 @@ fn srv6_replace_once(ctx: &XdpContext, sid: &LocalSid) -> Result<ReplaceStep, ()
             };
             decap_head(ctx, IP6_HDR_LEN, inner_et)?;
             stat_inc(STAT_SRV6_USD);
+            // Provenance for the exposed inner (End-REP is table-less) — the
+            // SRv6→GTP4.E stitch guard must see USD decaps too.
+            return srv6_decap_meta(ctx, 0).map(Act);
         }
         return Ok(Act(xdp_action::XDP_PASS));
     }
@@ -4447,7 +4485,8 @@ fn srv6_replace_once(ctx: &XdpContext, sid: &LocalSid) -> Result<ReplaceStep, ()
             if let Some(et) = inner_et {
                 decap_head(ctx, IP6_HDR_LEN + 8 * (ext_len as usize + 1), et)?;
                 stat_inc(STAT_SRV6_USD);
-                return Ok(Act(xdp_action::XDP_PASS));
+                // Provenance for the exposed inner — see the no-SRH sibling.
+                return srv6_decap_meta(ctx, 0).map(Act);
             }
         }
         if sid.flavors & SRV6_FLAVOR_USP != 0 && !is_x {
@@ -4826,21 +4865,9 @@ fn srv6_endm(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     };
     decap_head(ctx, strip2, inner_et)?;
     stat_inc(STAT_SRV6_ENDM);
-    if ment.vrf_id != 0 {
-        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
-            != 0
-        {
-            stat_inc(STAT_DROP);
-            return Ok(xdp_action::XDP_DROP);
-        }
-        let meta = xdp_meta_ptr(ctx)?;
-        unsafe {
-            // SRv6-endpoint provenance (End.M) — see XDP_META_MAGIC_SRV6.
-            (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
-            (*meta).vrf_id = ment.vrf_id;
-        }
-    }
-    Ok(xdp_action::XDP_PASS)
+    // SRv6-endpoint provenance (End.M) — unconditional, vrf 0 included, so
+    // the SRv6→GTP4.E stitch guard covers every decap.
+    srv6_decap_meta(ctx, ment.vrf_id)
 }
 
 /// Shift the uSID (NEXT-C-SID) container in the IPv6 DA left by one micro-SID:
