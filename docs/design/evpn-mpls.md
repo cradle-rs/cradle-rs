@@ -8,12 +8,16 @@
 > seg6local), there is no kernel action that pops an MPLS label and hands the
 > exposed Ethernet frame to a bridge. cradle is what makes it forward.
 
-Status: **Slices 1–2 implemented.** Slice 1: unicast `l2_mpls_encap` /
+Status: **Slices 1–3 implemented.** Slice 1: unicast `l2_mpls_encap` /
 `MPLS_OP_POP_L2`, the gRPC and static-JSON surfaces, and the
 `cradle_evpn_mpls` BDD (two PEs, CE-to-CE ping over an MPLS underlay with
 kernel MPLS off). Slice 2: BUM — the per-BD all-ones-MAC sentinel and
 multi-PE ingress replication (`REPL_KIND_MPLS` slots), proven by
-`cradle_evpn_mpls_bum` and `cradle_evpn_mpls_multi`. It builds on the MPLS
+`cradle_evpn_mpls_bum` and `cradle_evpn_mpls_multi`. Slice 3: the zebra-rs
+BGP EVPN control-plane tee — `router bgp afi-safi evpn encapsulation mpls`
+with a declared `evi`, whose Type-2/Type-3 routes drive the FDB entries,
+replication slots and decap ILM end to end (`cradle_evpn_mpls_zebra`). It
+builds on the MPLS
 phases ([mpls.md](mpls.md)) and reuses the L2 switching, FDB, flood and
 bridge-domain machinery the SRv6 and VXLAN overlays already established
 ([evpn-srv6.md](evpn-srv6.md), [evpn-vxlan.md](evpn-vxlan.md)) — this is a
@@ -160,7 +164,30 @@ the *eBPF* stage imposed and disposed of the labels.
   proves the transit hop, and exercises the rule that the service label
   underneath belongs to the egress PE and is never looked up locally.
 
+- `cradle_evpn_mpls_zebra` — the whole stack, BGP-driven, three transit
+  nodes: `c1 ── pe1 ── p ── pe2 ── c2`, IS-IS SR-MPLS for the transport LSP
+  and iBGP L2VPN-EVPN for the service. Fully dynamic — no static ARP, FDB,
+  slots or labels anywhere. The P router carries no EVPN state at all: it
+  only swaps (and, being penultimate for both loopbacks, pops) the transport
+  label, which is what makes this the layering test — BGP advertises a *PE*,
+  IS-IS supplies the label to reach it, and the data plane composes the two.
+
 Mandatory teardown scenario on each.
+
+Two integration traps this feature walked into, both worth knowing:
+
+- **The PEs' own iBGP session** is router-originated TCP entering an
+  XDP-forwarded core. It leaves the stack with deferred (partial) checksums
+  that an XDP redirect never resolves, so the far end drops the segments
+  while ICMP and transit traffic flow fine — the session simply never
+  establishes. The BDD disables TX checksum offload on the core-facing
+  veths. Same trap [`mpls.md`](mpls.md) records for L3VPN.
+- **An ILM installed before the tee connects was never re-teed.** zebra's
+  post-connect resync walked IP routes but not the ILM table, and a service
+  label is programmed once, at config load — exactly when the tee is still
+  connecting. The symptom is maximally confusing: both control planes look
+  correct, `show mpls ilm` lists the decap, and the egress PE silently drops
+  frames whose top label it has no entry for. Fixed in zebra-rs (#2129).
 
 One harness bug had to be fixed to run these: every per-feature resource is
 named `<feature-tag>_<logical>`, and the startup sweep / clean-environment
@@ -177,11 +204,8 @@ carry `short_id()`, a hash of the whole tag.
   trie lookup inlined into `cradle_xdp`, which the stack budget above does not
   have room for today; MPLS cores are IPv4 in practice, and such an entry punts
   to the host stack rather than misforwarding.
-- **The zebra-rs tee** — Type-2/Type-3 origination and import over MPLS, and
-  with it a fully dynamic `cradle_evpn_mpls_zebra`. Everything below the
-  control plane is now in place: the slot lifecycle cradle owns itself
-  (`AddReplSlot` creates the veth pair, flood membership and XDP attach) is
-  what the Type-3 tee will drive, exactly as it does for SRv6 and VXLAN.
+- **Multihoming** — Type-1/Type-4 and the ESI label's split-horizon check,
+  which needs a second label inspection below the service label.
 - Out of scope for now: multihoming (Type-1/Type-4 and the ESI label's
   split-horizon check, which needs a *second* label inspection below the
   service label), the control word, EVPN-VPWS over MPLS, and symmetric IRB.
