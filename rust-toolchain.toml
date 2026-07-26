@@ -2,6 +2,22 @@
 # toolchain (for `-Z build-std=core` against the `bpfel-unknown-none` target).
 # We pin the whole workspace to nightly for simplicity; the user-space crates
 # can be split back onto stable later if desired.
+#
+# The channel is pinned to a DATED nightly, not floating `nightly`. A floating
+# channel puts every build — including the unattended nightly .deb pipeline —
+# at the mercy of whatever rustc landed that morning, and Cargo.lock is not
+# committed, so dependency versions float too. That combination broke the
+# nightly build on 2026-07-24: rustc gained a codegen regression that ICEs on
+# tokio >= 1.53.1 at `-C opt-level=3` ("not immediate: OperandRef(Uninit @
+# UnsafeCell<MaybeUninit<Notified<Arc<Handle>>>>)", rustc_codegen_ssa
+# mir/operand.rs:291), failing all six release .deb legs. CI stayed green
+# because it only builds debug. Verified regression window:
+#   clean  1.99.0-nightly (6f72b5dd5 2026-07-22)  = nightly-2026-07-23
+#   ICE    1.99.0-nightly (89c61a754 2026-07-23)  = nightly-2026-07-24
+# Upstream: https://github.com/rust-lang/rust/issues/154904 (still open).
+#
+# Bump this date deliberately, after checking a release build passes; drop the
+# pin back to floating `nightly` only if the churn is ever worth it again.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-07-23"
 components = ["rust-src", "rustfmt", "clippy"]
