@@ -1,0 +1,25 @@
+{
+  "ports": [
+    { "name": "pe1c", "vlan": 100 },
+    { "name": "pe1u", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe1u", "gateway": "10.0.1.2", "labels": [16] },
+    { "id": 2 }
+  ],
+  "neighbors": [
+    { "oif": "pe1u", "ip": "10.0.1.2", "mac": "02:00:00:00:02:0a" }
+  ],
+  "routes": [
+    { "prefix": "10.255.0.2/32", "nexthop": 1 }
+  ],
+  "ilm": [
+    { "in_label": 26, "nexthop": 2, "action": "swap" },
+    { "in_label": 1100, "action": "pop-l2", "bd": 100 },
+    { "in_label": 1200, "action": "pop-l2", "bd": 100 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:c2:02", "bd": 100, "remote_pe": "10.255.0.2", "label": 2100 },
+    { "mac": "ff:ff:ff:ff:ff:ff", "bd": 100, "remote_pe": "10.255.0.2", "label": 2200 }
+  ]
+}
