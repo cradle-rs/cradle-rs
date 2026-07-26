@@ -101,9 +101,10 @@ fn default_fdb_age_secs() -> u64 {
 /// the BD so the flood reaches it); `encap_port` is the B end (declare it as
 /// an L3 port so the XDP stage attaches), where each flooded copy is
 /// encapsulated toward the remote PE — MAC-in-SRv6 toward `remote_sid` (its
-/// End.DT2M), or VXLAN toward `remote_vtep` carrying `vni` (exactly one of
-/// sid/vtep; `vni` is required with `remote_vtep` — static slots name ports,
-/// not a bridge domain, so there is no binding to resolve it from).
+/// End.DT2M), VXLAN toward `remote_vtep` carrying `vni`, or MPLS toward
+/// `remote_pe` carrying `label` (exactly one of sid/vtep/pe; `vni` is required
+/// with `remote_vtep` and `label` with `remote_pe` — static slots name ports,
+/// not a bridge domain, so there is no binding to resolve them from).
 #[derive(Debug, Deserialize)]
 pub struct ReplSlotCfg {
     pub flood_port: String,
@@ -114,6 +115,12 @@ pub struct ReplSlotCfg {
     pub remote_vtep: Option<String>,
     #[serde(default)]
     pub vni: Option<u32>,
+    /// Remote PE address (EVPN over MPLS), paired with `label`.
+    #[serde(default)]
+    pub remote_pe: Option<String>,
+    /// The remote PE's BUM (EVI) service label (EVPN over MPLS).
+    #[serde(default)]
+    pub label: u32,
 }
 
 /// An RFC 9524 Replication segment: the local `End.Replicate` SID `sid` (also
@@ -144,10 +151,12 @@ pub struct ReplSegBranchCfg {
 }
 
 /// A static overlay FDB entry: the MAC `mac` in bridge domain `bd` is behind
-/// a remote PE — over SRv6 (`remote_sid`, the PE's `End.DT2U`/`DT2M` SID) or
+/// a remote PE — over SRv6 (`remote_sid`, the PE's `End.DT2U`/`DT2M` SID),
 /// over VXLAN (`remote_vtep`, the PE's VTEP IPv4; the VNI comes from the BD's
-/// `vnis` binding). Exactly one of the two. Reached via underlay nexthop
-/// `nexthop` (0 = FIB lookup on the SID/VTEP).
+/// `vnis` binding), or over MPLS (`remote_pe` plus that PE's EVI service
+/// `label`). Exactly one of the three. Reached via underlay nexthop `nexthop`
+/// (0 = FIB lookup on the SID/VTEP/PE, which for MPLS also supplies the
+/// transport LSP stack the service label rides under).
 #[derive(Debug, Deserialize)]
 pub struct FdbCfg {
     pub mac: String,
@@ -156,6 +165,12 @@ pub struct FdbCfg {
     pub remote_sid: Option<String>,
     #[serde(default)]
     pub remote_vtep: Option<String>,
+    /// Remote PE address (EVPN over MPLS), paired with `label`.
+    #[serde(default)]
+    pub remote_pe: Option<String>,
+    /// The remote PE's EVI service label (EVPN over MPLS).
+    #[serde(default)]
+    pub label: u32,
     #[serde(default)]
     pub nexthop: u32,
 }
@@ -333,14 +348,21 @@ pub struct GtpPdrCfg {
     pub vrf: u32,
 }
 
-/// An incoming-label map entry: `action` is `"swap"`, `"pop"` or `"pop-l3"`.
+/// An incoming-label map entry: `action` is `"swap"`, `"pop"`, `"pop-l3"` or
+/// `"pop-l2"` (EVPN-over-MPLS egress — pop the EVI service label and bridge
+/// the exposed Ethernet frame in `bd`; no nexthop is needed).
 #[derive(Debug, Deserialize)]
 pub struct Ilm {
     pub in_label: u32,
+    #[serde(default)]
     pub nexthop: u32,
     pub action: String,
     #[serde(default)]
     pub vrf: u32,
+    /// Bridge domain the exposed Ethernet frame is switched in (`pop-l2`).
+    /// Shares the ILM's table-id field with `vrf`, which `pop-l3` uses.
+    #[serde(default)]
+    pub bd: u32,
     /// MPLS TTL model at disposition (RFC 3443). `false` (default) = pipe
     /// (discard the label TTL, preserve the inner IP TTL); `true` = uniform
     /// (copy the popped label TTL into the inner IP header on pop-to-IP).
@@ -541,7 +563,8 @@ pub fn ilm_action(action: &str) -> Result<u8> {
         "swap" => Ok(cradle_common::MPLS_OP_SWAP),
         "pop" => Ok(cradle_common::MPLS_OP_POP),
         "pop-l3" => Ok(cradle_common::MPLS_OP_POP_L3),
-        other => anyhow::bail!("unknown ILM action {other:?} (want swap|pop|pop-l3)"),
+        "pop-l2" => Ok(cradle_common::MPLS_OP_POP_L2),
+        other => anyhow::bail!("unknown ILM action {other:?} (want swap|pop|pop-l3|pop-l2)"),
     }
 }
 
@@ -711,35 +734,47 @@ impl Config {
         }
         for f in &self.fdb {
             let mac = util::parse_mac(&f.mac)?;
-            match (&f.remote_sid, &f.remote_vtep) {
-                (Some(sid), None) => {
+            match (&f.remote_sid, &f.remote_vtep, &f.remote_pe) {
+                (Some(sid), None, None) => {
                     let remote_sid = sid
                         .parse()
                         .with_context(|| format!("bad remote SID {sid:?}"))?;
                     ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop).await?;
                 }
-                (None, Some(vtep)) => {
+                (None, Some(vtep), None) => {
                     let vtep = vtep
                         .parse()
                         .with_context(|| format!("bad remote VTEP {vtep:?}"))?;
                     ctl.add_fdb_remote_vxlan(mac, f.bd, vtep, f.nexthop).await?;
                 }
+                (None, None, Some(pe)) => {
+                    let pe = pe
+                        .parse()
+                        .with_context(|| format!("bad remote PE {pe:?}"))?;
+                    anyhow::ensure!(
+                        f.label != 0 && f.label < (1 << 20),
+                        "fdb entry {}: remote_pe needs a 20-bit service label",
+                        f.mac
+                    );
+                    ctl.add_fdb_remote_mpls(mac, f.bd, pe, f.label, f.nexthop)
+                        .await?;
+                }
                 _ => anyhow::bail!(
-                    "fdb entry {}: exactly one of remote_sid / remote_vtep",
+                    "fdb entry {}: exactly one of remote_sid / remote_vtep / remote_pe",
                     f.mac
                 ),
             }
         }
         for r in &self.repl_slots {
-            match (&r.remote_sid, &r.remote_vtep) {
-                (Some(sid), None) => {
+            match (&r.remote_sid, &r.remote_vtep, &r.remote_pe) {
+                (Some(sid), None, None) => {
                     let remote_sid = sid
                         .parse()
                         .with_context(|| format!("bad remote SID {sid:?}"))?;
                     ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid)
                         .await?;
                 }
-                (None, Some(vtep)) => {
+                (None, Some(vtep), None) => {
                     let vtep = vtep
                         .parse()
                         .with_context(|| format!("bad remote VTEP {vtep:?}"))?;
@@ -749,8 +784,20 @@ impl Config {
                     ctl.add_repl_slot_vxlan(&r.flood_port, &r.encap_port, vtep, vni)
                         .await?;
                 }
+                (None, None, Some(pe)) => {
+                    let pe = pe
+                        .parse()
+                        .with_context(|| format!("bad remote PE {pe:?}"))?;
+                    anyhow::ensure!(
+                        r.label != 0 && r.label < (1 << 20),
+                        "repl slot {}: remote_pe needs a 20-bit service label",
+                        r.flood_port
+                    );
+                    ctl.add_repl_slot_mpls(&r.flood_port, &r.encap_port, pe, r.label)
+                        .await?;
+                }
                 _ => anyhow::bail!(
-                    "repl slot {}: exactly one of remote_sid / remote_vtep",
+                    "repl slot {}: exactly one of remote_sid / remote_vtep / remote_pe",
                     r.flood_port
                 ),
             }
@@ -799,7 +846,10 @@ impl Config {
             } else {
                 0
             };
-            ctl.add_ilm(i.in_label, i.nexthop, op, i.vrf, flags).await?;
+            // `bd` and `vrf` are the same ILM field, named for the action that
+            // uses it (POP_L2 bridges, POP_L3 routes).
+            let table = if i.bd != 0 { i.bd } else { i.vrf };
+            ctl.add_ilm(i.in_label, i.nexthop, op, table, flags).await?;
         }
         // Bulk-install: the bootstrap config is an initial load, so all
         // routes go down in one plan (one block sync per affected /24).

@@ -41,25 +41,26 @@ use aya_ebpf::{
 use cradle_common::{
     AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
     CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, DPC_L3_ONLY,
-    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN,
-    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED,
-    FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry,
-    FdbKey, FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD,
+    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_MPLS, FDB_F_REMOTE,
+    FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID,
+    FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
+    FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD,
     L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS,
-    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry,
-    MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
-    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED,
-    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2,
-    PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
-    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
-    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
-    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
-    STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
+    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_SWAP, MPLS_PIPE_TTL,
+    MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6,
+    NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND,
+    PCT_POD_INITIATED, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
+    PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL,
+    REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46,
+    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP,
+    SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP,
+    SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT,
+    STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP,
+    STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_L2_BUM,
+    STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
     STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
     STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
     STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
@@ -748,6 +749,8 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result
                 flags: 0,
                 remote_sid: [0; 16],
                 last_seen: unsafe { bpf_ktime_get_ns() },
+                label: 0,
+                _pad: [0; 4],
             },
             0,
         );
@@ -2770,17 +2773,18 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // send it out the underlay via the FIB route to the SID/VTEP.
     if let Some(t) = REPL_SID.get_ptr(&iif) {
         let t = unsafe { &*t };
-        let ent = FdbEntry {
-            oif: 0, // resolve the underlay adjacency by FIB lookup
-            flags: FDB_F_REMOTE,
-            remote_sid: t.addr,
-            last_seen: 0,
+        // Restate the slot's target in `l2_overlay_encap`'s terms so the copy
+        // takes the one shared encap site — dispatching on `t.kind` here would
+        // inline a second copy of every encap body and blow cradle_xdp's BPF
+        // stack limit. `t.vni` is the VXLAN VNI or the MPLS service label,
+        // exactly the `aux` the flavor wants; the adjacency is resolved by a
+        // FIB lookup on the target.
+        let flags = match t.kind {
+            REPL_KIND_VXLAN => FDB_F_VXLAN,
+            REPL_KIND_MPLS => FDB_F_MPLS,
+            _ => 0,
         };
-        return if t.kind == REPL_KIND_VXLAN {
-            l2_vxlan_encap(ctx, &ent, t.vni, STAT_VXLAN_FLOOD)
-        } else {
-            l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_BUM)
-        };
+        return l2_overlay_encap(ctx, &t.addr, 0, flags, t.vni, true);
     }
     // VLAN-scoped VPWS AC (RFC 8214 VLAN-based E-Line, End.DX2V): an
     // 802.1Q-tagged frame picks its E-Line by (AC ifindex, VID) — the tag
@@ -2795,13 +2799,8 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             _pad: [0; 2],
         };
         if let Some(sid) = XCONNECT_VLAN.get_ptr(&key) {
-            let ent = FdbEntry {
-                oif: 0, // resolve the underlay adjacency by FIB6 lookup
-                flags: FDB_F_REMOTE,
-                remote_sid: unsafe { *sid },
-                last_seen: 0,
-            };
-            return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_ENCAP);
+            // 0 = resolve the underlay adjacency by FIB6 lookup on the SID.
+            return l2_srv6_encap(ctx, unsafe { &*sid }, 0, STAT_SRV6_L2_ENCAP);
         }
     }
     // VPWS attachment circuit (RFC 8214 E-Line): every frame from a bound
@@ -2809,13 +2808,8 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // End.DX2/DX2V SID. Checked before the L2 bridge dispatch so the AC
     // never MAC-learns or floods.
     if let Some(sid) = XCONNECT.get_ptr(&iif) {
-        let ent = FdbEntry {
-            oif: 0, // resolve the underlay adjacency by FIB6 lookup
-            flags: FDB_F_REMOTE,
-            remote_sid: unsafe { *sid },
-            last_seen: 0,
-        };
-        return l2_srv6_encap(ctx, &ent, STAT_SRV6_L2_ENCAP);
+        // 0 = resolve the underlay adjacency by FIB6 lookup on the SID.
+        return l2_srv6_encap(ctx, unsafe { &*sid }, 0, STAT_SRV6_L2_ENCAP);
     }
     if let Some(p) = PORTS.get_ptr(&iif) {
         if unsafe { (*p).flags } & PORT_F_L2 != 0 {
@@ -3003,14 +2997,18 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
                 flags: 0,
                 remote_sid: [0; 16],
                 last_seen: unsafe { bpf_ktime_get_ns() },
+                label: 0,
+                _pad: [0; 4],
             },
             0,
         );
     }
     // Resolve to one (entry, bum?) pair, then encapsulate at a SINGLE call
-    // site — each `l2_overlay_encap` expansion inlines both encap bodies,
-    // and three of them push cradle_xdp's flattened frame past the
-    // verifier's call-chain stack budget (see `PolicyScratch6`).
+    // site — each `l2_overlay_encap` expansion inlines every encap body, and
+    // two of them push cradle_xdp's flattened frame past the verifier's
+    // call-chain stack budget (see `PolicyScratch6`). This is also why the
+    // BUM replication-slot path in `try_xdp` funnels through the same
+    // `l2_overlay_encap` rather than dispatching on the slot kind itself.
     let dst = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? };
     let (ent, bum): (&FdbEntry, bool) = if dst[0] & 0x01 != 0 {
         match l2_evpn_bum_tunnel(bd) {
@@ -3037,51 +3035,82 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
             }
         }
     };
-    l2_overlay_encap(ctx, ent, bd, bum)
-}
-
-/// Tunnel an L2 frame toward the remote PE its FDB entry names, by the
-/// entry's overlay flavor: VXLAN (`FDB_F_VXLAN`, the VNI from the bridge
-/// domain's `VLAN_VNI` binding) or MAC-in-SRv6 (the default). `bum`
-/// selects the flood-vs-unicast counter.
-#[inline(always)]
-fn l2_overlay_encap(ctx: &XdpContext, ent: &FdbEntry, bd: u16, bum: bool) -> Result<u32, ()> {
-    if ent.flags & FDB_F_VXLAN != 0 {
-        let vni = match VLAN_VNI.get_ptr(&bd) {
+    // A VXLAN entry needs the bridge domain's VNI binding; resolve it here so
+    // `l2_overlay_encap` takes an already-resolved value and the replication
+    // slot path (whose VNI comes from the slot, not the BD) can share it. An
+    // MPLS entry's `aux` is instead the remote PE's EVI service label.
+    let aux = if ent.flags & FDB_F_VXLAN != 0 {
+        match VLAN_VNI.get_ptr(&bd) {
             Some(v) => unsafe { *v },
             None => return Ok(xdp_action::XDP_PASS), // BD not VNI-bound
+        }
+    } else {
+        ent.label
+    };
+    l2_overlay_encap(ctx, &ent.remote_sid, ent.oif, ent.flags, aux, bum)
+}
+
+/// Tunnel an L2 frame toward the remote PE `addr` names, by overlay flavor:
+/// VXLAN (`FDB_F_VXLAN` — `addr` is the VTEP v4-mapped, `aux` the VNI), MPLS
+/// (`FDB_F_MPLS` — `addr` is the PE, `aux` its EVI service label, imposed
+/// under the transport LSP) or MAC-in-SRv6 (neither flag — `addr` is the
+/// remote `End.DT2U`/`DT2M` SID). `nh_id` is the underlay adjacency, 0 to
+/// resolve it by a FIB lookup on `addr`; `bum` selects the flood-vs-unicast
+/// counter.
+///
+/// **The only encap call site in `cradle_xdp`.** Every caller funnels through
+/// here — passing the target's fields rather than a synthesized `FdbEntry`,
+/// which would cost a stack copy per call site — because each expansion
+/// inlines all three encap bodies, and a second expansion overflows the BPF
+/// stack limit.
+#[inline(always)]
+fn l2_overlay_encap(
+    ctx: &XdpContext,
+    addr: &[u8; 16],
+    nh_id: u32,
+    flags: u32,
+    aux: u32,
+    bum: bool,
+) -> Result<u32, ()> {
+    if flags & FDB_F_MPLS != 0 {
+        let stat = if bum {
+            STAT_MPLS_L2_BUM
+        } else {
+            STAT_MPLS_L2_ENCAP
         };
+        l2_mpls_encap(ctx, addr, nh_id, aux, stat)
+    } else if flags & FDB_F_VXLAN != 0 {
         let stat = if bum {
             STAT_VXLAN_FLOOD
         } else {
             STAT_VXLAN_ENCAP
         };
-        l2_vxlan_encap(ctx, ent, vni, stat)
+        l2_vxlan_encap(ctx, addr, nh_id, aux, stat)
     } else {
         let stat = if bum {
             STAT_SRV6_L2_BUM
         } else {
             STAT_SRV6_L2_ENCAP
         };
-        l2_srv6_encap(ctx, ent, stat)
+        l2_srv6_encap(ctx, addr, nh_id, stat)
     }
 }
 
 /// MAC-in-SRv6 encap: prepend an outer Ethernet + outer IPv6 header
-/// (`next_header = 143`, *Ethernet*, DA = the remote `End.DT2U`/`End.DT2M` SID)
-/// and redirect out the underlay adjacency. Single service SID ⇒ no SRH. The
-/// inner frame is preserved untouched as the IPv6 payload. `ent.oif` is the
-/// underlay nexthop id (remote FDB entries reuse the `oif` field for it); `stat`
+/// (`next_header = 143`, *Ethernet*, DA = `sid`, the remote `End.DT2U` /
+/// `End.DT2M` service SID) and redirect out the underlay adjacency. Single
+/// service SID ⇒ no SRH. The inner frame is preserved untouched as the IPv6
+/// payload. `nh_id` is the underlay adjacency (0 = resolve by FIB); `stat`
 /// distinguishes unicast (`STAT_SRV6_L2_ENCAP`) from BUM (`STAT_SRV6_L2_BUM`).
 #[inline(always)]
-fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry, stat: u32) -> Result<u32, ()> {
+fn l2_srv6_encap(ctx: &XdpContext, sid: &[u8; 16], nh_id: u32, stat: u32) -> Result<u32, ()> {
     // Underlay adjacency: an explicit nexthop id (static config), or — when
     // the entry came from the control-plane tee with nexthop 0 — resolved by
     // a FIB6 lookup on the remote SID (the locator route the IGP installed).
-    let nh_id = if ent.oif != 0 {
-        ent.oif
+    let nh_id = if nh_id != 0 {
+        nh_id
     } else {
-        let fib: FibEntry = match FIB6.get(Key::new(128, ent.remote_sid)) {
+        let fib: FibEntry = match FIB6.get(Key::new(128, *sid)) {
             Some(f) => *f,
             None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
         };
@@ -3117,26 +3146,27 @@ fn l2_srv6_encap(ctx: &XdpContext, ent: &FdbEntry, stat: u32) -> Result<u32, ()>
     unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? = IPPROTO_ETHERNET };
     unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = 64 };
     unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)? = src6 };
-    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = ent.remote_sid };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = *sid };
     stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
 /// VXLAN encap (RFC 7348): prepend outer Ethernet + IPv4 + UDP(4789) + VXLAN
-/// carrying `vni`, toward the remote VTEP the FDB entry names (v4-mapped in
-/// `remote_sid`), and redirect out the underlay adjacency. The whole inner
-/// frame rides as the VXLAN payload. `l2_srv6_encap`'s shape with GTP's outer
-/// IPv4+UDP recipe: header checksum from `ipv4_hdr_csum`, UDP checksum 0
-/// (optional over IPv4, RFC 7348 §4.3), UDP source port from the inner MACs
-/// for underlay ECMP entropy (§5).
+/// carrying `vni`, toward the remote VTEP `addr` names (v4-mapped), and
+/// redirect out the underlay adjacency. The whole inner frame rides as the
+/// VXLAN payload. `l2_srv6_encap`'s shape with GTP's outer IPv4+UDP recipe:
+/// header checksum from `ipv4_hdr_csum`, UDP checksum 0 (optional over IPv4,
+/// RFC 7348 §4.3), UDP source port from the inner MACs for underlay ECMP
+/// entropy (§5).
 #[inline(always)]
-fn l2_vxlan_encap(ctx: &XdpContext, ent: &FdbEntry, vni: u32, stat: u32) -> Result<u32, ()> {
-    let vtep: [u8; 4] = [
-        ent.remote_sid[12],
-        ent.remote_sid[13],
-        ent.remote_sid[14],
-        ent.remote_sid[15],
-    ];
+fn l2_vxlan_encap(
+    ctx: &XdpContext,
+    addr: &[u8; 16],
+    nh_id: u32,
+    vni: u32,
+    stat: u32,
+) -> Result<u32, ()> {
+    let vtep: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
     // Underlay adjacency: an explicit nexthop id (static config), or — when
     // the entry came from the control-plane tee with nexthop 0 — resolved by
     // a FIB4 lookup on the remote VTEP (the underlay route the IGP installed).
@@ -3144,8 +3174,8 @@ fn l2_vxlan_encap(ctx: &XdpContext, ent: &FdbEntry, vni: u32, stat: u32) -> Resu
     // `fib4_lookup` would inline the whole DIR-24 engine into cradle_xdp's
     // flattened frame and blow the verifier's stack budget; in dir24 mode a
     // VXLAN FDB entry needs an explicit nexthop id.
-    let nh_id = if ent.oif != 0 {
-        ent.oif
+    let nh_id = if nh_id != 0 {
+        nh_id
     } else {
         // Borrow, don't copy: cradle_xdp's flattened frame sits at the
         // verifier's call-chain stack budget (see `PolicyScratch6`), so this
@@ -3211,6 +3241,114 @@ fn l2_vxlan_encap(ctx: &XdpContext, ent: &FdbEntry, vni: u32, stat: u32) -> Resu
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
 
+/// True when a 16-byte overlay target holds an IPv4 address v4-mapped
+/// (`::ffff:a.b.c.d`, bytes 12..16 the wire address) — the encoding the
+/// control plane uses to carry either family in one fixed-width field.
+#[inline(always)]
+fn is_v4_mapped(addr: &[u8; 16]) -> bool {
+    addr[0] == 0
+        && addr[1] == 0
+        && addr[2] == 0
+        && addr[3] == 0
+        && addr[4] == 0
+        && addr[5] == 0
+        && addr[6] == 0
+        && addr[7] == 0
+        && addr[8] == 0
+        && addr[9] == 0
+        && addr[10] == 0xff
+        && addr[11] == 0xff
+}
+
+/// MPLS encap (RFC 7432, MPLS-based EVPN): prepend an outer Ethernet header
+/// (EtherType `0x8847`), the transport LSP stack carried on the underlay
+/// nexthop, and — at the bottom of stack — the remote PE's EVI service label,
+/// then redirect out the underlay adjacency. The whole inner frame rides
+/// untouched beneath the labels; no control word is inserted (RFC 7432 leaves
+/// it optional and both ends must agree, so it is a later, negotiated knob).
+///
+/// `l2_vxlan_encap`'s adjacency-resolution shape with `grow_swap`'s LSE
+/// writer. `addr` is the remote PE address (v4-mapped), `nh_id` the underlay
+/// adjacency (0 = resolve by FIB) and `label` the PE's EVI service label;
+/// `stat` distinguishes unicast (`STAT_MPLS_L2_ENCAP`) from BUM
+/// (`STAT_MPLS_L2_BUM`).
+#[inline(always)]
+fn l2_mpls_encap(
+    ctx: &XdpContext,
+    addr: &[u8; 16],
+    nh_id: u32,
+    label: u32,
+    stat: u32,
+) -> Result<u32, ()> {
+    // Underlay adjacency: an explicit nexthop id (static config / a
+    // pre-resolved tee), or — when the entry came from the control plane with
+    // nexthop 0 — resolved by a FIB4 lookup on the remote PE address, whose
+    // route carries the transport LSP labels. Borrow, don't copy: cradle_xdp's
+    // flattened frame sits at the verifier's stack budget (see
+    // `l2_vxlan_encap`). MVP: IPv4 underlay only — an IPv6-underlay PE would
+    // need a second (16-byte-key) trie lookup inlined here, and MPLS cores are
+    // IPv4 in practice; such an entry punts to the host stack.
+    let nh_id = if nh_id != 0 {
+        nh_id
+    } else {
+        let pe: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
+        if !is_v4_mapped(addr) {
+            return Ok(xdp_action::XDP_PASS); // IPv6-underlay PE: not handled
+        }
+        let fib: &FibEntry = match FIB4.get(Key::new(32, pe)) {
+            Some(f) => f,
+            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+        };
+        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
+            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        }
+        fib.nexthop_id
+    };
+    let nh: &NextHop = match NEXTHOPS.get_ptr(&nh_id) {
+        Some(n) => unsafe { &*n },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    // Transport labels sit above the service label. A deeper stack than the
+    // datapath can write is punted rather than truncated.
+    let n = nh.num_labels as usize;
+    if n > MAX_LABELS {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let grow = (EthHdr::LEN + 4 * (n + 1)) as i32;
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, -grow) } != 0 {
+        return Err(());
+    }
+    // Outer Ethernet — MPLS egress builds its own L2 header (there is no
+    // `bpf_redirect_neigh` nh_family for MPLS; see docs/design/mpls.md).
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? = ETH_P_MPLS_UC.to_be() };
+    // Transport LSP stack, outermost first (S=0). An Ethernet payload has no
+    // inner TTL to copy, so every imposed entry is seeded pipe-style.
+    for i in 0..MAX_LABELS {
+        if i >= n {
+            break;
+        }
+        let lse = mpls_lse(nh.labels[i], 0, 0, MPLS_PIPE_TTL).to_be();
+        unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 4 * i)? = lse };
+    }
+    // The EVI service label, bottom of stack. `n <= MAX_LABELS`, so the offset
+    // is one of a small constant set — spelled out rather than computed so the
+    // verifier sees a constant packet offset per branch.
+    let svc = mpls_lse(label, 0, 1, MPLS_PIPE_TTL).to_be();
+    match n {
+        0 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF)? = svc },
+        1 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 4)? = svc },
+        2 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 8)? = svc },
+        _ => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 12)? = svc },
+    }
+    stat_inc(stat);
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
 #[inline(always)]
 fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // Only *local* label chains loop (nexthop-less pops: this node owns the
@@ -3229,6 +3367,14 @@ fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             Some(e) => unsafe { *e },
             None => return Ok(xdp_action::XDP_PASS), // unknown label: not ours
         };
+        // EVPN-over-MPLS egress (RFC 7432): the label is an EVI service label —
+        // pop it and bridge the exposed Ethernet frame in the ILM's bridge
+        // domain. Dispatched before the nexthop resolve because a service label
+        // is purely local: it is never forwarded on, so its ILM carries no
+        // adjacency and `NEXTHOPS` would miss.
+        if ent.op == MPLS_OP_POP_L2 {
+            return pop_decap_l2(ctx, s, ent.vrf_id);
+        }
         let nh: NextHop = match NEXTHOPS.get_ptr(&ent.nexthop_id) {
             Some(n) => unsafe { *n },
             None => return Ok(xdp_action::XDP_PASS),
@@ -4403,6 +4549,41 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = sid.vrf_id;
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// EVPN-over-MPLS egress disposition (RFC 7432): the frame's bottom-of-stack
+/// label is an EVI service label. Drop the outer Ethernet header and that one
+/// LSE so the inner Ethernet frame becomes the L2 frame, then tag the ILM's
+/// bridge domain into the XDP→TC metadata so the TC stage bridges it — the
+/// MPLS counterpart of `srv6_dt2u`, sharing its `XDP_META_MAGIC_L2` hand-off
+/// (and with it `l2_switch`'s `from_overlay` split horizon).
+///
+/// A service label that is not bottom-of-stack is malformed — what sits under
+/// it is not an Ethernet frame — so it is dropped rather than misparsed.
+#[inline(always)]
+fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
+    if s != 1 {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    // Drop the outer eth + the service LSE: the inner eth frame moves to the
+    // front, exactly as the `End.DT2U` decap leaves it.
+    let strip = (EthHdr::LEN + 4) as i32;
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_MPLS_L2_DECAP);
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
+        (*meta).vrf_id = bd;
     }
     Ok(xdp_action::XDP_PASS)
 }

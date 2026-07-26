@@ -170,19 +170,25 @@ message VniDel { uint32 vni = 1; }
 message VtepSource { string addr = 1; }
 
 // EVPN overlay FDB entry: MAC `mac` in bridge domain `bd` sits behind a
-// remote PE — over SRv6 (`remote_sid`, the PE's End.DT2U/DT2M service SID)
-// or over VXLAN (`remote_vtep`, the PE's VTEP IPv4; the VNI comes from the
-// bridge domain's SetVni binding). Exactly one of remote_sid / remote_vtep.
+// remote PE — over SRv6 (`remote_sid`, the PE's End.DT2U/DT2M service SID),
+// over VXLAN (`remote_vtep`, the PE's VTEP IPv4; the VNI comes from the
+// bridge domain's SetVni binding), or over MPLS (`remote_pe` + a non-zero
+// `remote_label`, that PE's EVI service label — RFC 7432). Exactly one of
+// remote_sid / remote_vtep / remote_pe.
 // `nexthop_id` selects the underlay adjacency; 0 = resolve by a FIB lookup
-// on the SID/VTEP in the datapath (the control plane doesn't need to
-// pre-resolve). The all-ones MAC is the per-BD BUM sentinel (the remote
-// End.DT2M, or the flood VTEP).
+// on the SID/VTEP/PE in the datapath (the control plane doesn't need to
+// pre-resolve; for MPLS that lookup also supplies the transport LSP label
+// stack the service label is imposed under). The all-ones MAC is the per-BD
+// BUM sentinel (the remote End.DT2M, the flood VTEP, or the remote PE's
+// BUM label).
 message FdbRemote {
   string mac         = 1;
   uint32 bd          = 2;
   string remote_sid  = 3;
   uint32 nexthop_id  = 4;
   string remote_vtep = 5;
+  string remote_pe    = 6;  // MPLS: remote PE address (IPv4 or IPv6)
+  uint32 remote_label = 7;  // MPLS: that PE's EVI service label
 }
 
 message FdbRemoteDel {
@@ -218,18 +224,21 @@ message XconnectDel {
 }
 
 // A BUM ingress-replication slot: one remote PE in bridge domain `bd`,
-// reached by MAC-in-SRv6 toward its End.DT2M `remote_sid`, or by VXLAN
-// toward its `remote_vtep` (exactly one of the two; the VXLAN VNI comes
-// from the bridge domain's SetVni binding, which must exist first). cradle
-// manages the slot's plumbing itself (a veth pair in the flood list whose
-// far end per-copy encapsulates — see docs/design/evpn-srv6.md and
-// evpn-vxlan.md). Idempotent per (bd, target). The EVPN Type-3 tee drives
-// these; a bridge domain using slots must not also program the
-// all-ones-MAC sentinel.
+// reached by MAC-in-SRv6 toward its End.DT2M `remote_sid`, by VXLAN
+// toward its `remote_vtep` (the VXLAN VNI comes from the bridge domain's
+// SetVni binding, which must exist first), or by MPLS toward `remote_pe`
+// with that PE's BUM `remote_label` (RFC 7432 ingress replication) —
+// exactly one of the three. cradle manages the slot's plumbing itself (a
+// veth pair in the flood list whose far end per-copy encapsulates — see
+// docs/design/evpn-srv6.md, evpn-vxlan.md and evpn-mpls.md). Idempotent
+// per (bd, target). The EVPN Type-3 tee drives these; a bridge domain
+// using slots must not also program the all-ones-MAC sentinel.
 message ReplSlot {
   uint32 bd          = 1;
   string remote_sid  = 2;
   string remote_vtep = 3;
+  string remote_pe    = 4;  // MPLS: remote PE address (IPv4 or IPv6)
+  uint32 remote_label = 5;  // MPLS: that PE's BUM (EVI) service label
 }
 
 // An RFC 9524 Replication segment: the local End.Replicate SID `sid` is a P2MP
@@ -343,12 +352,17 @@ message Neighbor6 {
 // An incoming-label map (ILM) entry — mirrors zebra-rs's FibHandle
 // ilm_add/ilm_replace/ilm_del. `action` is MPLS_OP_*: 0 = swap (the nexthop's
 // labels are the out stack), 1 = pop-to-IP (PHP / L3VPN egress),
-// 2 = pop one label.
+// 2 = pop one label, 3 = pop-to-L2 (EVPN-over-MPLS egress: pop the EVI
+// service label and bridge the exposed Ethernet frame).
 message Ilm {
   uint32 in_label = 1;      // 20-bit incoming label (the LFIB key)
   uint32 nexthop_id = 2;    // resolved nexthop; its labels are the swap stack
-  uint32 action = 3;        // MPLS_OP_SWAP | POP_L3 | POP
-  uint32 vrf_table_id = 4;  // for POP_L3 into a VRF (0 = global)
+  uint32 action = 3;        // MPLS_OP_SWAP | POP_L3 | POP | POP_L2
+  // For POP_L3 the VRF table the exposed IP packet is routed in (0 = global).
+  // For POP_L2 this field instead carries the **bridge domain** the exposed
+  // Ethernet frame is switched in — the same field-reuse LocalSid.vrf_id
+  // already applies to End.DT2U/End.DT2M.
+  uint32 vrf_table_id = 4;
   // MPLS TTL propagation at disposition (RFC 3443). false (default) = pipe:
   // discard the label TTL, preserve the inner IP TTL. true = uniform: when this
   // ILM pops the last label to IP, copy the popped label TTL into the inner IP

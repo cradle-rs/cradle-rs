@@ -271,6 +271,12 @@ pub const MPLS_OP_SWAP: u8 = 0;
 pub const MPLS_OP_POP_L3: u8 = 1;
 /// Pop one label, forward the remaining (still labeled) stack.
 pub const MPLS_OP_POP: u8 = 2;
+/// Pop the bottom-of-stack EVI service label and **bridge** the exposed
+/// Ethernet frame — the EVPN-over-MPLS egress disposition (RFC 7432). The
+/// L2 counterpart of [`MPLS_OP_POP_L3`]: [`MplsEntry::vrf_id`] carries the
+/// bridge domain rather than a VRF table, the same field-reuse idiom
+/// `LocalSid::vrf_id` already uses for `End.DT2U`/`End.DT2M`.
+pub const MPLS_OP_POP_L2: u8 = 3;
 
 /// Disposition uses the **uniform** TTL model (RFC 3443): when this ILM pops
 /// the last label to expose IP, copy the popped label's TTL into the inner IP
@@ -530,11 +536,13 @@ pub struct ReplTarget {
     /// `REPL_KIND_*`. The zero value is SRv6, preserving the pre-`ReplTarget`
     /// semantic of the map.
     pub kind: u32,
-    /// L2VNI stamped into the outer header (`REPL_KIND_VXLAN` only; 0 for
-    /// SRv6, where the remote SID implies the bridge domain).
+    /// L2VNI stamped into the outer header (`REPL_KIND_VXLAN`), or the remote
+    /// PE's EVI service label (`REPL_KIND_MPLS`). 0 for SRv6, where the remote
+    /// SID implies the bridge domain.
     pub vni: u32,
     /// `REPL_KIND_SRV6`: the remote `End.DT2M` SID. `REPL_KIND_VXLAN`: the
     /// remote VTEP IPv4, v4-mapped (bytes 12..16 are the wire address).
+    /// `REPL_KIND_MPLS`: the remote PE's address (v4-mapped or full IPv6).
     pub addr: [u8; 16],
 }
 
@@ -542,6 +550,10 @@ pub struct ReplTarget {
 pub const REPL_KIND_SRV6: u32 = 0;
 /// [`ReplTarget::addr`] is a remote VTEP IPv4 (VXLAN per copy, `vni` set).
 pub const REPL_KIND_VXLAN: u32 = 1;
+/// [`ReplTarget::addr`] is a remote PE reached over MPLS (EVPN-over-MPLS
+/// ingress replication, RFC 7432): each copy is imposed with that PE's EVI
+/// service label ([`ReplTarget::vni`]) under the transport LSP.
+pub const REPL_KIND_MPLS: u32 = 2;
 
 /// Maximum downstream branches of one Replication segment (RFC 9524).
 pub const MAX_REPL_BRANCHES: usize = 16;
@@ -647,6 +659,11 @@ pub struct FdbEntry {
     /// entry (local learns only; 0 on control-plane-installed entries).
     /// The user-space aging sweep expires idle local entries against it.
     pub last_seen: u64,
+    /// EVPN-over-MPLS (`FDB_F_MPLS` only): the remote PE's downstream-assigned
+    /// EVI service label, imposed as the bottom-of-stack LSE under the
+    /// transport LSP. Zero on every other entry kind.
+    pub label: u32,
+    pub _pad: [u8; 4],
 }
 
 /// This MAC is one of ours — punt the frame up to L3 / the host stack.
@@ -659,6 +676,14 @@ pub const FDB_F_REMOTE: u32 = 1 << 1;
 /// bytes 12..16 are the wire address) and `oif` is the underlay nexthop id
 /// (0 = resolve by FIB4 lookup on the VTEP).
 pub const FDB_F_VXLAN: u32 = 1 << 2;
+/// This MAC is behind an MPLS overlay (set together with `FDB_F_REMOTE`) —
+/// RFC 7432 MPLS-based EVPN. `remote_sid` holds the remote PE's address
+/// (IPv4 v4-mapped, bytes 12..16 the wire address, or a full IPv6),
+/// [`FdbEntry::label`] is that PE's EVI service label, and `oif` is the
+/// underlay nexthop id (0 = resolve by a FIB lookup on the PE address; the
+/// resolved nexthop's `labels` are the transport LSP imposed above the
+/// service label).
+pub const FDB_F_MPLS: u32 = 1 << 3;
 
 /// Membership of an L2 (VLAN/bridge) domain — enumerates the ports a BUM or
 /// unknown-unicast frame is flooded to. Keyed by `(vlan, slot)` where `slot` is
@@ -1010,8 +1035,18 @@ pub const STAT_SRV6_REPLICATE: u32 = 44;
 /// Plain IPv4 packets forwarded entirely in XDP by the `--ebpf-mode xdp-only`
 /// fast path (`xdp_l3_forward_v4`), never handed to a TC program.
 pub const STAT_XDP_L3_FWD: u32 = 45;
+/// EVPN/MPLS: an L2 frame encapsulated toward a remote PE with a
+/// `[transport LSP][EVI service label]` stack (ingress PE, RFC 7432).
+pub const STAT_MPLS_L2_ENCAP: u32 = 46;
+/// EVPN/MPLS: an EVI service label popped and the exposed Ethernet frame
+/// bridged into its bridge domain (egress PE).
+pub const STAT_MPLS_L2_DECAP: u32 = 47;
+/// EVPN/MPLS: a BUM (broadcast/multicast/unknown-unicast) frame
+/// MPLS-encapsulated toward a remote PE (sentinel tunnel or ingress-
+/// replication copy).
+pub const STAT_MPLS_L2_BUM: u32 = 48;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 46;
+pub const STAT_MAX: u32 = 49;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
