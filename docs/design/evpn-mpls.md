@@ -8,10 +8,13 @@
 > seg6local), there is no kernel action that pops an MPLS label and hands the
 > exposed Ethernet frame to a bridge. cradle is what makes it forward.
 
-Status: **Slice 1 implemented** — unicast `l2_mpls_encap` / `MPLS_OP_POP_L2`,
-the gRPC and static-JSON surfaces, and the `cradle_evpn_mpls` BDD (two PEs,
-CE-to-CE ping over an MPLS underlay with kernel MPLS off). It builds on the
-MPLS phases ([mpls.md](mpls.md)) and reuses the L2 switching, FDB, flood and
+Status: **Slices 1–2 implemented.** Slice 1: unicast `l2_mpls_encap` /
+`MPLS_OP_POP_L2`, the gRPC and static-JSON surfaces, and the
+`cradle_evpn_mpls` BDD (two PEs, CE-to-CE ping over an MPLS underlay with
+kernel MPLS off). Slice 2: BUM — the per-BD all-ones-MAC sentinel and
+multi-PE ingress replication (`REPL_KIND_MPLS` slots), proven by
+`cradle_evpn_mpls_bum` and `cradle_evpn_mpls_multi`. It builds on the MPLS
+phases ([mpls.md](mpls.md)) and reuses the L2 switching, FDB, flood and
 bridge-domain machinery the SRv6 and VXLAN overlays already established
 ([evpn-srv6.md](evpn-srv6.md), [evpn-vxlan.md](evpn-vxlan.md)) — this is a
 third *encapsulation*, not a third L2 stack.
@@ -146,8 +149,27 @@ the *eBPF* stage imposed and disposed of the labels.
   the transport label is picked up from the PE's `/32` route — the shape an
   SR-MPLS underlay produces. Asserts `mpls_l2_encap` / `mpls_l2_decap` on both
   PEs (the ping is bidirectional).
+- `cradle_evpn_mpls_bum` — no static ARP, so the first frame is a broadcast ARP
+  that must take the all-ones-MAC sentinel. A *distinct* BUM label per PE
+  (1200/2200 beside the unicast 1100/2100) is what makes `mpls_l2_bum` prove
+  the sentinel row — not the unicast row — carried it.
+- `cradle_evpn_mpls_multi` — three PEs on a hub underlay, static replication
+  slots, no unicast FDB: every pair reaches every other by flood-and-learn, and
+  bounded BUM counters prove the horizon holds. pe2↔pe3 is two hops, so those
+  copies carry a transport label pe1 pops and forwards — `mpls_pop` on pe1
+  proves the transit hop, and exercises the rule that the service label
+  underneath belongs to the egress PE and is never looked up locally.
 
 Mandatory teardown scenario on each.
+
+One harness bug had to be fixed to run these: every per-feature resource is
+named `<feature-tag>_<logical>`, and the startup sweep / clean-environment
+check matched namespaces and pid files by that bare prefix — so
+`cradle_evpn_mpls` would delete `cradle_evpn_mpls_bum`'s *live* namespaces when
+the two ran concurrently, and report them as its own leak. Both scans now skip
+names owned by a feature whose tag extends this one's
+(`World::sibling_prefixes`). Bridges and host veths were never affected: they
+carry `short_id()`, a hash of the whole tag.
 
 ## Limits / next slices
 
@@ -155,12 +177,11 @@ Mandatory teardown scenario on each.
   trie lookup inlined into `cradle_xdp`, which the stack budget above does not
   have room for today; MPLS cores are IPv4 in practice, and such an entry punts
   to the host stack rather than misforwarding.
-- **BUM** — the all-ones-MAC sentinel and per-copy replication slots
-  (`REPL_KIND_MPLS`) are wired through the ABI and gRPC but not yet covered by
-  a BDD; that is the next slice (`cradle_evpn_mpls_bum`,
-  `cradle_evpn_mpls_multi`).
 - **The zebra-rs tee** — Type-2/Type-3 origination and import over MPLS, and
-  with it a fully dynamic `cradle_evpn_mpls_zebra`.
+  with it a fully dynamic `cradle_evpn_mpls_zebra`. Everything below the
+  control plane is now in place: the slot lifecycle cradle owns itself
+  (`AddReplSlot` creates the veth pair, flood membership and XDP attach) is
+  what the Type-3 tee will drive, exactly as it does for SRv6 and VXLAN.
 - Out of scope for now: multihoming (Type-1/Type-4 and the ESI label's
   split-horizon check, which needs a *second* label inspection below the
   service label), the control word, EVPN-VPWS over MPLS, and symmetric IRB.

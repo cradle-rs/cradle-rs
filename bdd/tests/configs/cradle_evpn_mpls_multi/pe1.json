@@ -1,0 +1,32 @@
+{
+  "ports": [
+    { "name": "pe1c", "vlan": 100 },
+    { "name": "pe1u2", "l3": true },
+    { "name": "pe1u3", "l3": true },
+    { "name": "r12a", "vlan": 100 },
+    { "name": "r12b", "l3": true },
+    { "name": "r13a", "vlan": 100 },
+    { "name": "r13b", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe1u2", "gateway": "10.0.12.2" },
+    { "id": 2, "oif": "pe1u3", "gateway": "10.0.13.2" }
+  ],
+  "neighbors": [
+    { "oif": "pe1u2", "ip": "10.0.12.2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "pe1u3", "ip": "10.0.13.2", "mac": "02:00:00:00:03:0a" }
+  ],
+  "routes": [
+    { "prefix": "10.255.0.2/32", "nexthop": 1 },
+    { "prefix": "10.255.0.3/32", "nexthop": 2 }
+  ],
+  "ilm": [
+    { "in_label": 12, "nexthop": 1, "action": "swap" },
+    { "in_label": 13, "nexthop": 2, "action": "swap" },
+    { "in_label": 1200, "action": "pop-l2", "bd": 100 }
+  ],
+  "repl_slots": [
+    { "flood_port": "r12a", "encap_port": "r12b", "remote_pe": "10.255.0.2", "label": 2200 },
+    { "flood_port": "r13a", "encap_port": "r13b", "remote_pe": "10.255.0.3", "label": 3200 }
+  ]
+}

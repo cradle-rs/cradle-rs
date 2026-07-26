@@ -49,6 +49,39 @@ impl World {
     fn pid_file(&self, logical: &str) -> String {
         format!("/tmp/{}.pid", self.ns(logical))
     }
+
+    /// Resource-name prefixes belonging to feature tags that *extend* this
+    /// one's — for `cradle_evpn_vxlan`, those of `cradle_evpn_vxlan_bum` and
+    /// `cradle_evpn_vxlan_multi`.
+    ///
+    /// Every per-feature resource is named `<feature-tag>_<logical>`, so a
+    /// sibling whose tag extends this one's shares this feature's `<tag>_`
+    /// prefix. A bare prefix scan therefore mistakes the sibling's resources
+    /// for this feature's, and when the two run concurrently that does real
+    /// damage: the startup sweep deletes the sibling's *live* namespaces, and
+    /// the clean-environment check reports them as this feature's leaked ones.
+    /// Bridges and host veths are unaffected — they carry `short_id()`, a hash
+    /// of the whole tag.
+    fn sibling_prefixes(&self) -> Vec<String> {
+        let own = format!("{}_", self.feature_tag);
+        let Ok(entries) = fs::read_dir("tests/features") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("feature"))
+            .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
+            .filter(|stem| stem.len() > self.feature_tag.len() && stem.starts_with(&own))
+            .map(|stem| format!("{stem}_"))
+            .collect()
+    }
+}
+
+/// True when a `<feature-tag>_<logical>` resource name belongs to one of
+/// `siblings` rather than to the feature that scanned for it.
+fn owned_by_sibling(name: &str, siblings: &[String]) -> bool {
+    siblings.iter().any(|p| name.starts_with(p.as_str()))
 }
 
 #[given("a clean test environment")]
@@ -64,12 +97,22 @@ async fn clean_test_environment(world: &mut World) {
     let ns_prefix = format!("{}_", world.feature_tag);
     let pid_prefix = ns_prefix.clone();
     let bridge_name = world.bridge("");
+    // Resources of a feature whose tag extends ours share our prefix; never
+    // touch them (see `World::sibling_prefixes`).
+    let siblings = world.sibling_prefixes();
 
     // 1. Detect concurrent run of the same feature: if any pid file in
     // /tmp matching this feature points to a live process, abort. The
     // operator should wait for the other run to finish (or use a
     // different feature for parallelism).
     if let Ok(pidfiles) = netns::list_pidfiles(Path::new("/tmp"), &pid_prefix).await {
+        let pidfiles: Vec<PathBuf> = pidfiles
+            .into_iter()
+            .filter(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                !owned_by_sibling(&name, &siblings)
+            })
+            .collect();
         for path in &pidfiles {
             if netns::pidfile_alive(path).await {
                 panic!(
@@ -91,6 +134,9 @@ async fn clean_test_environment(world: &mut World) {
     // step 4 below sweeps those separately.
     if let Ok(stale) = netns::list_netns_with_prefix(&ns_prefix).await {
         for ns in stale {
+            if owned_by_sibling(&ns, &siblings) {
+                continue; // a sibling feature's namespace, possibly live
+            }
             let _ = netns::delete_netns(&ns).await;
         }
     }
@@ -4466,9 +4512,15 @@ async fn verify_clean_environment(world: &mut World) {
         return;
     }
     let ns_prefix = format!("{}_", world.feature_tag);
-    let leftover_ns = netns::list_netns_with_prefix(&ns_prefix)
+    // A concurrently-running feature whose tag extends ours owns namespaces
+    // under our prefix; they are not our leak (see `World::sibling_prefixes`).
+    let siblings = world.sibling_prefixes();
+    let leftover_ns: Vec<String> = netns::list_netns_with_prefix(&ns_prefix)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ns| !owned_by_sibling(ns, &siblings))
+        .collect();
     assert!(
         leftover_ns.is_empty(),
         "Namespaces still exist: {:?}",
@@ -4485,9 +4537,15 @@ async fn verify_clean_environment(world: &mut World) {
         leftover_br
     );
 
-    let leftover_pid = netns::list_pidfiles(Path::new("/tmp"), &ns_prefix)
+    let leftover_pid: Vec<PathBuf> = netns::list_pidfiles(Path::new("/tmp"), &ns_prefix)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            !owned_by_sibling(&name, &siblings)
+        })
+        .collect();
     assert!(
         leftover_pid.is_empty(),
         "PID files still exist: {:?}",
