@@ -34,12 +34,12 @@ use crate::{
     util,
 };
 use cradle_common::{
-    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2,
-    PORT_F_L3, REPL_BRANCH_LOCAL, ReplBranch, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M,
-    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2,
-    SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
-    SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
+    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6,
+    NextHop, PORT_F_L2, PORT_F_L3, REPL_BRANCH_LOCAL, ReplBranch, SRV6_BH_END, SRV6_BH_END_B6,
+    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46,
+    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
+    SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP,
+    SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -116,10 +116,23 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "vxlan_flood",
     "srv6_replicate",
     "xdp_l3_fwd",
+    "mpls_l2_encap",
+    "mpls_l2_decap",
+    "mpls_l2_bum",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
 type ReplSlot = (String, u32, u32);
+
+/// Slot-registry key for an overlay target: an IPv6 address verbatim, an IPv4
+/// address v4-mapped (`::ffff:a.b.c.d`) — so one `(bd, key)` registry and one
+/// `del_repl_slot_auto` serve the SRv6, VXLAN and MPLS overlays alike.
+fn v6_key(a: IpAddr) -> Ipv6Addr {
+    match a {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+        IpAddr::V6(v6) => v6,
+    }
+}
 
 /// What user space knows about a pod/node IP, for Hubble flow enrichment
 /// (empty strings / zero identity when unknown).
@@ -637,6 +650,29 @@ impl Control {
         Ok(())
     }
 
+    /// The MPLS flavor of [`Self::add_fdb_remote`] (RFC 7432): `mac` is behind
+    /// PE `pe`, reached by imposing that PE's EVI service `label` under the
+    /// transport LSP the underlay route to `pe` carries. Same MAC-move-away
+    /// hint semantics.
+    pub async fn add_fdb_remote_mpls(
+        &self,
+        mac: [u8; 6],
+        bd: u16,
+        pe: IpAddr,
+        label: u32,
+        nexthop_id: u32,
+    ) -> Result<()> {
+        let displaced_local = self
+            .dp
+            .lock()
+            .await
+            .fdb_remote_add_mpls(mac, bd, pe, label, nexthop_id)?;
+        if displaced_local {
+            let _ = self.fdb_hint_tx.send((mac, bd));
+        }
+        Ok(())
+    }
+
     /// Remove an overlay FDB entry.
     pub async fn del_fdb_remote(&self, mac: [u8; 6], bd: u16) -> Result<()> {
         self.dp.lock().await.fdb_remote_del(mac, bd)?;
@@ -816,6 +852,26 @@ impl Control {
         Ok(())
     }
 
+    /// The MPLS flavor of [`Self::add_repl_slot`]: flooded copies are
+    /// MPLS-encapsulated toward PE `pe` with its EVI service `label` (static
+    /// config carries the label explicitly — no bridge domain is in scope
+    /// here to resolve it from).
+    pub async fn add_repl_slot_mpls(
+        &self,
+        flood_port: &str,
+        encap_port: &str,
+        pe: IpAddr,
+        label: u32,
+    ) -> Result<()> {
+        let flood = util::ifindex_of(flood_port)?;
+        let encap = util::ifindex_of(encap_port)?;
+        self.dp
+            .lock()
+            .await
+            .repl_slot_add_mpls(flood, encap, pe, label)?;
+        Ok(())
+    }
+
     /// Create a BUM replication slot for `(bd, remote_sid)` with cradle-owned
     /// plumbing (the EVPN Type-3 tee): a fresh veth pair `crs<N>a`/`crs<N>b`,
     /// the A end joined to `bd`'s flood list, the B end XDP-attached, and
@@ -839,6 +895,18 @@ impl Control {
             })?;
         self.add_repl_slot_auto_keyed(bd, vtep.to_ipv6_mapped(), |dp, a_idx, b_idx| {
             dp.repl_slot_add_vxlan(a_idx, b_idx, vtep, vni)
+        })
+        .await
+    }
+
+    /// The MPLS flavor of [`Self::add_repl_slot_auto`] (RFC 7432 ingress
+    /// replication): each flooded copy is MPLS-encapsulated toward `pe` with
+    /// that PE's EVI service `label`. Keyed by the PE address (v4-mapped for
+    /// IPv4) so one slot registry and [`Self::del_repl_slot_auto`] serve every
+    /// overlay.
+    pub async fn add_repl_slot_auto_mpls(&self, bd: u16, pe: IpAddr, label: u32) -> Result<()> {
+        self.add_repl_slot_auto_keyed(bd, v6_key(pe), |dp, a_idx, b_idx| {
+            dp.repl_slot_add_mpls(a_idx, b_idx, pe, label)
         })
         .await
     }
@@ -2103,6 +2171,7 @@ fn mpls_op_name(op: u8) -> &'static str {
         MPLS_OP_SWAP => "swap",
         MPLS_OP_POP_L3 => "pop_l3",
         MPLS_OP_POP => "pop",
+        MPLS_OP_POP_L2 => "pop_l2",
         _ => "unknown",
     }
 }
@@ -2638,26 +2707,40 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let f = req.into_inner();
         let mac = util::parse_mac(&f.mac).map_err(st)?;
-        match (f.remote_sid.is_empty(), f.remote_vtep.is_empty()) {
-            (false, true) => {
-                let remote_sid: Ipv6Addr = f.remote_sid.parse().map_err(st)?;
-                self.control
-                    .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id)
-                    .await
-                    .map_err(st)?;
+        let overlays = [
+            !f.remote_sid.is_empty(),
+            !f.remote_vtep.is_empty(),
+            !f.remote_pe.is_empty(),
+        ];
+        if overlays.iter().filter(|set| **set).count() != 1 {
+            return Err(Status::invalid_argument(
+                "exactly one of remote_sid / remote_vtep / remote_pe",
+            ));
+        }
+        if !f.remote_sid.is_empty() {
+            let remote_sid: Ipv6Addr = f.remote_sid.parse().map_err(st)?;
+            self.control
+                .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id)
+                .await
+                .map_err(st)?;
+        } else if !f.remote_vtep.is_empty() {
+            let vtep: Ipv4Addr = f.remote_vtep.parse().map_err(st)?;
+            self.control
+                .add_fdb_remote_vxlan(mac, f.bd as u16, vtep, f.nexthop_id)
+                .await
+                .map_err(st)?;
+        } else {
+            let pe: IpAddr = f.remote_pe.parse().map_err(st)?;
+            if f.remote_label == 0 || f.remote_label >= 1 << 20 {
+                return Err(Status::invalid_argument(format!(
+                    "remote_label {} is not a 20-bit MPLS label",
+                    f.remote_label
+                )));
             }
-            (true, false) => {
-                let vtep: Ipv4Addr = f.remote_vtep.parse().map_err(st)?;
-                self.control
-                    .add_fdb_remote_vxlan(mac, f.bd as u16, vtep, f.nexthop_id)
-                    .await
-                    .map_err(st)?;
-            }
-            _ => {
-                return Err(Status::invalid_argument(
-                    "exactly one of remote_sid / remote_vtep",
-                ));
-            }
+            self.control
+                .add_fdb_remote_mpls(mac, f.bd as u16, pe, f.remote_label, f.nexthop_id)
+                .await
+                .map_err(st)?;
         }
         Ok(Response::new(pb::Empty {}))
     }
@@ -2731,26 +2814,40 @@ impl Cradle for GrpcService {
         req: Request<pb::ReplSlot>,
     ) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
-        match (r.remote_sid.is_empty(), r.remote_vtep.is_empty()) {
-            (false, true) => {
-                let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
-                self.control
-                    .add_repl_slot_auto(r.bd as u16, sid)
-                    .await
-                    .map_err(st)?;
+        let overlays = [
+            !r.remote_sid.is_empty(),
+            !r.remote_vtep.is_empty(),
+            !r.remote_pe.is_empty(),
+        ];
+        if overlays.iter().filter(|set| **set).count() != 1 {
+            return Err(Status::invalid_argument(
+                "exactly one of remote_sid / remote_vtep / remote_pe",
+            ));
+        }
+        if !r.remote_sid.is_empty() {
+            let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
+            self.control
+                .add_repl_slot_auto(r.bd as u16, sid)
+                .await
+                .map_err(st)?;
+        } else if !r.remote_vtep.is_empty() {
+            let vtep: Ipv4Addr = r.remote_vtep.parse().map_err(st)?;
+            self.control
+                .add_repl_slot_auto_vxlan(r.bd as u16, vtep)
+                .await
+                .map_err(st)?;
+        } else {
+            let pe: IpAddr = r.remote_pe.parse().map_err(st)?;
+            if r.remote_label == 0 || r.remote_label >= 1 << 20 {
+                return Err(Status::invalid_argument(format!(
+                    "remote_label {} is not a 20-bit MPLS label",
+                    r.remote_label
+                )));
             }
-            (true, false) => {
-                let vtep: Ipv4Addr = r.remote_vtep.parse().map_err(st)?;
-                self.control
-                    .add_repl_slot_auto_vxlan(r.bd as u16, vtep)
-                    .await
-                    .map_err(st)?;
-            }
-            _ => {
-                return Err(Status::invalid_argument(
-                    "exactly one of remote_sid / remote_vtep",
-                ));
-            }
+            self.control
+                .add_repl_slot_auto_mpls(r.bd as u16, pe, r.remote_label)
+                .await
+                .map_err(st)?;
         }
         Ok(Response::new(pb::Empty {}))
     }
@@ -2760,15 +2857,18 @@ impl Cradle for GrpcService {
         req: Request<pb::ReplSlot>,
     ) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
-        // One slot registry serves both overlays: a VXLAN slot is keyed by
-        // its VTEP v4-mapped, so the delete resolves to the same key.
-        let key: Ipv6Addr = if r.remote_vtep.is_empty() {
+        // One slot registry serves every overlay: a VXLAN slot is keyed by its
+        // VTEP v4-mapped and an MPLS slot by its PE address, so the delete
+        // resolves to the same key the add used.
+        let key: Ipv6Addr = if !r.remote_sid.is_empty() {
             r.remote_sid.parse().map_err(st)?
-        } else {
+        } else if !r.remote_vtep.is_empty() {
             r.remote_vtep
                 .parse::<Ipv4Addr>()
                 .map_err(st)?
                 .to_ipv6_mapped()
+        } else {
+            v6_key(r.remote_pe.parse::<IpAddr>().map_err(st)?)
         };
         self.control
             .del_repl_slot_auto(r.bd as u16, key)
@@ -3051,6 +3151,7 @@ impl Cradle for GrpcService {
             a if a == MPLS_OP_SWAP as u32 => MPLS_OP_SWAP,
             a if a == MPLS_OP_POP_L3 as u32 => MPLS_OP_POP_L3,
             a if a == MPLS_OP_POP as u32 => MPLS_OP_POP,
+            a if a == MPLS_OP_POP_L2 as u32 => MPLS_OP_POP_L2,
             other => {
                 return Err(Status::invalid_argument(format!("bad ILM action {other}")));
             }

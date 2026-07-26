@@ -20,20 +20,22 @@ use aya::{
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_ECMP,
-    FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM,
-    LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey,
-    MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6,
-    NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY,
-    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_SRV6,
-    REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
-    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo,
-    Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_VXLAN,
+    FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey,
+    LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP,
+    MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE,
+    NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
+    POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey,
+    PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch,
+    ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo, ServiceKey,
+    ServiceKey6, Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey,
+    VxlanEncap,
 };
 
 use crate::{
     dir24::{Dir24Engine, SlotWrite},
     util,
+    util::ip_to_v6_bytes,
 };
 
 /// Userspace mirror of the eBPF `bfd::DetectState` value shared by the
@@ -885,7 +887,7 @@ impl Dataplane {
         remote_sid: Ipv6Addr,
         nexthop_id: u32,
     ) -> Result<bool> {
-        self.fdb_overlay_add(mac, bd, remote_sid.octets(), FDB_F_REMOTE, nexthop_id)
+        self.fdb_overlay_add(mac, bd, remote_sid.octets(), FDB_F_REMOTE, nexthop_id, 0)
     }
 
     /// The VXLAN flavor of [`Self::fdb_remote_add`]: the MAC sits behind the
@@ -904,6 +906,30 @@ impl Dataplane {
             vtep.to_ipv6_mapped().octets(),
             FDB_F_REMOTE | FDB_F_VXLAN,
             nexthop_id,
+            0,
+        )
+    }
+
+    /// The MPLS flavor of [`Self::fdb_remote_add`] (RFC 7432 MPLS-based EVPN):
+    /// the MAC sits behind PE `pe` (stored v4-mapped or full in `remote_sid`)
+    /// and is reached by imposing that PE's EVI service `label` under the
+    /// transport LSP carried on the resolved nexthop. Same displaced-local
+    /// MAC-move semantics.
+    pub fn fdb_remote_add_mpls(
+        &mut self,
+        mac: [u8; 6],
+        bd: u16,
+        pe: IpAddr,
+        label: u32,
+        nexthop_id: u32,
+    ) -> Result<bool> {
+        self.fdb_overlay_add(
+            mac,
+            bd,
+            ip_to_v6_bytes(pe),
+            FDB_F_REMOTE | FDB_F_MPLS,
+            nexthop_id,
+            label,
         )
     }
 
@@ -914,6 +940,7 @@ impl Dataplane {
         remote_sid: [u8; 16],
         flags: u32,
         nexthop_id: u32,
+        label: u32,
     ) -> Result<bool> {
         let displaced_local = matches!(
             self.fdb.get(&FdbKey { mac, vlan: bd }, 0),
@@ -926,6 +953,8 @@ impl Dataplane {
                 flags,
                 remote_sid,
                 last_seen: 0,
+                label,
+                _pad: [0; 4],
             },
             0,
         )?;
@@ -1254,6 +1283,28 @@ impl Dataplane {
                 kind: REPL_KIND_VXLAN,
                 vni,
                 addr: vtep.to_ipv6_mapped().octets(),
+            },
+        )
+    }
+
+    /// The MPLS flavor of [`Self::repl_slot_add`] (RFC 7432): each flooded copy
+    /// is MPLS-encapsulated toward PE `pe` with that PE's EVI service `label`
+    /// at the bottom of the stack, under the transport LSP the underlay route
+    /// to `pe` carries.
+    pub fn repl_slot_add_mpls(
+        &mut self,
+        flood_ifindex: u32,
+        encap_ifindex: u32,
+        pe: IpAddr,
+        label: u32,
+    ) -> Result<()> {
+        self.repl_target_add(
+            flood_ifindex,
+            encap_ifindex,
+            ReplTarget {
+                kind: REPL_KIND_MPLS,
+                vni: label,
+                addr: ip_to_v6_bytes(pe),
             },
         )
     }

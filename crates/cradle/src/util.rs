@@ -5,7 +5,7 @@
 use std::{
     collections::HashSet,
     fs,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -98,6 +98,17 @@ pub fn ipv4_to_map(a: Ipv4Addr) -> u32 {
 /// read back as a native `u16`.
 pub fn port_to_map(p: u16) -> u16 {
     p.to_be()
+}
+
+/// Encode an address into the data plane's 16-byte overlay-target slot: an IPv6
+/// address verbatim, an IPv4 address v4-mapped (`::ffff:a.b.c.d`, so bytes
+/// 12..16 are the wire address). Used by the VXLAN and MPLS FDB / replication
+/// entries, which must carry either family in one fixed-width field.
+pub fn ip_to_v6_bytes(a: IpAddr) -> [u8; 16] {
+    match a {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+        IpAddr::V6(v6) => v6.octets(),
+    }
 }
 
 /// Parse `a.b.c.d/len` into an address and prefix length.
