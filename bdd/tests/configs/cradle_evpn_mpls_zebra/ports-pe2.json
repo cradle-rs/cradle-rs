@@ -1,0 +1,6 @@
+{
+  "ports": [
+    { "name": "pe2c", "vlan": 100 },
+    { "name": "p", "l3": true }
+  ]
+}
