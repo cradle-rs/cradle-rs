@@ -70,6 +70,34 @@ Feature: BGP EVPN over SRv6 programs the eBPF L2 data plane
     And the cradle stat "srv6_l2_encap" in namespace "pe1" via gRPC as "ctl1" should be nonzero
     And the cradle stat "srv6_l2_decap" in namespace "pe2" via gRPC as "ctl2" should be nonzero
 
+  Scenario: A datapath-learned MAC carries its Ethernet Segment's ESI
+    Given the test topology exists
+    # c1's MAC reached zebra the only way a cradle-owned port can deliver one:
+    # the XDP stage learned it on pe1c and streamed it up over WatchFdb. Until
+    # FdbEvent carried the learning port, zebra saw ifindex 0 for every such
+    # learn, could not tell which Ethernet Segment the MAC sat on, and had to
+    # advertise it single-homed — so this whole scenario is the regression
+    # test for that field. An `ESI:` line renders only on a Type-2; the Type-4
+    # and per-ES Type-1 that appear once a segment is configured carry their
+    # ESI in the NLRI key and print it in the prefix instead.
+    Then show command "show bgp evpn" in namespace "pe1" should contain "02:00:00:00:c1:01"
+    And show command "show bgp evpn" in namespace "pe1" should not contain "ESI:"
+    When I apply command "set router bgp afi-safi evpn ethernet-segment es1 esi 00:11:22:33:44:55:66:77:88:99" in namespace "pe1"
+    And I apply command "set router bgp afi-safi evpn ethernet-segment es1 interface pe1c" in namespace "pe1"
+    # Assert on pe2, the PE that has to act on the ESI: aliasing across every
+    # PE attached to the segment (RFC 7432 §8.4) is the remote PE's job, so
+    # pe2 seeing it is the property worth pinning. pe2 is also the only
+    # trustworthy vantage point historically — this scenario was first written
+    # asserting on pe1 and, run against a zebra pinned to ifindex 0, PASSED,
+    # because pe1's own Type-4 rendered an `ESI:` line of the same value.
+    # zebra has since gated that line to the route types that carry an ESI on
+    # the path, but the lesson stands: assert where only the route under test
+    # can produce the string.
+    Then show command "show bgp evpn" in namespace "pe2" should eventually contain "ESI: 00:11:22:33:44:55:66:77:88:99"
+    And show command "show bgp evpn" in namespace "pe2" should contain "02:00:00:00:c1:01"
+    # Re-originating under the ESI must not disturb forwarding.
+    And ping from "c1" to "10.0.0.2" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop the zebra-rs tee in namespace "pe1"

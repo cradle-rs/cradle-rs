@@ -294,6 +294,12 @@ message FdbEvent {
   // 0 = learned; 1 = aged out (the entry was removed after `fdb_age_secs`
   // idle — the control plane should withdraw its Type-2).
   uint32 event = 3;
+  // Ifindex of the port the MAC was learned on, so the control plane can
+  // place it on an Ethernet Segment (RFC 7432 §7.1) instead of advertising
+  // every datapath-learned MAC single-homed. Set on learn events only; 0
+  // means "unknown", which a subscriber must treat as single-homed rather
+  // than as a port (an older cradle leaves this unset).
+  uint32 port = 4;
 }
 
 // --- BFD Echo / detection offload (absorbed from the xdp-bfd-echo helper) ---
