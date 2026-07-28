@@ -1437,14 +1437,21 @@ impl Dataplane {
     /// overlay (`FDB_F_REMOTE`) entries or the all-ones BUM sentinel. The
     /// `WatchFdb` stream diffs successive snapshots to report EVPN Type-2
     /// candidates to the control plane.
-    pub fn fdb_local_entries(&self) -> Vec<([u8; 6], u16)> {
+    ///
+    /// The third element is the learning port's ifindex: both learn sites
+    /// store the ingress ifindex in `oif` (`l2_switch` and `l2_evpn_xdp`),
+    /// and for a local entry that is by definition the port the MAC was
+    /// seen on. The control plane needs it to place the MAC on an Ethernet
+    /// Segment (RFC 7432 §7.1) — without it every cradle-learned MAC
+    /// advertises single-homed.
+    pub fn fdb_local_entries(&self) -> Vec<([u8; 6], u16, u32)> {
         let mut out = Vec::new();
         for item in self.fdb.iter() {
             let Ok((k, v)) = item else { continue };
             if v.flags != 0 || k.mac[0] & 0x01 != 0 {
                 continue;
             }
-            out.push((k.mac, k.vlan));
+            out.push((k.mac, k.vlan, v.oif));
         }
         out
     }

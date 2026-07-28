@@ -1081,7 +1081,8 @@ impl Control {
     }
 
     /// Snapshot the locally-learned FDB (see `Dataplane::fdb_local_entries`).
-    pub async fn fdb_local_entries(&self) -> Vec<([u8; 6], u16)> {
+    /// Third element is the learning port's ifindex.
+    pub async fn fdb_local_entries(&self) -> Vec<([u8; 6], u16, u32)> {
         self.dp.lock().await.fdb_local_entries()
     }
 
@@ -2951,26 +2952,44 @@ impl Cradle for GrpcService {
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 )
             };
-            let mut seen: std::collections::HashSet<([u8; 6], u16)> =
-                std::collections::HashSet::new();
+            // Keyed on (mac, bd) like the FDB itself, valued on the learning
+            // port so a MAC that moves between two LOCAL ports is reported.
+            // Keying the whole tuple instead would emit a spurious age for
+            // the old port; tracking only the key — as this did before the
+            // port was carried — would miss the move entirely, leaving the
+            // MAC advertised under the Ethernet Segment it just left.
+            let mut seen: std::collections::HashMap<([u8; 6], u16), u32> =
+                std::collections::HashMap::new();
             loop {
-                let current: std::collections::HashSet<([u8; 6], u16)> =
-                    control.fdb_local_entries().await.into_iter().collect();
-                for &(mac, bd) in current.difference(&seen) {
+                let current: std::collections::HashMap<([u8; 6], u16), u32> = control
+                    .fdb_local_entries()
+                    .await
+                    .into_iter()
+                    .map(|(mac, bd, port)| ((mac, bd), port))
+                    .collect();
+                for (&(mac, bd), &port) in current.iter() {
+                    if seen.get(&(mac, bd)) == Some(&port) {
+                        continue; // already reported on this port
+                    }
                     let ev = pb::FdbEvent {
                         mac: fmt_mac(mac),
                         bd: bd as u32,
-                        event: 0, // learned
+                        event: 0, // learned (or moved to another local port)
+                        port,
                     };
                     if tx.send(Ok(ev)).await.is_err() {
                         return; // subscriber went away
                     }
                 }
-                for &(mac, bd) in seen.difference(&current) {
+                for &(mac, bd) in seen.keys() {
+                    if current.contains_key(&(mac, bd)) {
+                        continue;
+                    }
                     let ev = pb::FdbEvent {
                         mac: fmt_mac(mac),
                         bd: bd as u32,
                         event: 1, // aged / removed
+                        port: 0,  // the entry is gone; no port to report
                     };
                     if tx.send(Ok(ev)).await.is_err() {
                         return;
@@ -2987,11 +3006,12 @@ impl Cradle for GrpcService {
                     hint = hints.recv() => {
                         match hint {
                             Ok((mac, bd)) => {
-                                if seen.remove(&(mac, bd)) {
+                                if seen.remove(&(mac, bd)).is_some() {
                                     let ev = pb::FdbEvent {
                                         mac: fmt_mac(mac),
                                         bd: bd as u32,
                                         event: 1, // aged / removed (moved away)
+                                        port: 0,
                                     };
                                     if tx.send(Ok(ev)).await.is_err() {
                                         return;
