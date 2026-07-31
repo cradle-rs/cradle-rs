@@ -28,8 +28,8 @@ use cradle_common::{
     POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey,
     PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch,
     ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo, ServiceKey,
-    ServiceKey6, Srv6Encap, VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey,
-    VxlanEncap,
+    ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key,
+    Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -221,8 +221,8 @@ pub struct Dataplane {
     vni_info: HashMap<MapData, u32, VniInfo>,
     /// Local VTEP source IPv4 ([0]; all-zero = VXLAN unconfigured).
     vxlan_src: Array<MapData, [u8; 4]>,
-    xconnect: HashMap<MapData, u32, [u8; 16]>,
-    xconnect_vlan: HashMap<MapData, Dx2vKey, [u8; 16]>,
+    xconnect: HashMap<MapData, u32, ReplTarget>,
+    xconnect_vlan: HashMap<MapData, Dx2vKey, ReplTarget>,
     dx2v: HashMap<MapData, Dx2vKey, u32>,
     /// Egress-protection mirror contexts (`End.M`): protected SID space →
     /// local DT-style reproduction.
@@ -1078,10 +1078,11 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Bind an attachment circuit to a remote End.DX2/DX2V SID (VPWS):
-    /// every frame arriving on `ifindex` encapsulates toward `remote_sid`.
-    pub fn xconnect_add(&mut self, ifindex: u32, remote_sid: Ipv6Addr) -> Result<()> {
-        self.xconnect.insert(ifindex, remote_sid.octets(), 0)?;
+    /// Bind an attachment circuit to a remote VPWS endpoint (`ReplTarget`
+    /// shape — an End.DX2/DX2V SID or a VTEP+VNI): every frame arriving on
+    /// `ifindex` encapsulates toward it.
+    pub fn xconnect_add(&mut self, ifindex: u32, target: ReplTarget) -> Result<()> {
+        self.xconnect.insert(ifindex, target, 0)?;
         Ok(())
     }
 
@@ -1091,20 +1092,15 @@ impl Dataplane {
     }
 
     /// Bind a VLAN-scoped attachment circuit (RFC 8214 VLAN-based E-Line)
-    /// to a remote End.DX2V SID: only 802.1Q frames with `vid` arriving on
-    /// `ifindex` encapsulate toward `remote_sid` (tag kept).
-    pub fn xconnect_vlan_add(
-        &mut self,
-        ifindex: u32,
-        vid: u16,
-        remote_sid: Ipv6Addr,
-    ) -> Result<()> {
+    /// to a remote VPWS endpoint: only 802.1Q frames with `vid` arriving on
+    /// `ifindex` encapsulate toward it (tag kept).
+    pub fn xconnect_vlan_add(&mut self, ifindex: u32, vid: u16, target: ReplTarget) -> Result<()> {
         let key = Dx2vKey {
             table: ifindex,
             vid,
             _pad: [0; 2],
         };
-        self.xconnect_vlan.insert(key, remote_sid.octets(), 0)?;
+        self.xconnect_vlan.insert(key, target, 0)?;
         Ok(())
     }
 
@@ -2051,6 +2047,44 @@ impl Dataplane {
                 flags: VNI_F_L3,
                 vrf_id,
                 rmac,
+                _pad: [0; 2],
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Bind an E-Line VNI (EVPN VPWS over VXLAN, RFC 8365 §6): a received
+    /// VXLAN frame with this VNI is stripped and emitted raw on the AC
+    /// `ifindex` — no FDB, no learning (the VXLAN analog of an End.DX2
+    /// LocalSid). Decap direction only — the AC-ingress direction is the
+    /// `XCONNECT` entry.
+    pub fn vni_set_eline(&mut self, vni: u32, ifindex: u32) -> Result<()> {
+        self.vni_info.insert(
+            vni,
+            VniInfo {
+                vlan: 0,
+                flags: VNI_F_ELINE,
+                vrf_id: ifindex,
+                rmac: [0; 6],
+                _pad: [0; 2],
+            },
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Bind a VLAN-scoped E-Line VNI: the received inner frame's 802.1Q
+    /// VID picks the AC from the `DX2V` entries under `table` (the VXLAN
+    /// analog of End.DX2V; the caller programs `dx2v_add` alongside).
+    pub fn vni_set_eline_vlan(&mut self, vni: u32, table: u32) -> Result<()> {
+        self.vni_info.insert(
+            vni,
+            VniInfo {
+                vlan: 0,
+                flags: VNI_F_ELINE | VNI_F_ELINE_VLAN,
+                vrf_id: table,
+                rmac: [0; 6],
                 _pad: [0; 2],
             },
             0,

@@ -848,6 +848,35 @@ async fn cradle_stat_nonzero(world: &mut World, stat: String, namespace: String,
     panic!("cradle stat {} did not become nonzero in {}", stat, scoped);
 }
 
+/// Read `cradle stats` over gRPC once and assert the named counter is
+/// still zero — a steady-state isolation invariant (e.g. "the E-Line
+/// never touched the bridging path"), asserted after the traffic that
+/// could have moved it, so no polling window applies.
+#[then(expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should be zero")]
+async fn cradle_stat_zero(world: &mut World, stat: String, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let out = netns::exec_in_netns(&scoped, &cradle, &["stats", "--grpc", &ep])
+        .await
+        .expect("cradle stats");
+    for line in out.lines() {
+        let mut it = line.split_whitespace();
+        if it.next() == Some(stat.as_str())
+            && let Some(v) = it.next().and_then(|s| s.parse::<u64>().ok())
+        {
+            assert_eq!(
+                v, 0,
+                "cradle stat {} = {} in {}, expected 0",
+                stat, v, scoped
+            );
+            println!("✓ cradle stat {} = 0 in {}", stat, scoped);
+            return;
+        }
+    }
+    panic!("cradle stat {} not found in {}", stat, scoped);
+}
+
 /// Poll `cradle stats` over gRPC and assert the named counter reached at
 /// least `want` — for scenarios that drive the same counter more than once
 /// and must prove each event landed (a plain nonzero can't tell one
