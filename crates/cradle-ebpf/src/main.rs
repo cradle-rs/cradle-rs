@@ -65,11 +65,11 @@ use cradle_common::{
     STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
     STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
     STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
-    STAT_VXLAN_DECAP, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD, SVC_F_AFFINITY,
-    ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key,
-    VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
-    XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse,
-    mpls_lse_unpack,
+    STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD,
+    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
+    VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC,
+    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL,
+    XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -192,16 +192,18 @@ static REPL_SID: HashMap<u32, ReplTarget> = HashMap::with_max_entries(256, 0);
 #[map]
 static REPL_SEG: HashMap<[u8; 16], ReplSeg> = HashMap::with_max_entries(256, 0);
 /// VPWS cross-connect (EVPN E-Line, RFC 8214): AC ingress ifindex → the
-/// remote End.DX2/DX2V service SID. Every frame arriving on a bound AC is
-/// MAC-in-SRv6 encapsulated toward the SID — no FDB, no learning.
+/// remote service endpoint, `ReplTarget`-shaped like the replication
+/// slots (kind 0 = an End.DX2/DX2V SID, `REPL_KIND_VXLAN` = a VTEP with
+/// the remote's VNI in `vni`). Every frame arriving on a bound AC is
+/// encapsulated toward the endpoint — no FDB, no learning.
 #[map]
-static XCONNECT: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(256, 0);
+static XCONNECT: HashMap<u32, ReplTarget> = HashMap::with_max_entries(256, 0);
 /// VLAN-scoped VPWS cross-connect (RFC 8214 VLAN-based E-Line): (AC ingress
-/// ifindex as `table`, 802.1Q VID) → the remote End.DX2V service SID. Only
-/// tagged frames with that VID enter the cross-connect; the tag rides
-/// inside the encapsulation and the remote End.DX2V demuxes on it.
+/// ifindex as `table`, 802.1Q VID) → the remote service endpoint (see
+/// `XCONNECT`). Only tagged frames with that VID enter the cross-connect;
+/// the tag rides inside the encapsulation and the remote demuxes on it.
 #[map]
-static XCONNECT_VLAN: HashMap<Dx2vKey, [u8; 16]> = HashMap::with_max_entries(1024, 0);
+static XCONNECT_VLAN: HashMap<Dx2vKey, ReplTarget> = HashMap::with_max_entries(1024, 0);
 /// End.DX2V VLAN table: (SID's table id, inner 802.1Q VID) → AC ifindex.
 #[map]
 static DX2V: HashMap<Dx2vKey, u32> = HashMap::with_max_entries(1024, 0);
@@ -2767,49 +2769,51 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // non-IP frames (ARP) an L2 domain carries, so the grow must run in XDP.
     // Everything else on an L2 port passes to the TC `l2_switch`.
     let iif = unsafe { (*ctx.ctx).ingress_ifindex };
-    // A BUM replication slot: the TC flood clone_redirect'ed a bare copy of
-    // a BUM frame into this veth; encapsulate it toward the slot's remote
-    // PE (per-copy encap — the piece clone_redirect itself can't do) and
-    // send it out the underlay via the FIB route to the SID/VTEP.
+    // A BUM replication slot, a VLAN-scoped VPWS AC (RFC 8214 VLAN-based
+    // E-Line — an 802.1Q-tagged frame picks its E-Line by (AC ifindex,
+    // VID), the tag riding through the encapsulation for the remote end to
+    // demux on; untagged frames and unknown VIDs fall through), or a
+    // whole-port VPWS AC (every frame, any EtherType, any MAC — checked
+    // before the L2 bridge dispatch so the AC never MAC-learns or floods).
+    // All three maps hold the same `ReplTarget` shape; resolve to ONE
+    // borrowed target here and restate it in `l2_overlay_encap`'s terms so
+    // every hit takes the one shared encap site — dispatching per lookup
+    // would inline extra copies of every encap body and blow cradle_xdp's
+    // BPF stack limit. `t.vni` is the VXLAN VNI or the MPLS service label,
+    // exactly the `aux` the flavor wants; the adjacency is resolved by a
+    // FIB lookup on the target (nh_id 0).
+    let mut hit: *const ReplTarget = core::ptr::null();
+    // A replication slot's copy is a BUM fan-out copy; an AC's is unicast.
+    let mut bum = false;
     if let Some(t) = REPL_SID.get_ptr(&iif) {
-        let t = unsafe { &*t };
-        // Restate the slot's target in `l2_overlay_encap`'s terms so the copy
-        // takes the one shared encap site — dispatching on `t.kind` here would
-        // inline a second copy of every encap body and blow cradle_xdp's BPF
-        // stack limit. `t.vni` is the VXLAN VNI or the MPLS service label,
-        // exactly the `aux` the flavor wants; the adjacency is resolved by a
-        // FIB lookup on the target.
-        let flags = match t.kind {
-            REPL_KIND_VXLAN => FDB_F_VXLAN,
-            REPL_KIND_MPLS => FDB_F_MPLS,
-            _ => 0,
-        };
-        return l2_overlay_encap(ctx, &t.addr, 0, flags, t.vni, true);
+        hit = t;
+        bum = true;
     }
-    // VLAN-scoped VPWS AC (RFC 8214 VLAN-based E-Line, End.DX2V): an
-    // 802.1Q-tagged frame picks its E-Line by (AC ifindex, VID) — the tag
-    // stays on the frame through the encapsulation and the remote
-    // End.DX2V demuxes on it. Untagged frames and unknown VIDs fall
-    // through to the port-based XCONNECT, then the L2 bridge dispatch.
-    if u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? }) == ETH_P_8021Q {
+    if hit.is_null() && u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? }) == ETH_P_8021Q
+    {
         let tci = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, EthHdr::LEN)? });
         let key = Dx2vKey {
             table: iif,
             vid: tci & 0x0fff,
             _pad: [0; 2],
         };
-        if let Some(sid) = XCONNECT_VLAN.get_ptr(&key) {
-            // 0 = resolve the underlay adjacency by FIB6 lookup on the SID.
-            return l2_srv6_encap(ctx, unsafe { &*sid }, 0, STAT_SRV6_L2_ENCAP);
+        if let Some(t) = XCONNECT_VLAN.get_ptr(&key) {
+            hit = t;
         }
     }
-    // VPWS attachment circuit (RFC 8214 E-Line): every frame from a bound
-    // AC — any EtherType, any MAC — encapsulates toward the remote
-    // End.DX2/DX2V SID. Checked before the L2 bridge dispatch so the AC
-    // never MAC-learns or floods.
-    if let Some(sid) = XCONNECT.get_ptr(&iif) {
-        // 0 = resolve the underlay adjacency by FIB6 lookup on the SID.
-        return l2_srv6_encap(ctx, unsafe { &*sid }, 0, STAT_SRV6_L2_ENCAP);
+    if hit.is_null()
+        && let Some(t) = XCONNECT.get_ptr(&iif)
+    {
+        hit = t;
+    }
+    if !hit.is_null() {
+        let t = unsafe { &*hit };
+        let flags = match t.kind {
+            REPL_KIND_VXLAN => FDB_F_VXLAN,
+            REPL_KIND_MPLS => FDB_F_MPLS,
+            _ => 0,
+        };
+        return l2_overlay_encap(ctx, &t.addr, 0, flags, t.vni, bum);
     }
     if let Some(p) = PORTS.get_ptr(&iif) {
         if unsafe { (*p).flags } & PORT_F_L2 != 0 {
@@ -3627,16 +3631,47 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         Some(i) => unsafe { *i },
         None => return Ok(xdp_action::XDP_PASS), // unknown VNI: not ours
     };
-    let (magic, vrf) = if info.flags & VNI_F_L3 != 0 {
-        (XDP_META_MAGIC, info.vrf_id)
+    let (magic, vrf, stat) = if info.flags & VNI_F_ELINE != 0 {
+        // E-Line VNI (EVPN VPWS over VXLAN, RFC 8365 §6): the inner frame
+        // is emitted raw on the attachment circuit — no FDB, no learning —
+        // via the encap-agnostic DX2 delivery leg in TC (`srv6_dx2`'s
+        // handoff). The AC is `vrf_id` directly, or for a VLAN-scoped
+        // E-Line the inner frame's 802.1Q VID picks it from the `DX2V`
+        // table `vrf_id` names (the tag stays on the frame).
+        let oif = if info.flags & VNI_F_ELINE_VLAN != 0 {
+            let inner_et =
+                u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN_ENCAP_HDR_LEN + ETH_TYPE_OFF)? });
+            if inner_et != ETH_P_8021Q {
+                return Ok(xdp_action::XDP_PASS); // untagged — no VLAN to demux
+            }
+            let tci =
+                u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN_ENCAP_HDR_LEN + EthHdr::LEN)? });
+            let key = Dx2vKey {
+                table: info.vrf_id,
+                vid: tci & 0x0fff,
+                _pad: [0; 2],
+            };
+            match unsafe { DX2V.get(&key) } {
+                Some(o) => *o,
+                None => return Ok(xdp_action::XDP_PASS), // unknown VID
+            }
+        } else {
+            info.vrf_id
+        };
+        if oif == 0 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        (XDP_META_MAGIC_DX2, oif, STAT_VXLAN_DX2)
+    } else if info.flags & VNI_F_L3 != 0 {
+        (XDP_META_MAGIC, info.vrf_id, STAT_VXLAN_DECAP)
     } else {
-        (XDP_META_MAGIC_L2, info.vlan as u32)
+        (XDP_META_MAGIC_L2, info.vlan as u32, STAT_VXLAN_DECAP)
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN_ENCAP_HDR_LEN as i32) } != 0 {
         return Err(());
     }
-    stat_inc(STAT_VXLAN_DECAP);
+    stat_inc(stat);
     if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
     {
         stat_inc(STAT_DROP);

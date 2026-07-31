@@ -15,7 +15,10 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use tracing::info;
 
-use crate::{control::Control, util};
+use crate::{
+    control::{Control, XconnectLocal, XconnectRemote},
+    util,
+};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -243,12 +246,33 @@ pub struct LocalSidCfg {
 #[derive(Debug, Deserialize)]
 pub struct XconnectCfg {
     pub port: String,
-    pub remote_sid: String,
+    /// SRv6 E-Line: the remote End.DX2/DX2V service SID — exactly one of
+    /// this and `remote_vtep`.
+    #[serde(default)]
+    pub remote_sid: Option<String>,
+    /// VXLAN E-Line (RFC 8365 §6): the remote VTEP IPv4, encapsulated with
+    /// `remote_vni`.
+    #[serde(default)]
+    pub remote_vtep: Option<String>,
+    /// VXLAN: the VNI the remote end advertised (required with
+    /// `remote_vtep`).
+    #[serde(default)]
+    pub remote_vni: u32,
+    /// VXLAN: also bind this VNI as the E-Line's local decap identity — a
+    /// received VXLAN frame on it is emitted raw on `port` (with a
+    /// non-zero `vid`, demuxed on the inner VID over `dx2v_table`). The
+    /// VXLAN analog of a `locals` End.DX2 entry.
+    #[serde(default)]
+    pub local_vni: u32,
     /// Non-zero = VLAN-scoped E-Line: only 802.1Q frames with this VID on
-    /// `port` enter the cross-connect (tag kept). The return direction is
-    /// a separate `locals` End.DX2V + `dx2v` entry as usual.
+    /// `port` enter the cross-connect (tag kept). The SRv6 return
+    /// direction is a separate `locals` End.DX2V + `dx2v` entry as usual.
     #[serde(default)]
     pub vid: u16,
+    /// VLAN-table id for a VLAN-scoped `local_vni` (the `dx2v` table the
+    /// inner VID selects the AC from).
+    #[serde(default)]
+    pub dx2v_table: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -819,11 +843,35 @@ impl Config {
                 .await?;
         }
         for x in &self.xconnects {
-            let remote_sid = x
-                .remote_sid
-                .parse()
-                .with_context(|| format!("bad remote SID {:?}", x.remote_sid))?;
-            ctl.add_xconnect(&x.port, remote_sid, None, x.vid, 0)
+            let remote = match (&x.remote_sid, &x.remote_vtep) {
+                (Some(sid), None) => XconnectRemote::Srv6(
+                    sid.parse()
+                        .with_context(|| format!("bad remote SID {sid:?}"))?,
+                ),
+                (None, Some(vtep)) => {
+                    anyhow::ensure!(
+                        x.remote_vni != 0,
+                        "xconnect {}: remote_vtep requires remote_vni",
+                        x.port
+                    );
+                    XconnectRemote::Vxlan {
+                        vtep: vtep
+                            .parse()
+                            .with_context(|| format!("bad remote VTEP {vtep:?}"))?,
+                        vni: x.remote_vni,
+                    }
+                }
+                _ => anyhow::bail!(
+                    "xconnect {}: exactly one of remote_sid / remote_vtep",
+                    x.port
+                ),
+            };
+            let local = if x.local_vni != 0 {
+                XconnectLocal::Vxlan(x.local_vni)
+            } else {
+                XconnectLocal::None
+            };
+            ctl.add_xconnect(&x.port, remote, local, x.vid, x.dx2v_table)
                 .await?;
         }
         for d in &self.dx2v {

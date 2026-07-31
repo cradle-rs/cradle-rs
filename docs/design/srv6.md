@@ -380,6 +380,10 @@ Dispatch on `sid.behavior`:
   Ethernet Tag is the service instance id; importing the peer's Type-1
   drives one cradle `AddXconnect` that binds the AC both ways (ingress
   XCONNECT entry + local End.DX2 decap). `stat_inc(STAT_SRV6_DX2)`.
+  The XCONNECT maps hold `ReplTarget`-shaped values, so the same
+  cross-connect also runs over VXLAN (`remote_vtep`+`remote_vni` /
+  `local_vni` on the RPC) — see the E-Line section of
+  docs/design/evpn-vxlan.md.
 - **End.DT46 / End.DT4 / End.DT6** — the L3VPN common case: strip the outer IPv6
   (and an exhausted SRH, if present) and forward the **inner** packet in a table.
   Steps: walk the outer next-header chain — the inner proto directly, or `43`

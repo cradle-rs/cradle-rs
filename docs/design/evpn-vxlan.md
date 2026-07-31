@@ -317,6 +317,42 @@ and install the L3VNI VRF route with an `NH_F_VXLAN` nexthop over the tee.
 `ARP_SUPPRESS` (per-(vni,ip)→mac), which needs the Type-2 MAC+IP (dropped by
 zebra today) carried through the tee.
 
+## E-Line / VPWS over VXLAN (RFC 8365 §6)
+
+The point-to-point service, sharing the SRv6 VPWS machinery
+(docs/design/srv6.md's xconnect section) with a VXLAN wire format:
+
+- **AC ingress** — `XCONNECT[ifindex]` / `XCONNECT_VLAN[(ifindex, vid)]`
+  values widened from a bare SID to the `ReplTarget` shape `{kind, vni,
+  addr}` (kind 0 = SRv6 preserves the old semantic; `REPL_KIND_VXLAN`
+  carries the VTEP v4-mapped plus the VNI the *remote* end advertised in
+  its Type-1 label field — downstream-assigned, so the two directions of
+  one E-Line need not agree on a number). `try_xdp` resolves the
+  replication-slot and both xconnect lookups to ONE borrowed target and
+  takes the single shared `l2_overlay_encap` site — this *removed* two
+  direct `l2_srv6_encap` expansions from `cradle_xdp`'s frame, so the
+  stack budget went down, not up. The underlay adjacency resolves by FIB4
+  LPM on the VTEP (dir24 mode therefore needs an explicit /32 route or
+  nexthop, same as VXLAN FDB entries).
+- **Decap** — `VNI_INFO` grew `VNI_F_ELINE`: the VNI's inner frame is
+  emitted raw on the AC (`vrf_id` = ifindex) with no FDB and no learning,
+  or with `VNI_F_ELINE_VLAN` the inner 802.1Q VID picks the AC from the
+  `DX2V` table `vrf_id` names — the exact `srv6_dx2`/DX2V semantics. The
+  handoff is the existing encap-agnostic `XDP_META_MAGIC_DX2` TC leg;
+  `vxlan_dx2` counts it (the twin of `srv6_dx2`; AC-ingress counts as
+  `vxlan_encap`).
+- **Control** — `Xconnect` gained `remote_vtep`/`remote_vni` (exactly one
+  of `remote_sid`/`remote_vtep`) and `local_vni` (the decap identity, at
+  most one of `local_sid`/`local_vni`); `XconnectDel` gained `local_vni`.
+  One RPC still binds the E-Line both ways. Static config: `xconnects[]`
+  entries take the same fields (+`dx2v_table` for a VLAN-scoped
+  `local_vni`).
+
+BDD: **`cradle_evpn_vpws_vxlan`** — the `cradle_evpn_vpws` double-AC
+topology (untagged + VID-30 E-Lines) over an eBPF-only IPv4 underlay,
+asymmetric VNIs per direction, `vxlan_flood`/`vxlan_decap` asserted zero
+(the E-Line never touches the bridging paths).
+
 ## Testing (BDD)
 
 All three features run VXLAN with **no kernel vxlan device** and kernel
