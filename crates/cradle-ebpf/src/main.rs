@@ -44,14 +44,14 @@ use cradle_common::{
     Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_MPLS, FDB_F_REMOTE,
     FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID,
     FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
-    FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD,
-    L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS,
-    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
+    FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr,
+    GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES,
+    MAX_SEGS, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
     MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP,
-    NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry,
-    NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, PolicyKey,
-    PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
+    NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
+    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
+    PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
     ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
     SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
     SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
@@ -107,6 +107,14 @@ static GTP_ENCAP: HashMap<u32, GtpEncap> = HashMap::with_max_entries(4096, 0);
 /// forward the inner in `vrf_id` (the `SRV6_LOCALSID` analogue for GTP).
 #[map]
 static GTP_PDR: HashMap<GtpPdrKey, GtpPdr> = HashMap::with_max_entries(4096, 0);
+/// IPv6-outer GTP-U decap PDRs (`H.M.GTP6.D`), keyed `(ingress VRF, outer
+/// dst, TEID)` — the v6 twin of `GTP_PDR`, sharing the `GtpPdr` action.
+#[map]
+static GTP_PDR6: HashMap<Gtp6PdrKey, GtpPdr> = HashMap::with_max_entries(4096, 0);
+/// IPv6-outer GTP-U encaps (`GTP6.E`), keyed by nexthop id — the v6 twin of
+/// `GTP_ENCAP`, imposed by an `NH_F_GTP6` nexthop.
+#[map]
+static GTP6_ENCAP: HashMap<u32, Gtp6Encap> = HashMap::with_max_entries(4096, 0);
 
 // --- EVPN/VXLAN (evpn-vxlan.md): the L2VNI ↔ bridge-domain binding in both
 // directions, and the local VTEP source address. ---
@@ -391,6 +399,8 @@ const GTP_PORT: u16 = 2152;
 /// (The decap side handles longer received headers — optional fields and a
 /// PDU Session Container — see `try_gtp_xdp`.)
 const GTP_ENCAP_HDR_LEN: usize = 36;
+/// Outer IPv6(40) + UDP(8) + minimal GTP-U(8) — the `GTP6.E` grow size.
+const GTP6_ENCAP_HDR_LEN: usize = 56;
 /// VXLAN over UDP port (RFC 7348).
 const VXLAN_PORT: u16 = 4789;
 /// BFD Echo (RFC 5881 §4) and single-hop control destination ports. Echo is
@@ -1909,6 +1919,16 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
         return gtp_encap(ctx, nh_id, &nh);
     }
 
+    // GTP-U imposition over an IPv6 outer (GTP6.E): same stitch guard as the
+    // v4-outer arm above.
+    if nh.flags & NH_F_GTP6 != 0 {
+        if tc_meta_from_srv6(ctx) {
+            stat_inc(STAT_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
+        return gtp6_encap(ctx, nh_id, &nh);
+    }
+
     // EVPN symmetric IRB: VXLAN-encapsulate the routed v4 packet toward the
     // remote PE's VTEP with an L3VNI + RMAC rewrite. Tunnel model — inner
     // TTL kept.
@@ -2092,6 +2112,15 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
             return Ok(TC_ACT_SHOT as i32);
         }
         return gtp_encap(ctx, nh_id, &nh);
+    }
+
+    // GTP-U imposition over an IPv6 outer (GTP6.E): same stitch guard.
+    if nh.flags & NH_F_GTP6 != 0 {
+        if tc_meta_from_srv6(ctx) {
+            stat_inc(STAT_DROP);
+            return Ok(TC_ACT_SHOT as i32);
+        }
+        return gtp6_encap(ctx, nh_id, &nh);
     }
 
     // EVPN symmetric IRB: VXLAN-encapsulate the routed v6 packet toward the
@@ -2576,6 +2605,57 @@ fn gtp_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop) -> Result<i32, ()> {
     l2_xmit(ctx, nh, ETH_P_IP)
 }
 
+/// `GTP6.E` downlink encap: wrap the inner packet in outer IPv6 + UDP(2152) +
+/// an 8-byte GTP-U G-PDU header (`GTP6_ENCAP[nh_id]`), then egress via the
+/// nexthop's adjacency — the v6-outer twin of [`gtp_encap`]. The UDP checksum
+/// is left 0 (RFC 6935/6936 zero-checksum tunnel mode: cradle's own
+/// `GTP_PDR6` decap never validates it; a standard kernel receiver would
+/// drop it, so interop with non-cradle peers needs zero-checksum acceptance
+/// configured on their end).
+#[inline(always)]
+fn gtp6_encap(ctx: &TcContext, nh_id: u32, nh: &NextHop) -> Result<i32, ()> {
+    let enc: Gtp6Encap = match GTP6_ENCAP.get_ptr(&nh_id) {
+        Some(e) => unsafe { *e },
+        None => return Ok(TC_ACT_PIPE as i32),
+    };
+    // Inner IP length, captured before the outer headers grow the frame.
+    let inner_len = (ctx.len() as usize).saturating_sub(EthHdr::LEN) as u16;
+    let udp_len = inner_len + 16; // UDP(8) + GTP-U(8) + inner
+    let gtp_len = inner_len; // payload after the 8-byte GTP-U header
+
+    ctx.skb
+        .adjust_room(GTP6_ENCAP_HDR_LEN as i32, BPF_ADJ_ROOM_MAC, 0)
+        .map_err(|_| ())?;
+
+    // Outer IPv6 header: version 6, TC/flow-label 0; the payload length is
+    // UDP + GTP-U + inner (= udp_len).
+    ctx.store(EthHdr::LEN, &0x6000_0000u32.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(EthHdr::LEN + 4, &udp_len.to_be(), 0)
+        .map_err(|_| ())?;
+    ctx.store(EthHdr::LEN + 6, &IPPROTO_UDP, 0)
+        .map_err(|_| ())?;
+    ctx.store(EthHdr::LEN + 7, &64u8, 0).map_err(|_| ())?; // hop limit
+    ctx.store(IP6_SRC_OFF, &enc.src, 0).map_err(|_| ())?;
+    ctx.store(IP6_DST_OFF, &enc.dst, 0).map_err(|_| ())?;
+
+    // UDP header (checksum 0 — zero-checksum tunnel mode, see above).
+    const L4: usize = EthHdr::LEN + IP6_HDR_LEN;
+    ctx.store(L4, &GTP_PORT.to_be(), 0).map_err(|_| ())?; // source port
+    ctx.store(L4 + 2, &GTP_PORT.to_be(), 0).map_err(|_| ())?; // dest 2152
+    ctx.store(L4 + 4, &udp_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(L4 + 6, &0u16, 0).map_err(|_| ())?;
+
+    // GTP-U header: version 1, PT 1, no optional fields; G-PDU (0xFF).
+    ctx.store(L4 + 8, &0x30u8, 0).map_err(|_| ())?;
+    ctx.store(L4 + 9, &0xFFu8, 0).map_err(|_| ())?;
+    ctx.store(L4 + 10, &gtp_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(L4 + 12, &enc.teid, 0).map_err(|_| ())?;
+
+    stat_inc(STAT_GTP_ENCAP);
+    l2_xmit(ctx, nh, ETH_P_IPV6)
+}
+
 /// EVPN symmetric IRB (RFC 9135): VXLAN-encapsulate a *routed* inner packet
 /// toward the remote PE's VTEP with an L3VNI, giving it a fresh inner
 /// Ethernet header — dst = the remote PE's router MAC (`VXLAN_ENCAP[nh_id]`),
@@ -2847,11 +2927,12 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         ETH_P_IPV6 => match try_bfd6(ctx)? {
             Some(action) => Ok(action),
             None => {
-                if unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? } == IPPROTO_UDP
-                    && u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF + 2)? })
-                        == VXLAN_PORT
-                {
-                    return try_vxlan6_xdp(ctx);
+                if unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? } == IPPROTO_UDP {
+                    match u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF + 2)? }) {
+                        VXLAN_PORT => return try_vxlan6_xdp(ctx),
+                        GTP_PORT => return try_gtp6_xdp(ctx),
+                        _ => {}
+                    }
                 }
                 try_srv6_xdp(ctx)
             }
@@ -2943,7 +3024,7 @@ fn xdp_l3_forward_v4(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     };
     let nh: &NextHop = unsafe { &*nh_ptr };
-    if nh.flags & (NH_F_MPLS | NH_F_SRV6 | NH_F_GTP | NH_F_VXLAN) != 0 {
+    if nh.flags & (NH_F_MPLS | NH_F_SRV6 | NH_F_GTP | NH_F_GTP6 | NH_F_VXLAN) != 0 {
         return Ok(xdp_action::XDP_PASS);
     }
     let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
@@ -3711,6 +3792,92 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
     // Strip the outer headers: slide the MAC header forward over them
     // and advance `data`, leaving a fresh Ethernet header on the inner packet.
+    let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
+    unsafe { *xdp_ptr::<[u8; 12]>(ctx, strip)? = macs };
+    unsafe { *xdp_ptr::<u16>(ctx, strip + ETH_TYPE_OFF)? = inner_et.to_be() };
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip as i32) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_GTP_DECAP);
+    // Route the inner packet in the PDR's VRF (0 = global; no metadata needed).
+    if pdr.vrf_id != 0 {
+        if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) }
+            != 0
+        {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        let meta = xdp_meta_ptr(ctx)?;
+        unsafe {
+            (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
+            (*meta).vrf_id = pdr.vrf_id;
+        }
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// GTP-U tunnel decap over an IPv6 outer (`H.M.GTP6.D`): match a received
+/// G-PDU on its (ingress VRF, local outer dst, TEID) in `GTP_PDR6`, strip
+/// the outer IPv6+UDP+GTP-U, and hand the inner packet to the TC FIB stage
+/// in the PDR's VRF — the v6-outer twin of [`try_gtp_xdp`], sharing its GTP
+/// header parsing rules. Base IPv6 header only (the dispatch established
+/// next-header == UDP and dport == 2152; extension headers pass to the
+/// kernel untouched).
+///
+/// `inline(never)`: a bpf-to-bpf call, NOT inlined — the XDP dispatch frame
+/// already sits near the 512-byte combined-stack ceiling, and inlining this
+/// handler's locals into it pushed the chain to 544. As its own call frame
+/// the cost lands only on the GTP6 path.
+#[inline(never)]
+fn try_gtp6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    const L4: usize = EthHdr::LEN + IP6_HDR_LEN;
+    // G-PDU (type 0xFF) only; header length from the optional-field flags
+    // and the extension chain — the same shapes `try_gtp_xdp` accepts.
+    let mtype = unsafe { *xdp_ptr::<u8>(ctx, L4 + 9)? };
+    if mtype != 0xFF {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let gflags = unsafe { *xdp_ptr::<u8>(ctx, L4 + 8)? };
+    let gtp_hdr_len: usize = if gflags & 0x07 == 0 {
+        8
+    } else {
+        match unsafe { *xdp_ptr::<u8>(ctx, L4 + 19)? } {
+            0 => 12,
+            0x85 => {
+                if unsafe { *xdp_ptr::<u8>(ctx, L4 + 20)? } != 1
+                    || unsafe { *xdp_ptr::<u8>(ctx, L4 + 23)? } != 0
+                {
+                    return Ok(xdp_action::XDP_PASS);
+                }
+                16
+            }
+            _ => return Ok(xdp_action::XDP_PASS),
+        }
+    };
+    // Outer IPv6(40) + UDP(8) + the actual GTP-U header.
+    let strip = IP6_HDR_LEN + 8 + gtp_hdr_len;
+    // PDR lookup keyed by (ingress port's VRF, local tunnel endpoint, TEID).
+    let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    let vrf_id = match PORTS.get_ptr(&iif) {
+        Some(p) => unsafe { (*p).vrf_id },
+        None => 0,
+    };
+    let dst = unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? };
+    let teid = unsafe { *xdp_ptr::<[u8; 4]>(ctx, L4 + 12)? };
+    let pdr: GtpPdr = match GTP_PDR6.get_ptr(&Gtp6PdrKey { vrf_id, dst, teid }) {
+        Some(p) => unsafe { *p },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    // Inner ethertype from the decapped packet's IP version nibble.
+    let inner_et = match unsafe { *xdp_ptr::<u8>(ctx, EthHdr::LEN + strip)? } >> 4 {
+        4 => ETH_P_IP,
+        6 => ETH_P_IPV6,
+        _ => {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+    };
+    // Strip the outer headers: slide the MAC header forward over them.
     let macs = unsafe { *xdp_ptr::<[u8; 12]>(ctx, 0)? };
     unsafe { *xdp_ptr::<[u8; 12]>(ctx, strip)? = macs };
     unsafe { *xdp_ptr::<u16>(ctx, strip + ETH_TYPE_OFF)? = inner_et.to_be() };

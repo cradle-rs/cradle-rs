@@ -1303,6 +1303,24 @@ impl Control {
         Ok(())
     }
 
+    /// Bind nexthop `id` to an IPv6-outer GTP-U encap (`GTP6.E`) — the v6
+    /// twin of [`Self::set_nexthop_gtp`].
+    pub async fn set_nexthop_gtp6(
+        &self,
+        id: u32,
+        gateway: Option<Ipv6Addr>,
+        oif: u32,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        teid: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .nexthop_set_gtp6(id, gateway, oif, src, dst, teid)?;
+        Ok(())
+    }
+
     /// Install an EVPN symmetric-IRB VXLAN L3 nexthop (`NH_F_VXLAN`).
     pub async fn set_nexthop_vxlan(
         &self,
@@ -1324,7 +1342,7 @@ impl Control {
     /// strip + forward inner in `vrf`.
     pub async fn gtp_pdr_add(
         &self,
-        dst: Ipv4Addr,
+        dst: IpAddr,
         teid: u32,
         vrf: u32,
         match_vrf: u32,
@@ -1337,7 +1355,7 @@ impl Control {
     }
 
     /// Remove a GTP-U decap PDR.
-    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32, match_vrf: u32) -> Result<()> {
+    pub async fn gtp_pdr_del(&self, dst: IpAddr, teid: u32, match_vrf: u32) -> Result<()> {
         self.dp.lock().await.gtp_pdr_del(dst, teid, match_vrf)?;
         Ok(())
     }
@@ -2501,25 +2519,41 @@ impl Cradle for GrpcService {
                 .set_nexthop_vxlan(n.id, gw, oif, vtep, n.vxlan_l3vni, rmac)
                 .await
                 .map_err(st)?;
-        // A GTP-U nexthop (non-empty `gtp_dst`) imposes a GTP4.E encap: outer
-        // IPv4 + UDP(2152) + GTP-U(gtp_teid) over the v4 underlay `gateway`.
+        // A GTP-U nexthop (non-empty `gtp_dst`) imposes a GTP4.E / GTP6.E
+        // encap: outer IPv4/IPv6 (from `gtp_dst`'s family) + UDP(2152) +
+        // GTP-U(gtp_teid) over the matching-family underlay `gateway`.
         } else if !n.gtp_dst.is_empty() {
-            let gw = if n.gateway.is_empty() {
-                None
-            } else {
-                Some(n.gateway.parse::<Ipv4Addr>().map_err(st)?)
-            };
             let oif = if n.oif_index != 0 {
                 n.oif_index
             } else {
                 util::ifindex_of(&n.oif).map_err(st)?
             };
-            let src = n.gtp_src.parse::<Ipv4Addr>().map_err(st)?;
-            let dst = n.gtp_dst.parse::<Ipv4Addr>().map_err(st)?;
-            self.control
-                .set_nexthop_gtp(n.id, gw, oif, src, dst, n.gtp_teid)
-                .await
-                .map_err(st)?;
+            match n.gtp_dst.parse::<IpAddr>().map_err(st)? {
+                IpAddr::V4(dst) => {
+                    let gw = if n.gateway.is_empty() {
+                        None
+                    } else {
+                        Some(n.gateway.parse::<Ipv4Addr>().map_err(st)?)
+                    };
+                    let src = n.gtp_src.parse::<Ipv4Addr>().map_err(st)?;
+                    self.control
+                        .set_nexthop_gtp(n.id, gw, oif, src, dst, n.gtp_teid)
+                        .await
+                        .map_err(st)?;
+                }
+                IpAddr::V6(dst) => {
+                    let gw = if n.gateway.is_empty() {
+                        None
+                    } else {
+                        Some(n.gateway.parse::<Ipv6Addr>().map_err(st)?)
+                    };
+                    let src = n.gtp_src.parse::<Ipv6Addr>().map_err(st)?;
+                    self.control
+                        .set_nexthop_gtp6(n.id, gw, oif, src, dst, n.gtp_teid)
+                        .await
+                        .map_err(st)?;
+                }
+            }
         // A nexthop carrying SRv6 segments imposes an H.Encaps (always v6
         // underlay), regardless of the `v6` flag.
         } else if !n.segs.is_empty() {
@@ -2709,7 +2743,7 @@ impl Cradle for GrpcService {
 
     async fn add_gtp_pdr(&self, req: Request<pb::GtpPdr>) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
-        let dst = p.dst.parse::<Ipv4Addr>().map_err(st)?;
+        let dst = p.dst.parse::<IpAddr>().map_err(st)?;
         self.control
             .gtp_pdr_add(dst, p.teid, p.vrf, p.match_vrf)
             .await
@@ -2722,7 +2756,7 @@ impl Cradle for GrpcService {
         req: Request<pb::GtpPdrDel>,
     ) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
-        let dst = p.dst.parse::<Ipv4Addr>().map_err(st)?;
+        let dst = p.dst.parse::<IpAddr>().map_err(st)?;
         self.control
             .gtp_pdr_del(dst, p.teid, p.match_vrf)
             .await
