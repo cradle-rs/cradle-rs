@@ -11,6 +11,48 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 0.9.9
+  date: 2026-07-31T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### E-Line (EVPN-VPWS)
+        * E-Line point-to-point services over VXLAN (RFC 8365 §6)
+          and over MPLS (RFC 8214 / RFC 7432) in the eBPF data
+          plane
+        * Both encapsulations proven end to end in BDD with
+          BGP-driven signaling from zebra-rs — no static state
+
+    - note: |
+        ### EVPN over MPLS
+        * Known-unicast EVPN forwarding over MPLS (RFC 7432) in
+          the eBPF data plane
+        * BUM traffic over MPLS via a sentinel tunnel with
+          multi-PE ingress replication
+        * BGP-driven three-node BDD coverage with zero static
+          configuration
+
+    - note: |
+        ### Control plane
+        * WatchFdb learn events now report the learning port, so
+          subscribers see which port a MAC was learned on
+
+    - note: |
+        ### Mobile User Plane (GTP-U / MUP)
+        * BDD single-N6 MUP GTP round trip with iperf3 traffic
+
+    - note: |
+        ### Build & release
+        * cradle-ebpf is built with the pinned toolchain instead
+          of a floating `nightly`; the nightly toolchain is pinned
+          to 2026-07-23 (rustc codegen ICE broke the .deb build)
+        * `Cargo.lock` is tracked so release artifacts are
+          reproducible
+        * Nightly release notes no longer carry the changelog
+          preview
+
 - semver: 0.9.8
   date: 2026-07-15T18:00:00+09:00
   distribution: unstable
