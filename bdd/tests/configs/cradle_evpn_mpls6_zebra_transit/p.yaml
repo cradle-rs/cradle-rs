@@ -1,0 +1,25 @@
+system:
+  cradle:
+    enabled: true
+# P — pure label switch on v6 adjacencies, no BGP, no EVPN state. The
+# static-ILM v6 bindings pop the transport label toward each PE (PHP),
+# exposing the EVI service label to the egress PE's decap.
+interface:
+- if-name: pe1
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: pe2
+  ipv6:
+    address: 2001:db8:23::1/64
+router:
+  static:
+    mpls:
+      label:
+      - value: 100
+        nexthop:
+        - address: 2001:db8:23::2
+          interface: pe2
+      - value: 101
+        nexthop:
+        - address: 2001:db8:12::1
+          interface: pe1

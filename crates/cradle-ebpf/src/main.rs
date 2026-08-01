@@ -3204,25 +3204,18 @@ fn l2_vxlan_encap(
     let vtep: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
     // Underlay adjacency: an explicit nexthop id (static config), or — when
     // the entry came from the control-plane tee with nexthop 0 — resolved by
-    // a FIB4 lookup on the remote VTEP (the underlay route the IGP installed).
-    // The LPM trie directly (`l2_srv6_encap`'s FIB6 shape) — the generic
-    // `fib4_lookup` would inline the whole DIR-24 engine into cradle_xdp's
-    // flattened frame and blow the verifier's stack budget; in dir24 mode a
-    // VXLAN FDB entry needs an explicit nexthop id.
+    // a FIB4 lookup on the remote VTEP (the underlay route the IGP installed)
+    // in the shared subprogram (`overlay_fib_nexthop_id` — the LPM trie
+    // directly, NOT the generic `fib4_lookup`, which would drag the whole
+    // DIR-24 engine in; in dir24 mode a VXLAN FDB entry needs an explicit
+    // nexthop id).
     let nh_id = if nh_id != 0 {
         nh_id
     } else {
-        // Borrow, don't copy: cradle_xdp's flattened frame sits at the
-        // verifier's call-chain stack budget (see `PolicyScratch6`), so this
-        // whole function avoids aggregate stack temporaries.
-        let fib: &FibEntry = match FIB4.get(Key::new(32, vtep)) {
-            Some(f) => f,
-            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
-        };
-        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
-            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        match overlay_fib_nexthop_id(addr) {
+            0 => return Ok(xdp_action::XDP_PASS), // no usable underlay route
+            id => id,
         }
-        fib.nexthop_id
     };
     let nh: &NextHop = match NEXTHOPS.get_ptr(&nh_id) {
         Some(n) => unsafe { &*n },
@@ -3293,15 +3286,10 @@ fn l2_vxlan6_encap(
     let nh_id = if nh_id != 0 {
         nh_id
     } else {
-        // Borrow, don't copy — same stack discipline as the v4 body.
-        let fib: &FibEntry = match FIB6.get(Key::new(128, *vtep)) {
-            Some(f) => f,
-            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
-        };
-        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
-            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        match overlay_fib_nexthop_id(vtep) {
+            0 => return Ok(xdp_action::XDP_PASS), // no usable underlay route
+            id => id,
         }
-        fib.nexthop_id
     };
     let nh: &NextHop = match NEXTHOPS.get_ptr(&nh_id) {
         Some(n) => unsafe { &*n },
@@ -3347,6 +3335,37 @@ fn l2_vxlan6_encap(
     unsafe { *xdp_ptr::<u32>(ctx, VXLAN6_HDR_OFF + 4)? = (vni << 8).to_be() };
     stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
+/// Resolve the underlay nexthop id for an overlay target (VTEP / MPLS PE)
+/// by a FIB lookup in the target's own address family: FIB4 /32 for a
+/// v4-mapped target, FIB6 /128 otherwise. Returns 0 — never a valid
+/// nexthop id — when there is no usable route (absent, ECMP, blackhole,
+/// local: punt to the host stack, the MVP shape).
+///
+/// Deliberately NOT `inline(always)`: the LPM `Key` temporaries live in
+/// this subprogram's own frame. Four call sites (the VXLAN and MPLS encap
+/// bodies, both families) used to expand them into `cradle_xdp`'s
+/// flattened frame, and the fourth expansion pushed the verifier's
+/// combined call-chain stack over its 512-byte budget the moment two
+/// features grew the frame in parallel branches.
+fn overlay_fib_nexthop_id(addr: &[u8; 16]) -> u32 {
+    let fib: &FibEntry = if is_v4_mapped(addr) {
+        let pe: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
+        match FIB4.get(Key::new(32, pe)) {
+            Some(f) => f,
+            None => return 0,
+        }
+    } else {
+        match FIB6.get(Key::new(128, *addr)) {
+            Some(f) => f,
+            None => return 0,
+        }
+    };
+    if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
+        return 0;
+    }
+    fib.nexthop_id
 }
 
 /// True when a 16-byte overlay target holds an IPv4 address v4-mapped
@@ -3401,22 +3420,10 @@ fn l2_mpls_encap(
     let nh_id = if nh_id != 0 {
         nh_id
     } else {
-        let fib: &FibEntry = if is_v4_mapped(addr) {
-            let pe: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
-            match FIB4.get(Key::new(32, pe)) {
-                Some(f) => f,
-                None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
-            }
-        } else {
-            match FIB6.get(Key::new(128, *addr)) {
-                Some(f) => f,
-                None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
-            }
-        };
-        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
-            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        match overlay_fib_nexthop_id(addr) {
+            0 => return Ok(xdp_action::XDP_PASS), // no usable underlay route
+            id => id,
         }
-        fib.nexthop_id
     };
     let nh: &NextHop = match NEXTHOPS.get_ptr(&nh_id) {
         Some(n) => unsafe { &*n },
@@ -3510,7 +3517,12 @@ fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             // PHP shapes — a pop with a *real* nexthop means "pop and
             // forward the remaining stack there". The labels underneath
             // belong to the next hop (label spaces are per-node): they must
-            // never be looked up here.
+            // never be looked up here. NB the XDP redirect only delivers
+            // toward XDP-attached ports (the core) — an ILM whose pop is
+            // edge delivery must stay oif-less so it takes the
+            // FIB-assisted path below (the TC stage's egress reaches any
+            // device); the control plane only stamps an oif when the
+            // operator names the egress interface explicitly.
             MPLS_OP_SWAP | MPLS_OP_POP if nh.num_labels == 0 && nh.oif != 0 => {
                 return pop_and_forward(ctx, &nh, s, ttl, uniform);
             }

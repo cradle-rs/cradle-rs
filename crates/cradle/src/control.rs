@@ -2549,7 +2549,10 @@ impl Cradle for GrpcService {
             } else {
                 Some(n.gateway.parse::<Ipv6Addr>().map_err(st)?)
             };
-            let oif = if n.oif_index != 0 {
+            // oif_index 0 with no name: an oif-less nexthop (e.g. an ILM
+            // decap target that never egresses through it) — store as-is,
+            // the same tolerance as the v4 arm below.
+            let oif = if n.oif_index != 0 || n.oif.is_empty() {
                 n.oif_index
             } else {
                 util::ifindex_of(&n.oif).map_err(st)?

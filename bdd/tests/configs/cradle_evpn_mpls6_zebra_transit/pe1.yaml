@@ -1,0 +1,45 @@
+system:
+  cradle:
+    enabled: true
+# PE1 — EVPN-over-MPLS provider edge behind a v6 label-switched core. The
+# labeled static /128 imposes transport label 100 toward PE2's loopback
+# (the P pops it); iBGP EVPN (`encapsulation mpls`) advertises the
+# per-EVI service label with `vtep-source` as next hop.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::1/128
+- if-name: pe1u
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+          label: [100]
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::1
+      evi:
+      - id: 100
+        bridge: br100
+    neighbor:
+    - remote-address: 2001:db8:255::2
+      remote-as: 65000
+      update-source: 2001:db8:255::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
