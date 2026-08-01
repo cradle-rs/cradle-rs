@@ -4634,10 +4634,11 @@ async fn main() {
     // own cucumber instance with scenarios forced serial (and in declaration
     // order) via `max_concurrent_scenarios(1)`, while *different* features run
     // concurrently here. So `--concurrency=N` means "run up to N features at
-    // the same time" (not N scenarios); `--tags` / `--name` filter scenarios
-    // as usual. This is safe because every feature scopes its netns / bridge /
-    // veth / pid by its feature tag (see `World`), and Allure output is scoped
-    // per-PID *and* per-feature below.
+    // the same time" (not N scenarios; defaults to 16, pass `--concurrency=1`
+    // for a serial run); `--tags` / `--name` filter scenarios as usual. This
+    // is safe because every feature scopes its netns / bridge / veth / pid by
+    // its feature tag (see `World`), and Allure output is scoped per-PID
+    // *and* per-feature below.
     type CliOpts = cli::Opts<
         cucumber::parser::basic::Cli,
         cucumber::runner::basic::Cli,
@@ -4645,7 +4646,7 @@ async fn main() {
         cli::Empty,
     >;
     let opts = CliOpts::parsed();
-    let feature_concurrency = opts.runner.concurrency.unwrap_or(1).max(1);
+    let feature_concurrency = opts.runner.concurrency.unwrap_or(16).max(1);
     let tags_filter = opts.tags_filter;
     let re_filter = opts.re_filter;
 
