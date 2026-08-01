@@ -918,6 +918,41 @@ async fn cradle_stat_reach(
     );
 }
 
+/// Sample `cradle stats` over gRPC and assert the named counter is — and
+/// stays — zero: the negative proof for guard scenarios where traffic must
+/// NOT reach a stage (e.g. the GTP↔SRv6 stitch drops). Samples a few times
+/// so a straggler increment still fails; every counter prints (zeros
+/// included), so an absent name is a step bug, not a zero.
+#[then(
+    expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should stay zero"
+)]
+async fn cradle_stat_stays_zero(world: &mut World, stat: String, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let cradle = cradle_bin();
+    let mut seen = false;
+    for _ in 0..3 {
+        if let Ok(out) = netns::exec_in_netns(&scoped, &cradle, &["stats", "--grpc", &ep]).await {
+            for line in out.lines() {
+                let mut it = line.split_whitespace();
+                if it.next() == Some(stat.as_str())
+                    && let Some(v) = it.next().and_then(|s| s.parse::<u64>().ok())
+                {
+                    seen = true;
+                    if v != 0 {
+                        panic!("cradle stat {} = {} (expected 0) in {}", stat, v, scoped);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    if !seen {
+        panic!("cradle stat {} never seen in {}", stat, scoped);
+    }
+    println!("✓ cradle stat {} stayed zero in {}", stat, scoped);
+}
+
 /// One's-complement 16-bit checksum over `data` (IPv4 / ICMP).
 fn inet_csum(data: &[u8]) -> u16 {
     let mut sum = 0u32;

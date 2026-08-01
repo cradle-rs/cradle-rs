@@ -229,10 +229,18 @@ pub const XDP_META_MAGIC_REPL: u32 = 0xC7AD_1E05;
 /// `End.M`): identical to [`XDP_META_MAGIC`] for VRF resolution — `tc_meta_vrf`
 /// accepts either — but it additionally marks the inner packet as
 /// SRv6-decapped, so the TC stage can special-case SRv6-origin traffic. Used to
-/// block the SRv6→GTP4.E stitch: an SRv6-decapped packet resolving to a GTP
-/// nexthop is dropped rather than re-imposed into a GTP-U tunnel. VXLAN-L3VNI
+/// block the SRv6→GTP4.E/GTP6.E stitch: an SRv6-decapped packet resolving to a
+/// GTP nexthop is dropped rather than re-imposed into a GTP-U tunnel. VXLAN-L3VNI
 /// and MPLS-VPN decaps keep the plain [`XDP_META_MAGIC`] and are unaffected.
 pub const XDP_META_MAGIC_SRV6: u32 = 0xC7AD_1E06;
+/// L3 decap from the **GTP-U stage** (`H.M.GTP4.D` / `H.M.GTP6.D`): identical to
+/// [`XDP_META_MAGIC`] for VRF resolution — `tc_meta_vrf` accepts it — but it
+/// additionally marks the inner packet as GTP-decapped. The mirror of
+/// [`XDP_META_MAGIC_SRV6`]'s guard: a GTP-decapped packet resolving to an
+/// SRv6 nexthop is dropped rather than re-imposed with H.Encaps, blocking
+/// the GTP→SRv6 stitch. Attached on every GTP decap (vrf 0 included) so the
+/// guard also holds in the global table.
+pub const XDP_META_MAGIC_GTP: u32 = 0xC7AD_1E07;
 
 /// Neighbor entry: the resolved destination MAC.
 #[repr(C)]
