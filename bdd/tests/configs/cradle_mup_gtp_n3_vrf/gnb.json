@@ -1,0 +1,21 @@
+{
+  "ports": [
+    { "name": "gn3", "l3": true },
+    { "name": "gue", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "gn3", "gateway": "10.0.12.1", "gtp_src": "10.0.12.2", "gtp_dst": "10.0.12.1", "gtp_teid": 1280 },
+    { "id": 2, "oif": "gue", "gateway": "10.0.2.2" }
+  ],
+  "neighbors": [
+    { "oif": "gn3", "ip": "10.0.12.1", "mac": "02:00:00:00:00:01" },
+    { "oif": "gue", "ip": "10.0.2.2", "mac": "02:00:00:00:00:04" }
+  ],
+  "gtp_pdrs": [
+    { "dst": "10.0.12.2", "teid": 256 }
+  ],
+  "routes": [
+    { "prefix": "10.0.60.0/24", "nexthop": 1 },
+    { "prefix": "10.0.2.0/24", "nexthop": 2 }
+  ]
+}
