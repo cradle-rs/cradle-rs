@@ -256,7 +256,9 @@ pub struct MplsEntry {
     /// `labels[0]` is the swap value.
     pub nexthop_id: u32,
     /// VRF/table id for `MPLS_OP_POP_L3` disposition (0 = global; per-VRF
-    /// lookup is Phase 3).
+    /// lookup is Phase 3). Field-reuse for the L2 dispositions: the
+    /// bridge domain for `POP_L2`, the AC ifindex for `POP_XC`, the
+    /// `DX2V` VLAN-table id for `POP_XC_VLAN`.
     pub vrf_id: u32,
     /// `MPLS_OP_*`.
     pub op: u8,
@@ -277,6 +279,15 @@ pub const MPLS_OP_POP: u8 = 2;
 /// bridge domain rather than a VRF table, the same field-reuse idiom
 /// `LocalSid::vrf_id` already uses for `End.DT2U`/`End.DT2M`.
 pub const MPLS_OP_POP_L2: u8 = 3;
+/// Pop the bottom-of-stack VPWS service label and emit the exposed
+/// Ethernet frame **raw on the attachment circuit** [`MplsEntry::vrf_id`]
+/// names — no FDB, no learning (EVPN E-Line over MPLS, the MPLS analog of
+/// `End.DX2` / `VNI_F_ELINE`).
+pub const MPLS_OP_POP_XC: u8 = 4;
+/// VLAN-scoped [`MPLS_OP_POP_XC`]: [`MplsEntry::vrf_id`] is a `DX2V`
+/// VLAN-table id and the inner frame's 802.1Q VID picks the AC from it
+/// (the MPLS analog of `End.DX2V` / `VNI_F_ELINE_VLAN`).
+pub const MPLS_OP_POP_XC_VLAN: u8 = 5;
 
 /// Disposition uses the **uniform** TTL model (RFC 3443): when this ILM pops
 /// the last label to expose IP, copy the popped label's TTL into the inner IP
@@ -1063,8 +1074,12 @@ pub const STAT_MPLS_L2_BUM: u32 = 48;
 /// on its attachment circuit (the egress leg — the VXLAN twin of
 /// `STAT_SRV6_DX2`; the AC-ingress leg counts as `vxlan_encap`).
 pub const STAT_VXLAN_DX2: u32 = 49;
+/// EVPN VPWS over MPLS: an E-Line service label popped and the exposed
+/// frame emitted raw on its attachment circuit (the egress leg — the
+/// MPLS twin of `STAT_SRV6_DX2`; AC-ingress counts as `mpls_l2_encap`).
+pub const STAT_MPLS_DX2: u32 = 50;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 50;
+pub const STAT_MAX: u32 = 51;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 

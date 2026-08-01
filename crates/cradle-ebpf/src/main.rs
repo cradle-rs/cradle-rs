@@ -46,23 +46,24 @@ use cradle_common::{
     FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
     FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD,
     L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS,
-    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_SWAP, MPLS_PIPE_TTL,
-    MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6,
-    NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND,
-    PCT_POD_INITIATED, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
-    PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL,
-    REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6,
-    SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46,
-    SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M,
-    SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP,
-    SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP,
-    SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT,
-    STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP,
-    STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_L2_BUM,
-    STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP,
-    STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP,
-    STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
+    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
+    MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP,
+    NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry,
+    NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3, PolicyKey,
+    PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
+    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
+    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
+    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
+    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
+    STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT,
+    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_DX2, STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP,
+    STAT_MPLS_L2_ENCAP, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP,
+    STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX,
+    STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
     STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
     STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
     STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD,
@@ -194,7 +195,8 @@ static REPL_SEG: HashMap<[u8; 16], ReplSeg> = HashMap::with_max_entries(256, 0);
 /// VPWS cross-connect (EVPN E-Line, RFC 8214): AC ingress ifindex → the
 /// remote service endpoint, `ReplTarget`-shaped like the replication
 /// slots (kind 0 = an End.DX2/DX2V SID, `REPL_KIND_VXLAN` = a VTEP with
-/// the remote's VNI in `vni`). Every frame arriving on a bound AC is
+/// the remote's VNI in `vni`, `REPL_KIND_MPLS` = a PE with the remote's
+/// service label in `vni`). Every frame arriving on a bound AC is
 /// encapsulated toward the endpoint — no FDB, no learning.
 #[map]
 static XCONNECT: HashMap<u32, ReplTarget> = HashMap::with_max_entries(256, 0);
@@ -3379,6 +3381,12 @@ fn try_mpls_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         if ent.op == MPLS_OP_POP_L2 {
             return pop_decap_l2(ctx, s, ent.vrf_id);
         }
+        // EVPN VPWS egress (RFC 8214 E-Line over MPLS): the label is a
+        // per-service label — pop it and emit the exposed frame RAW on the
+        // attachment circuit, no FDB. Same before-the-nexthop dispatch.
+        if ent.op == MPLS_OP_POP_XC || ent.op == MPLS_OP_POP_XC_VLAN {
+            return pop_decap_xc(ctx, s, ent.vrf_id, ent.op == MPLS_OP_POP_XC_VLAN);
+        }
         let nh: NextHop = match NEXTHOPS.get_ptr(&ent.nexthop_id) {
             Some(n) => unsafe { *n },
             None => return Ok(xdp_action::XDP_PASS),
@@ -4619,6 +4627,66 @@ fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = bd;
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// MPLS VPWS egress (`MPLS_OP_POP_XC` / `_XC_VLAN`, RFC 8214 E-Line over
+/// MPLS): pop the bottom-of-stack service label and emit the inner
+/// Ethernet frame RAW on the attachment circuit — no FDB, no learning, no
+/// MAC rewrite. The AC is `vrf_id` directly, or for a VLAN-scoped E-Line
+/// the inner frame's 802.1Q VID picks it from the `DX2V` table `vrf_id`
+/// names (the tag stays on the frame). The emit finishes at the TC stage
+/// via the encap-agnostic DX2 metadata leg, exactly like `srv6_dx2` and
+/// the VXLAN `VNI_F_ELINE` decap.
+///
+/// A service label that is not bottom-of-stack is malformed — what sits
+/// under it is not an Ethernet frame — so it is dropped rather than
+/// misparsed, like `pop_decap_l2`.
+#[inline(always)]
+fn pop_decap_xc(ctx: &XdpContext, s: u8, target: u32, vlan_scoped: bool) -> Result<u32, ()> {
+    if s != 1 {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    // Outer eth + the service LSE; the inner Ethernet header sits right
+    // after these 18 bytes.
+    let strip = (EthHdr::LEN + 4) as i32;
+    let oif = if vlan_scoped {
+        let inner_et =
+            u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, strip as usize + ETH_TYPE_OFF)? });
+        if inner_et != ETH_P_8021Q {
+            return Ok(xdp_action::XDP_PASS); // untagged — no VLAN to demux
+        }
+        let tci = u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, strip as usize + EthHdr::LEN)? });
+        let key = Dx2vKey {
+            table: target,
+            vid: tci & 0x0fff,
+            _pad: [0; 2],
+        };
+        match unsafe { DX2V.get(&key) } {
+            Some(o) => *o,
+            None => return Ok(xdp_action::XDP_PASS), // unknown VID
+        }
+    } else {
+        target
+    };
+    if oif == 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
+        return Err(());
+    }
+    stat_inc(STAT_MPLS_DX2);
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = XDP_META_MAGIC_DX2 ^ meta_cookie();
+        (*meta).vrf_id = oif;
     }
     Ok(xdp_action::XDP_PASS)
 }
