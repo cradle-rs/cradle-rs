@@ -1,0 +1,40 @@
+system:
+  cradle:
+    enabled: true
+# P — the transit LSR. No BGP and no EVPN state at all: it only swaps the
+# transport label toward the egress PE's loopback. Its pop-and-forward of
+# the transport label (it is the penultimate hop for both loopbacks) is what
+# exposes the EVI service label to the egress PE.
+interface:
+- if-name: lo
+  ipv4:
+    address: 3.3.3.3/32
+- if-name: pe1
+  ipv4:
+    address: 10.250.0.2/30
+- if-name: pe2
+  ipv4:
+    address: 10.250.0.5/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: p
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 3.3.3.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 3
+    - if-name: pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: pe2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
