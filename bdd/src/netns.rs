@@ -386,6 +386,36 @@ pub async fn pidfile_alive(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// SIGCONT the parent of `pid`. Best-effort; a no-op on a healthy parent.
+///
+/// The daemons here run as children of a `sudo ip netns exec` wrapper, and
+/// sudo mirrors its command's SIGSTOP onto itself (job-control emulation).
+/// `I pause zebra-rs` therefore stops the wrapper too, and `kill -CONT` on
+/// the daemon alone leaves it stopped — unable to reap its child, so a
+/// stopped sudo + zombie pair would outlive the run once the daemon is
+/// killed. Waking the parent lets it reap and exit.
+pub async fn cont_parent(pid: u32) {
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .await
+    else {
+        return;
+    };
+    let Ok(ppid) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() else {
+        return;
+    };
+    if ppid <= 1 {
+        return;
+    }
+    let _ = Command::new("sudo")
+        .args(["kill", "-CONT", &ppid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+}
+
 /// SIGKILL the PID recorded in `path` and remove the file. Best-effort:
 /// missing file, dead process, or unparseable contents are not errors.
 ///
@@ -394,6 +424,9 @@ pub async fn pidfile_alive(path: &Path) -> bool {
 /// the sticky bit set — non-root deletion silently fails.
 pub async fn kill_pidfile(path: &Path) -> Result<()> {
     if let Some(pid) = read_pid(path).await {
+        // Wake a self-stopped sudo wrapper first (see `cont_parent`), or a
+        // daemon killed while paused is never reaped.
+        cont_parent(pid).await;
         let _ = Command::new("sudo")
             .args(["kill", "-9", &pid.to_string()])
             .stdout(Stdio::null())
