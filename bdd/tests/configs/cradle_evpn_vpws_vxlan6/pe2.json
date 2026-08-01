@@ -1,0 +1,22 @@
+{
+  "ports": [
+    { "name": "pe2c" },
+    { "name": "pe2v" },
+    { "name": "pe2u", "l3": true }
+  ],
+  "vtep_source": "2001:db8::2",
+  "nexthops": [
+    { "id": 1, "oif": "pe2u", "gateway": "2001:db8::1" }
+  ],
+  "neighbors": [
+    { "oif": "pe2u", "ip": "2001:db8::1", "mac": "02:00:00:00:0a:01" }
+  ],
+  "xconnects": [
+    { "port": "pe2c", "remote_vtep": "2001:db8::1", "remote_vni": 5001, "local_vni": 5002 },
+    { "port": "pe2v", "remote_vtep": "2001:db8::1", "remote_vni": 5031, "local_vni": 5032,
+      "vid": 30, "dx2v_table": 7 }
+  ],
+  "routes6": [
+    { "prefix": "2001:db8::1/128", "nexthop": 1 }
+  ]
+}

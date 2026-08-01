@@ -48,9 +48,15 @@ pub struct Config {
     /// SRv6 H.Encaps outer source address.
     #[serde(default)]
     pub srv6_source: Option<String>,
-    /// Local VTEP source IPv4 (EVPN/VXLAN outer source + decap match).
+    /// Local VTEP source, IPv4 or IPv6 (EVPN/VXLAN outer source + decap
+    /// match). Set both this and `vtep_source6` for a dual-stack fabric.
     #[serde(default)]
     pub vtep_source: Option<String>,
+    /// Second VTEP source for dual-stack fabrics (each address family has
+    /// its own slot; `vtep_source` alone covers a single-family fabric of
+    /// either kind).
+    #[serde(default)]
+    pub vtep_source6: Option<String>,
     /// EVPN/VXLAN L2VNI bindings: VNI ↔ bridge domain.
     #[serde(default)]
     pub vnis: Vec<VniCfg>,
@@ -629,6 +635,12 @@ impl Config {
                 .parse()
                 .with_context(|| format!("bad srv6_source {src:?}"))?;
             ctl.set_srv6_encap_source(addr).await?;
+        }
+        if let Some(src) = &self.vtep_source6 {
+            let addr = src
+                .parse()
+                .with_context(|| format!("bad vtep_source6 {src:?}"))?;
+            ctl.set_vtep_source(addr).await?;
         }
         if let Some(src) = &self.vtep_source {
             let addr = src

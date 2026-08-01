@@ -121,6 +121,12 @@ static VNI_INFO: HashMap<u32, VniInfo> = HashMap::with_max_entries(4096, 0);
 /// All-zero = VXLAN unconfigured: the decap never claims a packet.
 #[map]
 static VXLAN_SRC: Array<[u8; 4]> = Array::with_max_entries(1, 0);
+/// Local VTEP source IPv6 ([0]) — the IPv6-underlay twin of `VXLAN_SRC`.
+/// All-zero = no v6 VTEP: the v6 decap never claims a packet. Both may be
+/// set (a dual-stack fabric); each remote's target address family picks
+/// the encap side.
+#[map]
+static VXLAN_SRC6: Array<[u8; 16]> = Array::with_max_entries(1, 0);
 /// EVPN symmetric IRB (RFC 9135): per-nexthop VXLAN L3 encap, keyed by
 /// nexthop id (the `NH_F_VXLAN` companion to `GTP_ENCAP`).
 #[map]
@@ -393,6 +399,12 @@ const BFD_ECHO_PORT: u16 = 3785;
 const BFD_CTRL_PORT: u16 = 3784;
 /// Bytes a VXLAN encap pushes: outer Eth(14) + IPv4(20) + UDP(8) + VXLAN(8).
 const VXLAN_ENCAP_HDR_LEN: usize = 50;
+/// Outer Ethernet(14) + IPv6(40) + UDP(8) + VXLAN(8) — the v6-underlay grow.
+const VXLAN6_ENCAP_HDR_LEN: usize = 70;
+/// UDP header offset in a v6-underlay VXLAN packet (after Eth + IPv6).
+const VXLAN6_L4_OFF: usize = EthHdr::LEN + IP6_HDR_LEN;
+/// VXLAN header offset in a v6-underlay VXLAN packet (after the UDP header).
+const VXLAN6_HDR_OFF: usize = VXLAN6_L4_OFF + 8;
 /// Offset of the VXLAN header in a received no-options VXLAN frame.
 const VXLAN_HDR_OFF: usize = L4_OFF + 8;
 /// Offset of the inner Ethernet header a symmetric-IRB VXLAN L3 encap
@@ -2826,10 +2838,19 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     match ethertype {
         ETH_P_MPLS_UC => try_mpls_xdp(ctx),
         // BFD Echo/control over IPv6 (udp/3785/3784, base header) is reflected /
-        // watched before SRv6; a non-BFD IPv6 packet falls through to SRv6.
+        // watched before SRv6; a UDP/4789 packet is a v6-underlay VXLAN
+        // candidate; anything else falls through to SRv6.
         ETH_P_IPV6 => match try_bfd6(ctx)? {
             Some(action) => Ok(action),
-            None => try_srv6_xdp(ctx),
+            None => {
+                if unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? } == IPPROTO_UDP
+                    && u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF + 2)? })
+                        == VXLAN_PORT
+                {
+                    return try_vxlan6_xdp(ctx);
+                }
+                try_srv6_xdp(ctx)
+            }
         },
         // UDP tunnel decaps (GTP-U, VXLAN): a packet destined to a local
         // tunnel endpoint is stripped in XDP; anything else falls through to
@@ -3158,7 +3179,8 @@ fn l2_srv6_encap(ctx: &XdpContext, sid: &[u8; 16], nh_id: u32, stat: u32) -> Res
 }
 
 /// VXLAN encap (RFC 7348): prepend outer Ethernet + IPv4 + UDP(4789) + VXLAN
-/// carrying `vni`, toward the remote VTEP `addr` names (v4-mapped), and
+/// carrying `vni`, toward the remote VTEP `addr` names (v4-mapped — a
+/// non-v4-mapped target is an IPv6 VTEP and takes the v6 twin below), and
 /// redirect out the underlay adjacency. The whole inner frame rides as the
 /// VXLAN payload. `l2_srv6_encap`'s shape with GTP's outer IPv4+UDP recipe:
 /// header checksum from `ipv4_hdr_csum`, UDP checksum 0 (optional over IPv4,
@@ -3172,6 +3194,9 @@ fn l2_vxlan_encap(
     vni: u32,
     stat: u32,
 ) -> Result<u32, ()> {
+    if !is_v4_mapped(addr) {
+        return l2_vxlan6_encap(ctx, addr, nh_id, vni, stat);
+    }
     let vtep: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
     // Underlay adjacency: an explicit nexthop id (static config), or — when
     // the entry came from the control-plane tee with nexthop 0 — resolved by
@@ -3243,6 +3268,79 @@ fn l2_vxlan_encap(
     // VXLAN header: I flag, VNI in the upper 24 bits of the second word.
     unsafe { *xdp_ptr::<u32>(ctx, VXLAN_HDR_OFF)? = 0x0800_0000u32.to_be() };
     unsafe { *xdp_ptr::<u32>(ctx, VXLAN_HDR_OFF + 4)? = (vni << 8).to_be() };
+    stat_inc(stat);
+    Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
+}
+
+/// IPv6-underlay VXLAN encap: outer Ethernet + IPv6 + UDP(4789) + VXLAN
+/// toward the (native v6) VTEP `vtep`, resolved like `l2_srv6_encap` — an
+/// explicit nexthop id or a FIB6 lookup on the VTEP. The UDP checksum is
+/// transmitted as zero: RFC 6935/6936 permit it for tunnel protocols and
+/// our own decap accepts it; a *kernel* VTEP peer must be configured with
+/// `udp6zerocsumrx` (and `udp6zerocsumtx` toward us) to interoperate.
+#[inline(always)]
+fn l2_vxlan6_encap(
+    ctx: &XdpContext,
+    vtep: &[u8; 16],
+    nh_id: u32,
+    vni: u32,
+    stat: u32,
+) -> Result<u32, ()> {
+    let nh_id = if nh_id != 0 {
+        nh_id
+    } else {
+        // Borrow, don't copy — same stack discipline as the v4 body.
+        let fib: &FibEntry = match FIB6.get(Key::new(128, *vtep)) {
+            Some(f) => f,
+            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+        };
+        if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
+            return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)
+        }
+        fib.nexthop_id
+    };
+    let nh: &NextHop = match NEXTHOPS.get_ptr(&nh_id) {
+        Some(n) => unsafe { &*n },
+        None => return Ok(xdp_action::XDP_PASS),
+    };
+    let Some((dst_mac, src_mac)) = xdp_resolve_l2(nh) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    let src6: &[u8; 16] = match VXLAN_SRC6.get(0) {
+        Some(s) if *s != [0; 16] => s,
+        _ => return Ok(xdp_action::XDP_PASS), // no local v6 VTEP configured
+    };
+    // Flow entropy for the UDP source port — scalar reads, before the grow.
+    let e0 = unsafe { *xdp_ptr::<u8>(ctx, 0)? } ^ unsafe { *xdp_ptr::<u8>(ctx, 6)? };
+    let e1 = unsafe { *xdp_ptr::<u8>(ctx, 5)? } ^ unsafe { *xdp_ptr::<u8>(ctx, 11)? };
+    let h = e0 as u16 | (e1 as u16) << 8;
+    let sport = 0xC000 | (h & 0x3FFF); // the RFC 6335 dynamic range
+    // The whole inner frame (inner eth + payload) becomes the VXLAN payload;
+    // over IPv6 the UDP datagram is also the IPv6 payload length.
+    let inner_len = (ctx.data_end() - ctx.data()) as u16;
+    let udp_len = inner_len + 16; // UDP(8) + VXLAN(8) + inner
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, -(VXLAN6_ENCAP_HDR_LEN as i32)) } != 0 {
+        return Err(());
+    }
+    // Outer Ethernet.
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? = dst_mac };
+    unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? = src_mac };
+    unsafe { *xdp_ptr::<u16>(ctx, ETH_TYPE_OFF)? = (ETH_P_IPV6 as u16).to_be() };
+    // Outer IPv6.
+    unsafe { *xdp_ptr::<u32>(ctx, EthHdr::LEN)? = IP6_VER_TC_FL.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, IP6_PAYLOAD_LEN_OFF)? = udp_len.to_be() };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_NEXTHDR_OFF)? = IPPROTO_UDP };
+    unsafe { *xdp_ptr::<u8>(ctx, IP6_HOP_OFF)? = 64 };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)? = *src6 };
+    unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? = *vtep };
+    // UDP header (checksum 0 — RFC 6935/6936 tunnel exemption).
+    unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF)? = sport.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF + 2)? = VXLAN_PORT.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF + 4)? = udp_len.to_be() };
+    unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_L4_OFF + 6)? = 0 }; // UDP checksum
+    // VXLAN header: I flag, VNI in the upper 24 bits of the second word.
+    unsafe { *xdp_ptr::<u32>(ctx, VXLAN6_HDR_OFF)? = 0x0800_0000u32.to_be() };
+    unsafe { *xdp_ptr::<u32>(ctx, VXLAN6_HDR_OFF + 4)? = (vni << 8).to_be() };
     stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
 }
@@ -3677,6 +3775,82 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN_ENCAP_HDR_LEN as i32) } != 0 {
+        return Err(());
+    }
+    stat_inc(stat);
+    if unsafe { bpf_xdp_adjust_meta(ctx.ctx, -(core::mem::size_of::<CradleXdpMeta>() as i32)) } != 0
+    {
+        stat_inc(STAT_DROP);
+        return Ok(xdp_action::XDP_DROP);
+    }
+    let meta = xdp_meta_ptr(ctx)?;
+    unsafe {
+        (*meta).magic = magic ^ meta_cookie();
+        (*meta).vrf_id = vrf;
+    }
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// VXLAN decap, IPv6 underlay: the v6 twin of `try_vxlan_xdp` — a VXLAN
+/// frame addressed to the local v6 VTEP is stripped of its 70-byte outer
+/// encapsulation and its VNI dispatches identically (E-Line to the AC,
+/// L3VNI to the VRF, L2VNI to the bridge domain). A zero UDP checksum is
+/// what our own encap transmits (RFC 6935/6936); a non-zero one is not
+/// verified — the payload's integrity story is the overlay's. Anything
+/// not ours — transit VXLAN between other VTEPs, an unknown VNI — passes
+/// to the SRv6/L3 stages untouched.
+#[inline(always)]
+fn try_vxlan6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+    let local: &[u8; 16] = match VXLAN_SRC6.get(0) {
+        Some(s) if *s != [0; 16] => s,
+        _ => return Ok(xdp_action::XDP_PASS), // no local v6 VTEP configured
+    };
+    if unsafe { *xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)? } != *local {
+        return Ok(xdp_action::XDP_PASS); // transit VXLAN: route it normally
+    }
+    // Valid-VNI flag (I) must be set; other flag bits are reserved (ignored).
+    if unsafe { *xdp_ptr::<u8>(ctx, VXLAN6_HDR_OFF)? } & 0x08 == 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let vni = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, VXLAN6_HDR_OFF + 4)? }) >> 8;
+    let info: VniInfo = match VNI_INFO.get_ptr(&vni) {
+        Some(i) => unsafe { *i },
+        None => return Ok(xdp_action::XDP_PASS), // unknown VNI: not ours
+    };
+    let (magic, vrf, stat) = if info.flags & VNI_F_ELINE != 0 {
+        // E-Line VNI (EVPN VPWS, RFC 8365 §6): raw to the AC — `vrf_id`
+        // directly, or VID-demuxed over the DX2V table it names.
+        let oif = if info.flags & VNI_F_ELINE_VLAN != 0 {
+            let inner_et =
+                u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_ENCAP_HDR_LEN + ETH_TYPE_OFF)? });
+            if inner_et != ETH_P_8021Q {
+                return Ok(xdp_action::XDP_PASS); // untagged — no VLAN to demux
+            }
+            let tci =
+                u16::from_be(unsafe { *xdp_ptr::<u16>(ctx, VXLAN6_ENCAP_HDR_LEN + EthHdr::LEN)? });
+            let key = Dx2vKey {
+                table: info.vrf_id,
+                vid: tci & 0x0fff,
+                _pad: [0; 2],
+            };
+            match unsafe { DX2V.get(&key) } {
+                Some(o) => *o,
+                None => return Ok(xdp_action::XDP_PASS), // unknown VID
+            }
+        } else {
+            info.vrf_id
+        };
+        if oif == 0 {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        (XDP_META_MAGIC_DX2, oif, STAT_VXLAN_DX2)
+    } else if info.flags & VNI_F_L3 != 0 {
+        (XDP_META_MAGIC, info.vrf_id, STAT_VXLAN_DECAP)
+    } else {
+        (XDP_META_MAGIC_L2, info.vlan as u32, STAT_VXLAN_DECAP)
+    };
+    // Drop the outer headers: the inner Ethernet frame moves to the front.
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN6_ENCAP_HDR_LEN as i32) } != 0 {
         return Err(());
     }
     stat_inc(stat);
