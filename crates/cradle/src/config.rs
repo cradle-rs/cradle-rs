@@ -264,6 +264,19 @@ pub struct XconnectCfg {
     /// VXLAN analog of a `locals` End.DX2 entry.
     #[serde(default)]
     pub local_vni: u32,
+    /// MPLS E-Line: the remote PE, encapsulated with `remote_label` under
+    /// the transport LSP the FIB resolves toward it.
+    #[serde(default)]
+    pub remote_pe: Option<String>,
+    /// MPLS: the service label the remote end advertised (required with
+    /// `remote_pe`).
+    #[serde(default)]
+    pub remote_label: u32,
+    /// MPLS: also install this label as the E-Line's local decap identity
+    /// — a pop-to-AC ILM (with a non-zero `vid`, demuxed on the inner VID
+    /// over `dx2v_table`). The MPLS analog of `local_vni`.
+    #[serde(default)]
+    pub local_label: u32,
     /// Non-zero = VLAN-scoped E-Line: only 802.1Q frames with this VID on
     /// `port` enter the cross-connect (tag kept). The SRv6 return
     /// direction is a separate `locals` End.DX2V + `dx2v` entry as usual.
@@ -588,7 +601,11 @@ pub fn ilm_action(action: &str) -> Result<u8> {
         "pop" => Ok(cradle_common::MPLS_OP_POP),
         "pop-l3" => Ok(cradle_common::MPLS_OP_POP_L3),
         "pop-l2" => Ok(cradle_common::MPLS_OP_POP_L2),
-        other => anyhow::bail!("unknown ILM action {other:?} (want swap|pop|pop-l3|pop-l2)"),
+        "pop-xc" => Ok(cradle_common::MPLS_OP_POP_XC),
+        "pop-xc-vlan" => Ok(cradle_common::MPLS_OP_POP_XC_VLAN),
+        other => anyhow::bail!(
+            "unknown ILM action {other:?} (want swap|pop|pop-l3|pop-l2|pop-xc|pop-xc-vlan)"
+        ),
     }
 }
 
@@ -843,12 +860,12 @@ impl Config {
                 .await?;
         }
         for x in &self.xconnects {
-            let remote = match (&x.remote_sid, &x.remote_vtep) {
-                (Some(sid), None) => XconnectRemote::Srv6(
+            let remote = match (&x.remote_sid, &x.remote_vtep, &x.remote_pe) {
+                (Some(sid), None, None) => XconnectRemote::Srv6(
                     sid.parse()
                         .with_context(|| format!("bad remote SID {sid:?}"))?,
                 ),
-                (None, Some(vtep)) => {
+                (None, Some(vtep), None) => {
                     anyhow::ensure!(
                         x.remote_vni != 0,
                         "xconnect {}: remote_vtep requires remote_vni",
@@ -861,15 +878,32 @@ impl Config {
                         vni: x.remote_vni,
                     }
                 }
+                (None, None, Some(pe)) => {
+                    anyhow::ensure!(
+                        x.remote_label != 0,
+                        "xconnect {}: remote_pe requires remote_label",
+                        x.port
+                    );
+                    XconnectRemote::Mpls {
+                        pe: pe
+                            .parse()
+                            .with_context(|| format!("bad remote PE {pe:?}"))?,
+                        label: x.remote_label,
+                    }
+                }
                 _ => anyhow::bail!(
-                    "xconnect {}: exactly one of remote_sid / remote_vtep",
+                    "xconnect {}: exactly one of remote_sid / remote_vtep / remote_pe",
                     x.port
                 ),
             };
-            let local = if x.local_vni != 0 {
-                XconnectLocal::Vxlan(x.local_vni)
-            } else {
-                XconnectLocal::None
+            let local = match (x.local_vni != 0, x.local_label != 0) {
+                (false, false) => XconnectLocal::None,
+                (true, false) => XconnectLocal::Vxlan(x.local_vni),
+                (false, true) => XconnectLocal::Mpls(x.local_label),
+                (true, true) => anyhow::bail!(
+                    "xconnect {}: at most one of local_vni / local_label",
+                    x.port
+                ),
             };
             ctl.add_xconnect(&x.port, remote, local, x.vid, x.dx2v_table)
                 .await?;

@@ -198,6 +198,36 @@ names owned by a feature whose tag extends this one's
 (`World::sibling_prefixes`). Bridges and host veths were never affected: they
 carry `short_id()`, a hash of the whole tag.
 
+## E-Line / VPWS over MPLS (RFC 8214)
+
+The point-to-point service, sharing the SRv6/VXLAN VPWS machinery
+(docs/design/srv6.md's xconnect section, evpn-vxlan.md's E-Line section)
+with the MPLS wire format:
+
+- **AC ingress** — the `XCONNECT`/`XCONNECT_VLAN` `ReplTarget` values
+  carry `REPL_KIND_MPLS` (PE via `ip_to_v6_bytes`, the remote's service
+  label in `vni`); `try_xdp`'s single-funnel translate arm already
+  dispatched the kind, so the encap side needed zero datapath changes —
+  `l2_mpls_encap` resolves the transport stack by FIB4 on the PE.
+- **Decap** — new ILM ops `MPLS_OP_POP_XC` (pop the bottom-of-stack
+  service label, emit the frame raw on the AC `vrf_id` names) and
+  `MPLS_OP_POP_XC_VLAN` (`vrf_id` is a `DX2V` table the inner 802.1Q VID
+  picks the AC from) — the exact `srv6_dx2`/`VNI_F_ELINE` semantics,
+  dispatched before the nexthop resolve like `POP_L2`, delivered by the
+  encap-agnostic `XDP_META_MAGIC_DX2` TC leg. `mpls_dx2` counts it (the
+  MPLS twin of `srv6_dx2`; AC-ingress counts as `mpls_l2_encap`).
+- **Control** — `Xconnect` gained `remote_pe`/`remote_label` (exactly one
+  of sid/vtep/pe) and `local_label` (at most one of the three local decap
+  identities); a VLAN-scoped `local_label` programs its `DX2V` entry
+  alongside. Static config: `xconnects[]` takes the same fields; ILM
+  actions `pop-xc`/`pop-xc-vlan` are also accepted directly.
+
+BDD: **`cradle_evpn_vpws_mpls`** — the `cradle_evpn_vpws` double-AC
+topology (untagged + VID-30 E-Lines) over the `cradle_evpn_mpls` labeled
+underlay, asymmetric service labels per direction,
+`mpls_l2_decap`/`mpls_l2_bum`/`vxlan_encap` asserted zero (the E-Line
+never touches the bridging, flooding or other-overlay paths).
+
 ## Limits / next slices
 
 - **IPv4 underlay only.** An IPv6-underlay PE would need a second 16-byte-key
@@ -208,4 +238,5 @@ carry `short_id()`, a hash of the whole tag.
   which needs a second label inspection below the service label.
 - Out of scope for now: multihoming (Type-1/Type-4 and the ESI label's
   split-horizon check, which needs a *second* label inspection below the
-  service label), the control word, EVPN-VPWS over MPLS, and symmetric IRB.
+  service label), the control word, and symmetric IRB. EVPN-VPWS over
+  MPLS is implemented (see the E-Line section above).

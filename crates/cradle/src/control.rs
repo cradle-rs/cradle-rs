@@ -34,13 +34,13 @@ use crate::{
     util,
 };
 use cradle_common::{
-    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_SWAP, NH_F_V6,
-    NextHop, PORT_F_L2, PORT_F_L3, REPL_BRANCH_LOCAL, REPL_KIND_SRV6, REPL_KIND_VXLAN, ReplBranch,
-    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
-    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
-    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    SRV6_ENCAP_MODE_INSERT, STAT_MAX,
+    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
+    MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3, REPL_BRANCH_LOCAL,
+    REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, ReplBranch, ReplTarget, SRV6_BH_END,
+    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6,
+    SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
+    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X,
+    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -121,6 +121,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "mpls_l2_decap",
     "mpls_l2_bum",
     "vxlan_dx2",
+    "mpls_dx2",
 ];
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -134,6 +135,9 @@ pub enum XconnectRemote {
     Srv6(Ipv6Addr),
     /// The remote VTEP with the VNI it advertised (RFC 8365 §6).
     Vxlan { vtep: Ipv4Addr, vni: u32 },
+    /// The remote PE with the MPLS service label it advertised (RFC 7432
+    /// base encapsulation), imposed under the transport LSP toward the PE.
+    Mpls { pe: IpAddr, label: u32 },
 }
 
 /// The local decap identity of a VPWS cross-connect — how the return
@@ -146,6 +150,8 @@ pub enum XconnectLocal {
     Srv6(Ipv6Addr),
     /// Bind this E-Line VNI to the AC (VXLAN).
     Vxlan(u32),
+    /// Install a pop-to-AC ILM at this service label (MPLS).
+    Mpls(u32),
 }
 
 /// Slot-registry key for an overlay target: an IPv6 address verbatim, an IPv4
@@ -786,7 +792,8 @@ impl Control {
     ) -> Result<()> {
         // Restate the remote in the maps' `ReplTarget` shape (kind 0 = SRv6
         // preserves the pre-widening semantic; a VTEP rides v4-mapped like
-        // the VXLAN FDB/slot entries).
+        // the VXLAN FDB/slot entries, an MPLS PE via `ip_to_v6_bytes` with
+        // the service label in `vni` like the MPLS slots).
         let target = match remote {
             XconnectRemote::Srv6(sid) => ReplTarget {
                 kind: REPL_KIND_SRV6,
@@ -798,6 +805,11 @@ impl Control {
                 vni,
                 addr: vtep.to_ipv6_mapped().octets(),
             },
+            XconnectRemote::Mpls { pe, label } => ReplTarget {
+                kind: REPL_KIND_MPLS,
+                vni: label,
+                addr: util::ip_to_v6_bytes(pe),
+            },
         };
         let mut dp = self.dp.lock().await;
         if vid == 0 {
@@ -807,6 +819,7 @@ impl Control {
                     dp.localsid_add(sid, 128, SRV6_BH_END_DX2, ifindex, 0, 0, 0, 0, 0)?;
                 }
                 XconnectLocal::Vxlan(vni) => dp.vni_set_eline(vni, ifindex)?,
+                XconnectLocal::Mpls(label) => dp.ilm_add(label, 0, MPLS_OP_POP_XC, ifindex, 0)?,
                 XconnectLocal::None => {}
             }
         } else {
@@ -818,6 +831,10 @@ impl Control {
                 }
                 XconnectLocal::Vxlan(vni) => {
                     dp.vni_set_eline_vlan(vni, table)?;
+                    dp.dx2v_add(table, vid, ifindex)?;
+                }
+                XconnectLocal::Mpls(label) => {
+                    dp.ilm_add(label, 0, MPLS_OP_POP_XC_VLAN, table, 0)?;
                     dp.dx2v_add(table, vid, ifindex)?;
                 }
                 XconnectLocal::None => {}
@@ -845,6 +862,7 @@ impl Control {
         match local {
             XconnectLocal::Srv6(sid) => dp.localsid_del(sid, 128)?,
             XconnectLocal::Vxlan(vni) => dp.vni_del(vni)?,
+            XconnectLocal::Mpls(label) => dp.ilm_del(label)?,
             XconnectLocal::None => {}
         }
         Ok(())
@@ -2225,6 +2243,8 @@ fn mpls_op_name(op: u8) -> &'static str {
         MPLS_OP_POP_L3 => "pop_l3",
         MPLS_OP_POP => "pop",
         MPLS_OP_POP_L2 => "pop_l2",
+        MPLS_OP_POP_XC => "pop_xc",
+        MPLS_OP_POP_XC_VLAN => "pop_xc_vlan",
         _ => "unknown",
     }
 }
@@ -2816,9 +2836,13 @@ impl Cradle for GrpcService {
         req: Request<pb::Xconnect>,
     ) -> Result<Response<pb::Empty>, Status> {
         let x = req.into_inner();
-        let remote = match (!x.remote_sid.is_empty(), !x.remote_vtep.is_empty()) {
-            (true, false) => XconnectRemote::Srv6(x.remote_sid.parse().map_err(st)?),
-            (false, true) => {
+        let remote = match (
+            !x.remote_sid.is_empty(),
+            !x.remote_vtep.is_empty(),
+            !x.remote_pe.is_empty(),
+        ) {
+            (true, false, false) => XconnectRemote::Srv6(x.remote_sid.parse().map_err(st)?),
+            (false, true, false) => {
                 if x.remote_vni == 0 {
                     return Err(Status::invalid_argument("remote_vtep requires remote_vni"));
                 }
@@ -2827,19 +2851,33 @@ impl Cradle for GrpcService {
                     vni: x.remote_vni,
                 }
             }
+            (false, false, true) => {
+                if x.remote_label == 0 {
+                    return Err(Status::invalid_argument("remote_pe requires remote_label"));
+                }
+                XconnectRemote::Mpls {
+                    pe: x.remote_pe.parse().map_err(st)?,
+                    label: x.remote_label,
+                }
+            }
             _ => {
                 return Err(Status::invalid_argument(
-                    "exactly one of remote_sid / remote_vtep",
+                    "exactly one of remote_sid / remote_vtep / remote_pe",
                 ));
             }
         };
-        let local = match (!x.local_sid.is_empty(), x.local_vni != 0) {
-            (false, false) => XconnectLocal::None,
-            (true, false) => XconnectLocal::Srv6(x.local_sid.parse().map_err(st)?),
-            (false, true) => XconnectLocal::Vxlan(x.local_vni),
-            (true, true) => {
+        let local = match (
+            !x.local_sid.is_empty(),
+            x.local_vni != 0,
+            x.local_label != 0,
+        ) {
+            (false, false, false) => XconnectLocal::None,
+            (true, false, false) => XconnectLocal::Srv6(x.local_sid.parse().map_err(st)?),
+            (false, true, false) => XconnectLocal::Vxlan(x.local_vni),
+            (false, false, true) => XconnectLocal::Mpls(x.local_label),
+            _ => {
                 return Err(Status::invalid_argument(
-                    "at most one of local_sid / local_vni",
+                    "at most one of local_sid / local_vni / local_label",
                 ));
             }
         };
@@ -2863,13 +2901,18 @@ impl Cradle for GrpcService {
         req: Request<pb::XconnectDel>,
     ) -> Result<Response<pb::Empty>, Status> {
         let x = req.into_inner();
-        let local = match (!x.local_sid.is_empty(), x.local_vni != 0) {
-            (false, false) => XconnectLocal::None,
-            (true, false) => XconnectLocal::Srv6(x.local_sid.parse().map_err(st)?),
-            (false, true) => XconnectLocal::Vxlan(x.local_vni),
-            (true, true) => {
+        let local = match (
+            !x.local_sid.is_empty(),
+            x.local_vni != 0,
+            x.local_label != 0,
+        ) {
+            (false, false, false) => XconnectLocal::None,
+            (true, false, false) => XconnectLocal::Srv6(x.local_sid.parse().map_err(st)?),
+            (false, true, false) => XconnectLocal::Vxlan(x.local_vni),
+            (false, false, true) => XconnectLocal::Mpls(x.local_label),
+            _ => {
                 return Err(Status::invalid_argument(
-                    "at most one of local_sid / local_vni",
+                    "at most one of local_sid / local_vni / local_label",
                 ));
             }
         };
@@ -3249,6 +3292,8 @@ impl Cradle for GrpcService {
             a if a == MPLS_OP_SWAP as u32 => MPLS_OP_SWAP,
             a if a == MPLS_OP_POP_L3 as u32 => MPLS_OP_POP_L3,
             a if a == MPLS_OP_POP as u32 => MPLS_OP_POP,
+            a if a == MPLS_OP_POP_XC as u32 => MPLS_OP_POP_XC,
+            a if a == MPLS_OP_POP_XC_VLAN as u32 => MPLS_OP_POP_XC_VLAN,
             a if a == MPLS_OP_POP_L2 as u32 => MPLS_OP_POP_L2,
             other => {
                 return Err(Status::invalid_argument(format!("bad ILM action {other}")));

@@ -1,0 +1,25 @@
+{
+  "ports": [
+    { "name": "pe2c" },
+    { "name": "pe2v" },
+    { "name": "pe2u", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe2u", "gateway": "10.0.1.1", "labels": [26] },
+    { "id": 2 }
+  ],
+  "neighbors": [
+    { "oif": "pe2u", "ip": "10.0.1.1", "mac": "02:00:00:00:0a:01" }
+  ],
+  "routes": [
+    { "prefix": "10.255.0.1/32", "nexthop": 1 }
+  ],
+  "ilm": [
+    { "in_label": 16, "nexthop": 2, "action": "swap" }
+  ],
+  "xconnects": [
+    { "port": "pe2c", "remote_pe": "10.255.0.1", "remote_label": 1101, "local_label": 2101 },
+    { "port": "pe2v", "remote_pe": "10.255.0.1", "remote_label": 1130, "local_label": 2130,
+      "vid": 30, "dx2v_table": 7 }
+  ]
+}
