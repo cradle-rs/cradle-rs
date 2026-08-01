@@ -133,8 +133,9 @@ type ReplSlot = (String, u32, u32);
 pub enum XconnectRemote {
     /// The remote End.DX2/DX2V service SID (MAC-in-SRv6).
     Srv6(Ipv6Addr),
-    /// The remote VTEP with the VNI it advertised (RFC 8365 §6).
-    Vxlan { vtep: Ipv4Addr, vni: u32 },
+    /// The remote VTEP (IPv4 or IPv6) with the VNI it advertised
+    /// (RFC 8365 §6).
+    Vxlan { vtep: IpAddr, vni: u32 },
     /// The remote PE with the MPLS service label it advertised (RFC 7432
     /// base encapsulation), imposed under the transport LSP toward the PE.
     Mpls { pe: IpAddr, label: u32 },
@@ -666,7 +667,7 @@ impl Control {
         &self,
         mac: [u8; 6],
         bd: u16,
-        vtep: Ipv4Addr,
+        vtep: IpAddr,
         nexthop_id: u32,
     ) -> Result<()> {
         let displaced_local = self
@@ -803,7 +804,7 @@ impl Control {
             XconnectRemote::Vxlan { vtep, vni } => ReplTarget {
                 kind: REPL_KIND_VXLAN,
                 vni,
-                addr: vtep.to_ipv6_mapped().octets(),
+                addr: util::ip_to_v6_bytes(vtep),
             },
             XconnectRemote::Mpls { pe, label } => ReplTarget {
                 kind: REPL_KIND_MPLS,
@@ -910,7 +911,7 @@ impl Control {
         &self,
         flood_port: &str,
         encap_port: &str,
-        vtep: Ipv4Addr,
+        vtep: IpAddr,
         vni: u32,
     ) -> Result<()> {
         let flood = util::ifindex_of(flood_port)?;
@@ -958,12 +959,12 @@ impl Control {
     /// the binding must exist first. Keyed by the VTEP v4-mapped — colliding
     /// with no real SRv6 SID — so one slot registry and
     /// [`Self::del_repl_slot_auto`] serve both overlays.
-    pub async fn add_repl_slot_auto_vxlan(&self, bd: u16, vtep: Ipv4Addr) -> Result<()> {
+    pub async fn add_repl_slot_auto_vxlan(&self, bd: u16, vtep: IpAddr) -> Result<()> {
         let vni =
             self.dp.lock().await.vni_of(bd).with_context(|| {
                 format!("bd {bd} has no VNI binding (SetVni before AddReplSlot)")
             })?;
-        self.add_repl_slot_auto_keyed(bd, vtep.to_ipv6_mapped(), |dp, a_idx, b_idx| {
+        self.add_repl_slot_auto_keyed(bd, v6_key(vtep), |dp, a_idx, b_idx| {
             dp.repl_slot_add_vxlan(a_idx, b_idx, vtep, vni)
         })
         .await
@@ -1464,7 +1465,7 @@ impl Control {
     }
 
     /// Set the local VTEP source IPv4 (VXLAN outer source + decap match).
-    pub async fn set_vtep_source(&self, addr: Ipv4Addr) -> Result<()> {
+    pub async fn set_vtep_source(&self, addr: IpAddr) -> Result<()> {
         self.dp.lock().await.vxlan_source_set(addr)?;
         Ok(())
     }
@@ -2769,7 +2770,7 @@ impl Cradle for GrpcService {
         req: Request<pb::VtepSource>,
     ) -> Result<Response<pb::Empty>, Status> {
         let s = req.into_inner();
-        let addr: Ipv4Addr = s.addr.parse().map_err(st)?;
+        let addr: IpAddr = s.addr.parse().map_err(st)?;
         self.control.set_vtep_source(addr).await.map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
@@ -2797,7 +2798,7 @@ impl Cradle for GrpcService {
                 .await
                 .map_err(st)?;
         } else if !f.remote_vtep.is_empty() {
-            let vtep: Ipv4Addr = f.remote_vtep.parse().map_err(st)?;
+            let vtep: IpAddr = f.remote_vtep.parse().map_err(st)?;
             self.control
                 .add_fdb_remote_vxlan(mac, f.bd as u16, vtep, f.nexthop_id)
                 .await
@@ -2953,7 +2954,7 @@ impl Cradle for GrpcService {
                 .await
                 .map_err(st)?;
         } else if !r.remote_vtep.is_empty() {
-            let vtep: Ipv4Addr = r.remote_vtep.parse().map_err(st)?;
+            let vtep: IpAddr = r.remote_vtep.parse().map_err(st)?;
             self.control
                 .add_repl_slot_auto_vxlan(r.bd as u16, vtep)
                 .await
@@ -2985,10 +2986,7 @@ impl Cradle for GrpcService {
         let key: Ipv6Addr = if !r.remote_sid.is_empty() {
             r.remote_sid.parse().map_err(st)?
         } else if !r.remote_vtep.is_empty() {
-            r.remote_vtep
-                .parse::<Ipv4Addr>()
-                .map_err(st)?
-                .to_ipv6_mapped()
+            v6_key(r.remote_vtep.parse::<IpAddr>().map_err(st)?)
         } else {
             v6_key(r.remote_pe.parse::<IpAddr>().map_err(st)?)
         };

@@ -165,13 +165,14 @@ message Vni {
 
 message VniDel { uint32 vni = 1; }
 
-// Local VTEP source IPv4 — the VXLAN outer source address, and the decap
-// match for received VXLAN traffic.
+// Local VTEP source — the VXLAN outer source address, and the decap match
+// for received VXLAN traffic. IPv4 or IPv6; each family has its own slot,
+// so send one per family for a dual-stack fabric.
 message VtepSource { string addr = 1; }
 
 // EVPN overlay FDB entry: MAC `mac` in bridge domain `bd` sits behind a
 // remote PE — over SRv6 (`remote_sid`, the PE's End.DT2U/DT2M service SID),
-// over VXLAN (`remote_vtep`, the PE's VTEP IPv4; the VNI comes from the
+// over VXLAN (`remote_vtep`, the PE's VTEP, IPv4 or IPv6; the VNI comes from the
 // bridge domain's SetVni binding), or over MPLS (`remote_pe` + a non-zero
 // `remote_label`, that PE's EVI service label — RFC 7432). Exactly one of
 // remote_sid / remote_vtep / remote_pe.
@@ -217,7 +218,7 @@ message Xconnect {
   // inner VID from its (dx2v_table, vid) entry onto the AC.
   uint32 vid        = 5;
   uint32 dx2v_table = 6; // VLAN-table id (only with vid != 0)
-  string remote_vtep = 7; // VXLAN: remote VTEP IPv4
+  string remote_vtep = 7; // VXLAN: remote VTEP (IPv4 or IPv6)
   uint32 remote_vni  = 8; // VXLAN: VNI the remote advertised (with remote_vtep)
   // When non-zero, also bind this VNI as the E-Line's local decap
   // identity (the VNI our own Type-1 advertised): a VXLAN frame received

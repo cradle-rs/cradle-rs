@@ -221,6 +221,8 @@ pub struct Dataplane {
     vni_info: HashMap<MapData, u32, VniInfo>,
     /// Local VTEP source IPv4 ([0]; all-zero = VXLAN unconfigured).
     vxlan_src: Array<MapData, [u8; 4]>,
+    /// Local VTEP source IPv6 ([0]) — the v6-underlay twin.
+    vxlan_src6: Array<MapData, [u8; 16]>,
     xconnect: HashMap<MapData, u32, ReplTarget>,
     xconnect_vlan: HashMap<MapData, Dx2vKey, ReplTarget>,
     dx2v: HashMap<MapData, Dx2vKey, u32>,
@@ -332,6 +334,10 @@ impl Dataplane {
             vni_info: HashMap::try_from(bpf.take_map("VNI_INFO").context("map VNI_INFO missing")?)?,
             vxlan_src: Array::try_from(
                 bpf.take_map("VXLAN_SRC").context("map VXLAN_SRC missing")?,
+            )?,
+            vxlan_src6: Array::try_from(
+                bpf.take_map("VXLAN_SRC6")
+                    .context("map VXLAN_SRC6 missing")?,
             )?,
             xconnect: HashMap::try_from(bpf.take_map("XCONNECT").context("map XCONNECT missing")?)?,
             xconnect_vlan: HashMap::try_from(
@@ -897,13 +903,13 @@ impl Dataplane {
         &mut self,
         mac: [u8; 6],
         bd: u16,
-        vtep: Ipv4Addr,
+        vtep: IpAddr,
         nexthop_id: u32,
     ) -> Result<bool> {
         self.fdb_overlay_add(
             mac,
             bd,
-            vtep.to_ipv6_mapped().octets(),
+            ip_to_v6_bytes(vtep),
             FDB_F_REMOTE | FDB_F_VXLAN,
             nexthop_id,
             0,
@@ -1269,7 +1275,7 @@ impl Dataplane {
         &mut self,
         flood_ifindex: u32,
         encap_ifindex: u32,
-        vtep: Ipv4Addr,
+        vtep: IpAddr,
         vni: u32,
     ) -> Result<()> {
         self.repl_target_add(
@@ -1278,7 +1284,7 @@ impl Dataplane {
             ReplTarget {
                 kind: REPL_KIND_VXLAN,
                 vni,
-                addr: vtep.to_ipv6_mapped().octets(),
+                addr: ip_to_v6_bytes(vtep),
             },
         )
     }
@@ -2108,9 +2114,14 @@ impl Dataplane {
         self.vlan_vni.get(&vlan, 0).ok()
     }
 
-    /// Set the local VTEP source IPv4 (VXLAN outer source; decap match).
-    pub fn vxlan_source_set(&mut self, addr: Ipv4Addr) -> Result<()> {
-        self.vxlan_src.set(0, addr.octets(), 0)?;
+    /// Set the local VTEP source (VXLAN outer source; decap match) — the
+    /// IPv4 or IPv6 slot per the address family; both may be set
+    /// (dual-stack fabric).
+    pub fn vxlan_source_set(&mut self, addr: IpAddr) -> Result<()> {
+        match addr {
+            IpAddr::V4(v4) => self.vxlan_src.set(0, v4.octets(), 0)?,
+            IpAddr::V6(v6) => self.vxlan_src6.set(0, v6.octets(), 0)?,
+        }
         Ok(())
     }
 

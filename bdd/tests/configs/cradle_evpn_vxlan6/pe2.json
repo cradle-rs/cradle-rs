@@ -1,0 +1,22 @@
+{
+  "ports": [
+    { "name": "pe2c", "vlan": 100 },
+    { "name": "pe2u", "l3": true }
+  ],
+  "vtep_source6": "2001:db8::2",
+  "vnis": [
+    { "vni": 10100, "vlan": 100 }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe2u", "gateway": "2001:db8::1" }
+  ],
+  "neighbors": [
+    { "oif": "pe2u", "ip": "2001:db8::1", "mac": "02:00:00:00:01:0a" }
+  ],
+  "routes6": [
+    { "prefix": "2001:db8::1/128", "nexthop": 1 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:c1:01", "bd": 100, "remote_vtep": "2001:db8::1" }
+  ]
+}

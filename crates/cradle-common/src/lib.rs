@@ -566,14 +566,16 @@ pub struct ReplTarget {
     /// SID implies the bridge domain.
     pub vni: u32,
     /// `REPL_KIND_SRV6`: the remote `End.DT2M` SID. `REPL_KIND_VXLAN`: the
-    /// remote VTEP IPv4, v4-mapped (bytes 12..16 are the wire address).
+    /// remote VTEP — IPv4 v4-mapped (bytes 12..16 the wire address) or a
+    /// full IPv6 (IPv6-underlay VXLAN).
     /// `REPL_KIND_MPLS`: the remote PE's address (v4-mapped or full IPv6).
     pub addr: [u8; 16],
 }
 
 /// [`ReplTarget::addr`] is a remote `End.DT2M` SID (MAC-in-SRv6 per copy).
 pub const REPL_KIND_SRV6: u32 = 0;
-/// [`ReplTarget::addr`] is a remote VTEP IPv4 (VXLAN per copy, `vni` set).
+/// [`ReplTarget::addr`] is a remote VTEP, IPv4 v4-mapped or IPv6 (VXLAN per
+/// copy, `vni` set).
 pub const REPL_KIND_VXLAN: u32 = 1;
 /// [`ReplTarget::addr`] is a remote PE reached over MPLS (EVPN-over-MPLS
 /// ingress replication, RFC 7432): each copy is imposed with that PE's EVI
@@ -697,9 +699,10 @@ pub const FDB_F_LOCAL: u32 = 1 << 0;
 /// `oif` is the underlay nexthop id (EVPN over SRv6).
 pub const FDB_F_REMOTE: u32 = 1 << 1;
 /// This MAC is behind a VXLAN overlay (set together with `FDB_F_REMOTE`):
-/// `remote_sid` holds the remote VTEP's IPv4 v4-mapped (`::ffff:a.b.c.d` —
-/// bytes 12..16 are the wire address) and `oif` is the underlay nexthop id
-/// (0 = resolve by FIB4 lookup on the VTEP).
+/// `remote_sid` holds the remote VTEP — IPv4 v4-mapped (`::ffff:a.b.c.d`,
+/// bytes 12..16 the wire address) or a full IPv6 (IPv6-underlay VXLAN) —
+/// and `oif` is the underlay nexthop id (0 = resolve by FIB4/FIB6 lookup
+/// on the VTEP).
 pub const FDB_F_VXLAN: u32 = 1 << 2;
 /// This MAC is behind an MPLS overlay (set together with `FDB_F_REMOTE`) —
 /// RFC 7432 MPLS-based EVPN. `remote_sid` holds the remote PE's address
