@@ -1,0 +1,6 @@
+{
+  "ports": [
+    { "name": "z1n3", "l3": true },
+    { "name": "z1n6", "l3": true, "vrf": 1 }
+  ]
+}

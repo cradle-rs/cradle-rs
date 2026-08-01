@@ -154,6 +154,10 @@ pub const NH_F_VXLAN: u32 = 1 << 5;
 /// is seeded from the inner IP TTL (uniform-style imposition). See
 /// [`docs/design/mpls-ttl-propagation.md`]. Only meaningful with `NH_F_MPLS`.
 pub const NH_F_MPLS_PIPE: u32 = 1 << 6;
+/// Nexthop imposes an IPv6-outer GTP-U encap (`GTP6_ENCAP[nexthop_id]`) —
+/// outer IPv6 + UDP(2152) + GTP-U. The v6-outer twin of [`NH_F_GTP`];
+/// combined with [`NH_F_V6`] for the underlay gateway.
+pub const NH_F_GTP6: u32 = 1 << 7;
 
 /// Outer label TTL seed for pipe-model imposition (RFC 3443).
 pub const MPLS_PIPE_TTL: u8 = 255;
@@ -474,6 +478,23 @@ pub struct GtpEncap {
     pub _pad: [u8; 3],
 }
 
+/// [`GtpEncap`]'s IPv6-outer twin (`GTP6_ENCAP`, keyed by nexthop id, imposed
+/// by an [`NH_F_GTP6`] nexthop): outer IPv6 + UDP(2152) + GTP-U. The UDP
+/// checksum is left 0 (RFC 6935/6936 zero-checksum tunnel mode).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Gtp6Encap {
+    /// Outer IPv6 source — the local N3/N9 tunnel address (wire bytes).
+    pub src: [u8; 16],
+    /// Outer IPv6 destination — the peer (gNB / peer UPF) tunnel address.
+    pub dst: [u8; 16],
+    /// GTP-U TEID, big-endian wire bytes.
+    pub teid: [u8; 4],
+    /// QFI for a PDU Session Container extension header; 0 = none.
+    pub qfi: u8,
+    pub _pad: [u8; 3],
+}
+
 /// GTP-U decap match (a PDR), keyed exactly by the local tunnel endpoint +
 /// TEID a received G-PDU carries — the `GTP_PDR` hash probed in XDP before the
 /// FIB, mirroring the role of `SRV6_LOCALSID`. The `H.M.GTP4.D`-style uplink:
@@ -488,6 +509,20 @@ pub struct GtpPdrKey {
     pub vrf_id: u32,
     /// Local outer IPv4 destination the G-PDU arrived on (wire bytes).
     pub dst: [u8; 4],
+    /// GTP-U TEID, big-endian wire bytes (as read off the packet).
+    pub teid: [u8; 4],
+}
+
+/// [`GtpPdrKey`]'s IPv6-outer twin (`GTP_PDR6`): a G-PDU arriving over an
+/// IPv6 outer on `(vrf_id, dst, teid)` is stripped and forwarded per the
+/// shared [`GtpPdr`] action.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Gtp6PdrKey {
+    /// Match context: the VRF the ingress port is bound to (0 = global).
+    pub vrf_id: u32,
+    /// Local outer IPv6 destination the G-PDU arrived on (wire bytes).
+    pub dst: [u8; 16],
     /// GTP-U TEID, big-endian wire bytes (as read off the packet).
     pub teid: [u8; 4],
 }
@@ -1166,7 +1201,9 @@ mod user {
         LocalSid,
         Srv6Encap,
         GtpEncap,
+        Gtp6Encap,
         GtpPdrKey,
+        Gtp6PdrKey,
         GtpPdr,
         VniInfo,
         VxlanEncap,

@@ -21,15 +21,15 @@ use aya::{
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
     EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_VXLAN,
-    FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey,
-    LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP,
-    MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_MPLS, NH_F_MPLS_PIPE,
-    NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey,
-    POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey,
-    PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch,
-    ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo, ServiceKey,
-    ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key,
-    Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr,
+    GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP,
+    MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_GTP6,
+    NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry,
+    NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS,
+    POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN,
+    REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
+    ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L2,
+    VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -170,6 +170,8 @@ pub struct Dataplane {
     /// EVPN symmetric-IRB VXLAN L3 encap, keyed by nexthop id (`NH_F_VXLAN`).
     vxlan_encap: HashMap<MapData, u32, VxlanEncap>,
     gtp_pdr: HashMap<MapData, GtpPdrKey, GtpPdr>,
+    gtp_pdr6: HashMap<MapData, Gtp6PdrKey, GtpPdr>,
+    gtp6_encap: HashMap<MapData, u32, Gtp6Encap>,
     srv6_encap_src: Array<MapData, [u8; 16]>,
     meta_cookie: Array<MapData, u32>,
     tbl24: Array<MapData, FibWord>,
@@ -276,6 +278,11 @@ impl Dataplane {
                     .context("map VXLAN_ENCAP missing")?,
             )?,
             gtp_pdr: HashMap::try_from(bpf.take_map("GTP_PDR").context("map GTP_PDR missing")?)?,
+            gtp_pdr6: HashMap::try_from(bpf.take_map("GTP_PDR6").context("map GTP_PDR6 missing")?)?,
+            gtp6_encap: HashMap::try_from(
+                bpf.take_map("GTP6_ENCAP")
+                    .context("map GTP6_ENCAP missing")?,
+            )?,
             srv6_encap_src: Array::try_from(
                 bpf.take_map("SRV6_ENCAP_SRC")
                     .context("map SRV6_ENCAP_SRC missing")?,
@@ -1938,6 +1945,40 @@ impl Dataplane {
         Ok(())
     }
 
+    /// Bind nexthop `id` to an IPv6-outer GTP-U encap (`GTP6.E`): outer IPv6
+    /// `src`→`dst` + UDP(2152) + GTP-U(`teid`) over the v6 underlay
+    /// `gateway`/`oif` — the v6 twin of [`Self::nexthop_set_gtp`].
+    pub fn nexthop_set_gtp6(
+        &mut self,
+        id: u32,
+        gateway: Option<Ipv6Addr>,
+        oif: u32,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        teid: u32,
+    ) -> Result<()> {
+        let nh = NextHop {
+            gateway_v4: 0,
+            gateway_v6: gateway.map(|a| a.octets()).unwrap_or([0; 16]),
+            oif,
+            flags: NH_F_V6 | NH_F_GTP6,
+            labels: [0; MAX_LABELS],
+            num_labels: 0,
+            _pad: [0; 3],
+            backup_id: 0,
+        };
+        self.nexthops.insert(id, nh, 0)?;
+        let enc = Gtp6Encap {
+            src: src.octets(),
+            dst: dst.octets(),
+            teid: teid.to_be_bytes(),
+            qfi: 0,
+            _pad: [0; 3],
+        };
+        self.gtp6_encap.insert(id, enc, 0)?;
+        Ok(())
+    }
+
     /// Install an EVPN symmetric-IRB VXLAN L3 nexthop (`NH_F_VXLAN`): a routed
     /// packet resolving here is VXLAN-encapsulated with `l3vni` toward `vtep`,
     /// its inner Ethernet dst set to `rmac` (the remote PE's router MAC).
@@ -1975,31 +2016,50 @@ impl Dataplane {
 
     /// Install a GTP-U decap PDR: a received G-PDU on (`dst`, `teid`),
     /// arriving on a port bound to `match_vrf` (0 = global), is stripped and
-    /// its inner packet forwarded in `vrf` (0 = global).
-    pub fn gtp_pdr_add(
-        &mut self,
-        dst: Ipv4Addr,
-        teid: u32,
-        vrf: u32,
-        match_vrf: u32,
-    ) -> Result<()> {
-        let key = GtpPdrKey {
-            vrf_id: match_vrf,
-            dst: dst.octets(),
-            teid: teid.to_be_bytes(),
-        };
-        self.gtp_pdr.insert(key, GtpPdr { vrf_id: vrf }, 0)?;
+    /// its inner packet forwarded in `vrf` (0 = global). The outer family
+    /// picks the map: v4 → `GTP_PDR`, v6 → `GTP_PDR6`.
+    pub fn gtp_pdr_add(&mut self, dst: IpAddr, teid: u32, vrf: u32, match_vrf: u32) -> Result<()> {
+        match dst {
+            IpAddr::V4(dst) => {
+                let key = GtpPdrKey {
+                    vrf_id: match_vrf,
+                    dst: dst.octets(),
+                    teid: teid.to_be_bytes(),
+                };
+                self.gtp_pdr.insert(key, GtpPdr { vrf_id: vrf }, 0)?;
+            }
+            IpAddr::V6(dst) => {
+                let key = Gtp6PdrKey {
+                    vrf_id: match_vrf,
+                    dst: dst.octets(),
+                    teid: teid.to_be_bytes(),
+                };
+                self.gtp_pdr6.insert(key, GtpPdr { vrf_id: vrf }, 0)?;
+            }
+        }
         Ok(())
     }
 
     /// Remove a GTP-U decap PDR (idempotent).
-    pub fn gtp_pdr_del(&mut self, dst: Ipv4Addr, teid: u32, match_vrf: u32) -> Result<()> {
-        let key = GtpPdrKey {
-            vrf_id: match_vrf,
-            dst: dst.octets(),
-            teid: teid.to_be_bytes(),
-        };
-        let _ = self.gtp_pdr.remove(&key);
+    pub fn gtp_pdr_del(&mut self, dst: IpAddr, teid: u32, match_vrf: u32) -> Result<()> {
+        match dst {
+            IpAddr::V4(dst) => {
+                let key = GtpPdrKey {
+                    vrf_id: match_vrf,
+                    dst: dst.octets(),
+                    teid: teid.to_be_bytes(),
+                };
+                let _ = self.gtp_pdr.remove(&key);
+            }
+            IpAddr::V6(dst) => {
+                let key = Gtp6PdrKey {
+                    vrf_id: match_vrf,
+                    dst: dst.octets(),
+                    teid: teid.to_be_bytes(),
+                };
+                let _ = self.gtp_pdr6.remove(&key);
+            }
+        }
         Ok(())
     }
 

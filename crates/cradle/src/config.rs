@@ -353,8 +353,9 @@ pub struct Nexthop {
     /// Fast-reroute: nexthop id to fail over to when this one's link is down.
     #[serde(default)]
     pub backup: u32,
-    /// GTP-U encap (`GTP4.E`): a present `gtp_dst` makes this a GTP nexthop that
-    /// wraps the packet in outer IPv4 + UDP(2152) + GTP-U(`gtp_teid`) toward
+    /// GTP-U encap (`GTP4.E` / `GTP6.E`, by `gtp_dst`'s family): a present
+    /// `gtp_dst` makes this a GTP nexthop that wraps the packet in an outer
+    /// IPv4/IPv6 + UDP(2152) + GTP-U(`gtp_teid`) header toward
     /// `gtp_dst`, sourced from `gtp_src`, over the v4 underlay `gateway`/`oif`.
     #[serde(default)]
     pub gtp_src: Option<String>,
@@ -687,25 +688,47 @@ impl Config {
                 continue;
             }
             if let Some(dst) = &nh.gtp_dst {
-                let gw = match &nh.gateway {
-                    Some(g) => Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?),
-                    None => None,
-                };
                 let oif = match &nh.oif {
                     Some(o) => util::ifindex_of(o)?,
                     None => anyhow::bail!("GTP nexthop {} needs an oif", nh.id),
                 };
-                let src = nh
-                    .gtp_src
-                    .as_deref()
-                    .unwrap_or("0.0.0.0")
-                    .parse()
-                    .context("bad gtp_src")?;
-                let dst = dst
+                let dst: IpAddr = dst
                     .parse()
                     .with_context(|| format!("bad gtp_dst {dst:?}"))?;
-                ctl.set_nexthop_gtp(nh.id, gw, oif, src, dst, nh.gtp_teid)
-                    .await?;
+                match dst {
+                    IpAddr::V4(dst) => {
+                        let gw = match &nh.gateway {
+                            Some(g) => {
+                                Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?)
+                            }
+                            None => None,
+                        };
+                        let src = nh
+                            .gtp_src
+                            .as_deref()
+                            .unwrap_or("0.0.0.0")
+                            .parse()
+                            .context("bad gtp_src")?;
+                        ctl.set_nexthop_gtp(nh.id, gw, oif, src, dst, nh.gtp_teid)
+                            .await?;
+                    }
+                    IpAddr::V6(dst) => {
+                        let gw = match &nh.gateway {
+                            Some(g) => {
+                                Some(g.parse().with_context(|| format!("bad gateway {g:?}"))?)
+                            }
+                            None => None,
+                        };
+                        let src = nh
+                            .gtp_src
+                            .as_deref()
+                            .unwrap_or("::")
+                            .parse()
+                            .context("bad gtp_src")?;
+                        ctl.set_nexthop_gtp6(nh.id, gw, oif, src, dst, nh.gtp_teid)
+                            .await?;
+                    }
+                }
                 continue;
             }
             if !nh.segs.is_empty() {
