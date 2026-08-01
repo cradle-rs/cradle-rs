@@ -1,0 +1,44 @@
+{
+  "ports": [
+    { "name": "pe2a", "l3": true, "vrf": 1 },
+    { "name": "pe2c", "l3": true, "vrf": 3 },
+    { "name": "pe2b", "l3": true, "vrf": 2 },
+    { "name": "pe2d", "l3": true, "vrf": 4 }
+  ],
+  "nexthops": [
+    {
+      "id": 1,
+      "oif": "pe2a",
+      "gateway": "10.0.12.1",
+      "gtp_src": "10.0.12.2",
+      "gtp_dst": "10.0.12.1",
+      "gtp_teid": 512
+    },
+    {
+      "id": 2,
+      "oif": "pe2c",
+      "gateway": "10.0.13.1",
+      "gtp_src": "10.0.13.2",
+      "gtp_dst": "10.0.13.1",
+      "gtp_teid": 513
+    },
+    { "id": 3, "oif": "pe2b", "gateway": "10.0.2.1" },
+    { "id": 4, "oif": "pe2d", "gateway": "10.0.3.1" }
+  ],
+  "neighbors": [
+    { "oif": "pe2a", "ip": "10.0.12.1", "mac": "02:00:00:00:01:0b" },
+    { "oif": "pe2c", "ip": "10.0.13.1", "mac": "02:00:00:00:01:0c" },
+    { "oif": "pe2b", "ip": "10.0.2.1", "mac": "02:00:00:00:02:c2" },
+    { "oif": "pe2d", "ip": "10.0.3.1", "mac": "02:00:00:00:03:c3" }
+  ],
+  "gtp_pdrs": [
+    { "dst": "10.0.12.2", "teid": 256, "vrf": 2, "match_vrf": 1 },
+    { "dst": "10.0.12.2", "teid": 256, "vrf": 4, "match_vrf": 3 }
+  ],
+  "routes": [
+    { "prefix": "10.0.2.0/24", "nexthop": 3, "vrf": 2 },
+    { "prefix": "10.0.1.0/24", "nexthop": 1, "vrf": 2 },
+    { "prefix": "10.0.3.0/24", "nexthop": 4, "vrf": 4 },
+    { "prefix": "10.0.1.0/24", "nexthop": 2, "vrf": 4 }
+  ]
+}

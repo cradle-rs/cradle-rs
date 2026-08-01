@@ -482,6 +482,10 @@ pub struct GtpEncap {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct GtpPdrKey {
+    /// Match context: the VRF the ingress port is bound to (0 = global).
+    /// A G-PDU decaps only when its `(dst, teid)` was installed for the
+    /// VRF it arrived in — the ST2 route's interwork-segment scope.
+    pub vrf_id: u32,
     /// Local outer IPv4 destination the G-PDU arrived on (wire bytes).
     pub dst: [u8; 4],
     /// GTP-U TEID, big-endian wire bytes (as read off the packet).

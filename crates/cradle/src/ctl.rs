@@ -119,6 +119,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         dst: pdr.dst.clone(),
                         teid: pdr.teid,
                         vrf: pdr.vrf,
+                        match_vrf: pdr.match_vrf,
                     })
                     .await?;
             }

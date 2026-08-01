@@ -389,6 +389,10 @@ pub struct GtpPdrCfg {
     /// Inner VRF table id (0 = global).
     #[serde(default)]
     pub vrf: u32,
+    /// Match context: the VRF the ingress port is bound to (0 = global).
+    /// The PDR only matches G-PDUs arriving on ports of this VRF.
+    #[serde(default)]
+    pub match_vrf: u32,
 }
 
 /// An incoming-label map entry: `action` is `"swap"`, `"pop"`, `"pop-l3"` or
@@ -783,7 +787,8 @@ impl Config {
                 .dst
                 .parse()
                 .with_context(|| format!("bad gtp pdr dst {:?}", pdr.dst))?;
-            ctl.gtp_pdr_add(dst, pdr.teid, pdr.vrf).await?;
+            ctl.gtp_pdr_add(dst, pdr.teid, pdr.vrf, pdr.match_vrf)
+                .await?;
         }
         for f in &self.fdb {
             let mac = util::parse_mac(&f.mac)?;

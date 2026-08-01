@@ -3667,10 +3667,18 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
     // Outer IPv4(20) + UDP(8) + the actual GTP-U header.
     let strip = GTP_ENCAP_HDR_LEN - 8 + gtp_hdr_len;
-    // PDR lookup keyed by (local tunnel endpoint, TEID) — both on-wire bytes.
+    // PDR lookup keyed by (match VRF, local tunnel endpoint, TEID) — the
+    // address/TEID are on-wire bytes; the match VRF is the ingress port's
+    // binding (0 = global), so a tunnel is only terminated in the VRF it
+    // was installed for and the same (dst, teid) may coexist per VRF.
+    let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    let vrf_id = match PORTS.get_ptr(&iif) {
+        Some(p) => unsafe { (*p).vrf_id },
+        None => 0,
+    };
     let dst = unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_DST_OFF)? };
     let teid = unsafe { *xdp_ptr::<[u8; 4]>(ctx, L4_OFF + 12)? };
-    let pdr: GtpPdr = match GTP_PDR.get_ptr(&GtpPdrKey { dst, teid }) {
+    let pdr: GtpPdr = match GTP_PDR.get_ptr(&GtpPdrKey { vrf_id, dst, teid }) {
         Some(p) => unsafe { *p },
         None => return Ok(xdp_action::XDP_PASS),
     };
