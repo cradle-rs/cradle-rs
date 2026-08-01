@@ -1,0 +1,27 @@
+{
+  "ports": [
+    { "name": "pe1a", "l3": true, "vrf": 10 },
+    { "name": "pe1b", "l3": true }
+  ],
+  "srv6_source": "fd00:1::1",
+  "nexthops": [
+    {
+      "id": 1,
+      "oif": "pe1b",
+      "gateway": "2001:db8:12::2",
+      "segs": ["fd00:2::100"]
+    },
+    { "id": 2, "oif": "pe1a", "gateway": "10.0.1.1" }
+  ],
+  "neighbors": [
+    { "oif": "pe1b", "ip": "2001:db8:12::2", "mac": "02:00:00:00:12:02" },
+    { "oif": "pe1a", "ip": "10.0.1.1", "mac": "02:00:00:00:01:c1" }
+  ],
+  "localsids": [
+    { "sid": "fd00:1::100", "behavior": "end.dt46", "vrf": 10 }
+  ],
+  "routes": [
+    { "prefix": "10.0.2.0/24", "nexthop": 1, "vrf": 10 },
+    { "prefix": "10.0.1.0/24", "nexthop": 2, "vrf": 10 }
+  ]
+}

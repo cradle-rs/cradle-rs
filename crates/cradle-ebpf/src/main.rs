@@ -1843,11 +1843,15 @@ fn l3_forward_v4(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
     }
 
     let dst: [u8; 4] = ctx.load(IP_DST_OFF).map_err(|_| ())?;
-    // Port binding wins; else VRF context from a VPN-label decap (XDP meta).
-    let vrf_id = if port_vrf != 0 {
-        port_vrf
-    } else {
-        tc_meta_vrf(ctx)
+    // Decap metadata wins; else the ingress port's VRF binding. The metadata
+    // is only ever set by a decap stage (GTP PDR, SRv6 End.DT*, MPLS pop,
+    // VXLAN L3VNI) that knows the *inner* table, while the port binding
+    // describes the outer context the tunnel arrived in — so a tunnel may
+    // terminate on a VRF-bound underlay port and still route the inner
+    // packet in its own table. Non-decapped packets carry no metadata.
+    let vrf_id = match tc_meta_vrf(ctx) {
+        0 => port_vrf,
+        meta_vrf => meta_vrf,
     };
     let fib = match fib4_lookup(vrf_id, dst) {
         Some(fib) => fib,
@@ -2034,11 +2038,11 @@ fn l3_forward_v6(ctx: &TcContext, port_vrf: u32, from_ep: u32) -> Result<i32, ()
         return Ok(TC_ACT_PIPE as i32);
     }
 
-    // Port binding wins; else VRF context from a VPN-label / SRv6 decap.
-    let vrf_id = if port_vrf != 0 {
-        port_vrf
-    } else {
-        tc_meta_vrf(ctx)
+    // Decap metadata wins; else the ingress port's VRF binding (see the v4
+    // twin in `l3_forward_v4` for the rationale).
+    let vrf_id = match tc_meta_vrf(ctx) {
+        0 => port_vrf,
+        meta_vrf => meta_vrf,
     };
     let fib = match fib6_lookup(vrf_id, dst) {
         Some(fib) => fib,
