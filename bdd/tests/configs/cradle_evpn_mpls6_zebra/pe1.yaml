@@ -1,0 +1,46 @@
+system:
+  cradle:
+    enabled: true
+# PE1 — EVPN-over-MPLS provider edge on an IPv6 core. A static /128
+# supplies the (label-less, direct) transport route to PE2's v6
+# loopback; iBGP L2VPN-EVPN (`encapsulation mpls`) advertises this PE's
+# per-EVI service label with `vtep-source` as the next hop — the
+# router-id fallback could only express an IPv4 PE. cradle is the L2
+# data plane — the kernel has no action that pops a label into a bridge.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::1/128
+- if-name: pe1u
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::1
+      evi:
+      - id: 100
+        bridge: br100
+    neighbor:
+    - remote-address: 2001:db8:255::2
+      remote-as: 65000
+      update-source: 2001:db8:255::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

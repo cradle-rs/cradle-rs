@@ -3078,10 +3078,10 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
 }
 
 /// Tunnel an L2 frame toward the remote PE `addr` names, by overlay flavor:
-/// VXLAN (`FDB_F_VXLAN` — `addr` is the VTEP v4-mapped, `aux` the VNI), MPLS
-/// (`FDB_F_MPLS` — `addr` is the PE, `aux` its EVI service label, imposed
-/// under the transport LSP) or MAC-in-SRv6 (neither flag — `addr` is the
-/// remote `End.DT2U`/`DT2M` SID). `nh_id` is the underlay adjacency, 0 to
+/// VXLAN (`FDB_F_VXLAN` — `addr` is the VTEP, v4-mapped or native v6, `aux`
+/// the VNI), MPLS (`FDB_F_MPLS` — `addr` is the PE, either family, `aux` its
+/// EVI service label, imposed under the transport LSP) or MAC-in-SRv6
+/// (neither flag — `addr` is the remote `End.DT2U`/`DT2M` SID). `nh_id` is the underlay adjacency, 0 to
 /// resolve it by a FIB lookup on `addr`; `bum` selects the flood-vs-unicast
 /// counter.
 ///
@@ -3372,7 +3372,8 @@ fn is_v4_mapped(addr: &[u8; 16]) -> bool {
 /// it optional and both ends must agree, so it is a later, negotiated knob).
 ///
 /// `l2_vxlan_encap`'s adjacency-resolution shape with `grow_swap`'s LSE
-/// writer. `addr` is the remote PE address (v4-mapped), `nh_id` the underlay
+/// writer. `addr` is the remote PE address (v4-mapped or a native IPv6 —
+/// the family picks only the FIB trie), `nh_id` the underlay
 /// adjacency (0 = resolve by FIB) and `label` the PE's EVI service label;
 /// `stat` distinguishes unicast (`STAT_MPLS_L2_ENCAP`) from BUM
 /// (`STAT_MPLS_L2_BUM`).
@@ -3386,22 +3387,27 @@ fn l2_mpls_encap(
 ) -> Result<u32, ()> {
     // Underlay adjacency: an explicit nexthop id (static config / a
     // pre-resolved tee), or — when the entry came from the control plane with
-    // nexthop 0 — resolved by a FIB4 lookup on the remote PE address, whose
-    // route carries the transport LSP labels. Borrow, don't copy: cradle_xdp's
-    // flattened frame sits at the verifier's stack budget (see
-    // `l2_vxlan_encap`). MVP: IPv4 underlay only — an IPv6-underlay PE would
-    // need a second (16-byte-key) trie lookup inlined here, and MPLS cores are
-    // IPv4 in practice; such an entry punts to the host stack.
+    // nexthop 0 — resolved by a FIB lookup on the remote PE address in its
+    // own family (FIB4 for a v4-mapped PE, FIB6 /128 otherwise), whose route
+    // carries the transport LSP labels. MPLS imposes no outer IP header, so
+    // the PE's family only picks the lookup trie and the adjacency — the
+    // label stack and everything after are family-independent. Borrow, don't
+    // copy: cradle_xdp's flattened frame sits at the verifier's stack budget
+    // (see `l2_vxlan_encap`).
     let nh_id = if nh_id != 0 {
         nh_id
     } else {
-        let pe: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
-        if !is_v4_mapped(addr) {
-            return Ok(xdp_action::XDP_PASS); // IPv6-underlay PE: not handled
-        }
-        let fib: &FibEntry = match FIB4.get(Key::new(32, pe)) {
-            Some(f) => f,
-            None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+        let fib: &FibEntry = if is_v4_mapped(addr) {
+            let pe: [u8; 4] = [addr[12], addr[13], addr[14], addr[15]];
+            match FIB4.get(Key::new(32, pe)) {
+                Some(f) => f,
+                None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+            }
+        } else {
+            match FIB6.get(Key::new(128, *addr)) {
+                Some(f) => f,
+                None => return Ok(xdp_action::XDP_PASS), // no underlay route yet
+            }
         };
         if fib.flags & (FIB_F_ECMP | FIB_F_BLACKHOLE | FIB_F_LOCAL) != 0 {
             return Ok(xdp_action::XDP_PASS); // ECMP/odd shapes: punt (MVP)

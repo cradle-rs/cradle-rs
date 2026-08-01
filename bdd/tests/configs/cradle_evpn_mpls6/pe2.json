@@ -1,0 +1,23 @@
+{
+  "ports": [
+    { "name": "pe2c", "vlan": 100 },
+    { "name": "pe2u", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe2u", "gateway": "2001:db8:12::1", "labels": [26] },
+    { "id": 2 }
+  ],
+  "neighbors": [
+    { "oif": "pe2u", "ip": "2001:db8:12::1", "mac": "02:00:00:00:01:0a" }
+  ],
+  "routes6": [
+    { "prefix": "2001:db8:255::1/128", "nexthop": 1 }
+  ],
+  "ilm": [
+    { "in_label": 16, "nexthop": 2, "action": "swap" },
+    { "in_label": 2100, "action": "pop-l2", "bd": 100 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:c1:01", "bd": 100, "remote_pe": "2001:db8:255::1", "label": 1100 }
+  ]
+}

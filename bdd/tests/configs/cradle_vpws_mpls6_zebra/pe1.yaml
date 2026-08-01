@@ -1,0 +1,53 @@
+system:
+  cradle:
+    enabled: true
+# PE1 — EVPN VPWS over MPLS on an IPv6 core. A static /128 supplies the
+# (label-less, direct) transport route to PE2's v6 loopback; each vpws
+# Type-1 carries a per-service label (no Encapsulation EC) with the
+# `vtep-source` v6 loopback as next hop. No bridge, no EVI list: eline1
+# cross-connects the AC whole-port, eline2 the same AC scoped to VID 30.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::1/128
+- if-name: pe1u
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::1
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 101
+        remote-service-id: 102
+        interface: pe1c
+      - name: eline2
+        evi: 200
+        local-service-id: 201
+        remote-service-id: 202
+        interface: pe1c
+        vlan: 30
+    neighbor:
+    - remote-address: 2001:db8:255::2
+      remote-as: 65000
+      update-source: 2001:db8:255::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

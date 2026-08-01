@@ -1,0 +1,50 @@
+system:
+  cradle:
+    enabled: true
+# PE2 — mirror of pe1: v6 loopback 2001:db8:255::2 as `vtep-source`,
+# eline1 whole-port + eline2 VID-scoped on the same AC.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:255::2/128
+- if-name: pe2u
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:255::1/128
+        nexthop:
+        - address: 2001:db8:12::1
+  bgp:
+    global:
+      as: 65000
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vtep-source: 2001:db8:255::2
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 102
+        remote-service-id: 101
+        interface: pe2c
+      - name: eline2
+        evi: 200
+        local-service-id: 202
+        remote-service-id: 201
+        interface: pe2c
+        vlan: 30
+    neighbor:
+    - remote-address: 2001:db8:255::1
+      remote-as: 65000
+      update-source: 2001:db8:255::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
