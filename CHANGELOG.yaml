@@ -11,6 +11,57 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.0.0
+  date: 2026-08-01T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### 1.0 milestone
+        * First stable release line: an eBPF L2–L7 data plane
+          driven by zebra-rs, with EVPN (VXLAN and MPLS), E-Line,
+          SRv6, MPLS/TI-LFA, L3VPN, GTP-U/MUP, CNI and policy all
+          proven end to end in BDD
+
+    - note: |
+        ### IPv6 underlay
+        * IPv6-underlay VXLAN: native v6 VTEPs for L2
+          known-unicast, BUM and E-Line
+        * EVPN over MPLS toward IPv6 PEs — service-label
+          resolution through the v6 FIB
+        * v6-underlay zebra-driven EVPN and VPWS BDD coverage,
+          including a P-transit topology; SRv6 VPWS encapsulation
+          fix
+
+    - note: |
+        ### Mobile User Plane (GTP-U / MUP)
+        * IPv6-outer GTP-U: GTP6.E encapsulation and H.M.GTP6.D
+          decapsulation
+        * The decap PDR match is scoped by the ingress port's
+          VRF, so overlapping F-TEIDs in different network
+          instances stay separate
+        * Faithful UPF lab shapes in BDD: the N3 port inside a
+          kernel VRF, and a GTP-gateway shape where
+          lookup-network-instance names the N3 context
+        * The experimental GTP↔SRv6 stitch is dropped in both
+          directions
+
+    - note: |
+        ### eBPF data plane
+        * Fix a verifier stack overflow in the main program
+        * Decap metadata VRF takes precedence over the ingress
+          port's VRF binding; v6 output-interface tolerance in
+          FIB resolution
+
+    - note: |
+        ### BDD / test infrastructure
+        * The cucumber runner defaults to 16-way feature
+          concurrency (pass --concurrency=1 for a serial run)
+        * The sudo wrapper of a paused zebra-rs is reaped at
+          teardown, so failover features no longer leave a
+          stopped sudo + zombie pair behind
+
 - semver: 0.9.9
   date: 2026-07-31T18:00:00+09:00
   distribution: unstable
