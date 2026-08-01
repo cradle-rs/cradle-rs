@@ -1,0 +1,59 @@
+# pe1 — EVPN VPWS PE over VXLAN on an IPv6 underlay, teeing to cradle.
+# A VPWS service has no VXLAN device to read a VTEP from, so the
+# `vtep-source` leaf names the v6 loopback the Type-1s advertise as next
+# hop (the router-id fallback could only express an IPv4 VTEP). eline1's
+# Type-1 carries VNI 5001 in its label field + the VXLAN Encapsulation
+# EC; eline2 (VID 30, same AC) lets its VNI default to the EVI (200).
+# The static /128 toward pe2's VTEP resolves the datapath encap via the
+# teed FIB6.
+system:
+  cradle:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:ff::1/128
+- if-name: pe1u
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:ff::2/128
+        nexthop:
+        - address: 2001:db8:12::2
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      vtep-source: 2001:db8:ff::1
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 101
+        remote-service-id: 102
+        interface: pe1c
+        vni: 5001
+      # VLAN-scoped E-Line sharing the SAME AC port: only 802.1Q VID 30
+      # frames enter it (demuxed at the egress from the DX2V table, VLAN
+      # table = the EVI); untagged frames still ride eline1.
+      - name: eline2
+        evi: 200
+        local-service-id: 201
+        remote-service-id: 202
+        interface: pe1c
+        vlan: 30
+    neighbor:
+    - remote-address: 2001:db8:ff::2
+      remote-as: 65001
+      update-source: 2001:db8:ff::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

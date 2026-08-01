@@ -1,0 +1,50 @@
+# pe2 — mirror of pe1: VTEP 2001:db8:ff::2 via `vtep-source`, eline1
+# advertising VNI 5002, eline2 defaulting its VNI to the EVI.
+system:
+  cradle:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:ff::2/128
+- if-name: pe2u
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  static:
+    ipv6:
+      route:
+      - prefix: 2001:db8:ff::1/128
+        nexthop:
+        - address: 2001:db8:12::1
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      vtep-source: 2001:db8:ff::2
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 102
+        remote-service-id: 101
+        interface: pe2c
+        vni: 5002
+      - name: eline2
+        evi: 200
+        local-service-id: 202
+        remote-service-id: 201
+        interface: pe2c
+        vlan: 30
+    neighbor:
+    - remote-address: 2001:db8:ff::1
+      remote-as: 65001
+      update-source: 2001:db8:ff::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
