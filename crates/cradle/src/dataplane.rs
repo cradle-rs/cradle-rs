@@ -1967,10 +1967,18 @@ impl Dataplane {
         Ok(())
     }
 
-    /// Install a GTP-U decap PDR: a received G-PDU on (`dst`, `teid`) is
-    /// stripped and its inner packet forwarded in `vrf` (0 = global).
-    pub fn gtp_pdr_add(&mut self, dst: Ipv4Addr, teid: u32, vrf: u32) -> Result<()> {
+    /// Install a GTP-U decap PDR: a received G-PDU on (`dst`, `teid`),
+    /// arriving on a port bound to `match_vrf` (0 = global), is stripped and
+    /// its inner packet forwarded in `vrf` (0 = global).
+    pub fn gtp_pdr_add(
+        &mut self,
+        dst: Ipv4Addr,
+        teid: u32,
+        vrf: u32,
+        match_vrf: u32,
+    ) -> Result<()> {
         let key = GtpPdrKey {
+            vrf_id: match_vrf,
             dst: dst.octets(),
             teid: teid.to_be_bytes(),
         };
@@ -1979,8 +1987,9 @@ impl Dataplane {
     }
 
     /// Remove a GTP-U decap PDR (idempotent).
-    pub fn gtp_pdr_del(&mut self, dst: Ipv4Addr, teid: u32) -> Result<()> {
+    pub fn gtp_pdr_del(&mut self, dst: Ipv4Addr, teid: u32, match_vrf: u32) -> Result<()> {
         let key = GtpPdrKey {
+            vrf_id: match_vrf,
             dst: dst.octets(),
             teid: teid.to_be_bytes(),
         };

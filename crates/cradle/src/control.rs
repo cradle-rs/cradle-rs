@@ -1319,15 +1319,25 @@ impl Control {
         Ok(())
     }
 
-    /// Install a GTP-U decap PDR: `(dst, teid)` → strip + forward inner in `vrf`.
-    pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, vrf: u32) -> Result<()> {
-        self.dp.lock().await.gtp_pdr_add(dst, teid, vrf)?;
+    /// Install a GTP-U decap PDR: `(dst, teid)` arriving in `match_vrf` →
+    /// strip + forward inner in `vrf`.
+    pub async fn gtp_pdr_add(
+        &self,
+        dst: Ipv4Addr,
+        teid: u32,
+        vrf: u32,
+        match_vrf: u32,
+    ) -> Result<()> {
+        self.dp
+            .lock()
+            .await
+            .gtp_pdr_add(dst, teid, vrf, match_vrf)?;
         Ok(())
     }
 
     /// Remove a GTP-U decap PDR.
-    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32) -> Result<()> {
-        self.dp.lock().await.gtp_pdr_del(dst, teid)?;
+    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32, match_vrf: u32) -> Result<()> {
+        self.dp.lock().await.gtp_pdr_del(dst, teid, match_vrf)?;
         Ok(())
     }
 
@@ -2697,7 +2707,7 @@ impl Cradle for GrpcService {
         let p = req.into_inner();
         let dst = p.dst.parse::<Ipv4Addr>().map_err(st)?;
         self.control
-            .gtp_pdr_add(dst, p.teid, p.vrf)
+            .gtp_pdr_add(dst, p.teid, p.vrf, p.match_vrf)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -2709,7 +2719,10 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
         let dst = p.dst.parse::<Ipv4Addr>().map_err(st)?;
-        self.control.gtp_pdr_del(dst, p.teid).await.map_err(st)?;
+        self.control
+            .gtp_pdr_del(dst, p.teid, p.match_vrf)
+            .await
+            .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
     }
 
