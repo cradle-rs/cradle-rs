@@ -1531,6 +1531,12 @@ async fn resume_zebra_tee(world: &mut World, namespace: String) {
         .await
         .expect("failed to run kill -CONT");
     assert!(status.success(), "kill -CONT {} failed", pid.trim());
+    // The pause also stopped the sudo wrapper (sudo mirrors its command's
+    // SIGSTOP onto itself); wake it too so it can reap the daemon at
+    // teardown instead of surviving the run as a stopped sudo + zombie.
+    if let Ok(pid) = pid.trim().parse::<u32>() {
+        netns::cont_parent(pid).await;
+    }
     println!("✓ zebra-rs resumed in namespace {}", world.ns(&namespace));
 }
 
