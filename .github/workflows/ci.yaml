@@ -40,7 +40,10 @@ jobs:
         # `cradle`'s build script compiles cradle-ebpf for bpfel-unknown-none
         # via aya-build, which links with bpf-linker. A no-op when the binary
         # is already in the rust-cache-restored ~/.cargo/bin.
-        run: cargo install bpf-linker
+        # Pinned: bpf-linker 0.11 defaults to a system llvm-sys-23 build and
+        # fails on the runner ("could not find llvm-config"); 0.10.x links
+        # against the toolchain's own LLVM.
+        run: cargo install bpf-linker --version 0.10.3 --locked
       - name: Clippy
         # The *-ebpf crates are excluded: they only build for the BPF target
         # (via their loader's build script); --all-targets would try to give a
@@ -60,7 +63,10 @@ jobs:
       - name: Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        # Pinned: bpf-linker 0.11 defaults to a system llvm-sys-23 build and
+        # fails on the runner ("could not find llvm-config"); 0.10.x links
+        # against the toolchain's own LLVM.
+        run: cargo install bpf-linker --version 0.10.3 --locked
       - name: Test
         # cradle-bdd's cucumber tests require root + Linux network namespaces
         # and are not runnable in the GitHub Actions sandbox; they are
