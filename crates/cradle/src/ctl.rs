@@ -60,6 +60,12 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         })
                         .await?;
                 }
+                client
+                    .set_es_peers(pb::EsPeers {
+                        esi: es.esi.clone(),
+                        vteps: es.peers.clone(),
+                    })
+                    .await?;
             }
             if let Some(src) = &cfg.srv6_source {
                 client

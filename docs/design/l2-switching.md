@@ -204,7 +204,18 @@ Forwarder in that domain is another PE (RFC 7432 §8.5). The control plane
 renders the rows from `SetEthernetSegment` (the segment's local ports) ×
 `SetEsRole` (the per-domain election result); a withheld copy counts as
 `l2_drop_nondf`. Known unicast never consults `ES_DF` (all-active
-multihoming). BDD: `cradle_evpn_mh_df`. Frames destined to the reserved
+multihoming). BDD: `cradle_evpn_mh_df`. The third exclusion is the
+**multihoming split horizon** (RFC 8365 §8.3.1 local bias): at decap the
+XDP stage resolves the overlay *source* (VXLAN source VTEP, v4-mapped, or
+the SRv6 outer source) through `VTEP_ES` into a bitmap of the segments that
+PE shares with us and carries it in `CradleXdpMeta::es_bits`; the flood loop
+skips a member whose `PORT_ES` segment id is set in it (`l2_drop_sph`) —
+that peer already delivered the frame to the CE, or the CE sent it. The
+control plane renders `SetEsPeers` (the segment's other PEs, from the
+Type-4 routes) into `VTEP_ES` with a per-segment id (64 max), and
+`SetEthernetSegment` into `PORT_ES`. MPLS decaps carry no source address
+and get no split horizon (the ESI label is future work). BDD:
+`cradle_evpn_mh_sph`. Frames destined to the reserved
 `01-80-C2-00-00-0x` block (STP, LACP, LLDP) are **not** flooded — punt to the
 host (`TC_ACT_PIPE`), matching bridge behavior and leaving room for a future
 control protocol.

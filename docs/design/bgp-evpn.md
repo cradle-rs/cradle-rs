@@ -249,10 +249,20 @@ df}` records this PE's per-bridge-domain election result; the control plane
 renders them into `ES_DF` `(port, bd)` rows and `flood()` withholds BUM from
 a non-DF row (`l2_drop_nondf`). Known unicast is untouched (all-active).
 Static config: `ethernet_segments[]`. BDD `cradle_evpn_mh_df` (dual-homed CE
-sees exactly one copy). Next: the zebra-rs tee of DF results; then the
-split-horizon filter (ingress VTEP in `CradleXdpMeta` + per-ES peer VTEPs),
-the ES nexthop group for aliasing / mass withdraw, LAG-as-port, and
-single-active.
+sees exactly one copy); zebra-rs tees its DF election (`cradle_evpn_mh_df_zebra`).
+
+**The split-horizon filter** (RFC 8365 §8.3.1 local bias): `SetEsPeers
+{esi, vteps}` names the segment's other PEs (the Type-4 routes' originating
+IPs — which must therefore be the peers' VTEP / overlay source addresses);
+the control plane gives each segment an id (0..64), renders `PORT_ES`
+(port → id) and `VTEP_ES` (peer → bitmap of shared segments). At decap the
+XDP stage looks the outer source up in `VTEP_ES` and carries the bitmap in
+`CradleXdpMeta::es_bits`; `flood()` withholds the copy from any port whose
+segment bit is set (`l2_drop_sph`). Covers VXLAN (v4/v6) and SRv6 (outer
+source); MPLS has no source address (ESI label: future). Static config:
+`ethernet_segments[].peers`. BDD `cradle_evpn_mh_sph` (the DF must not echo
+the CE's own frames back). Next: the zebra-rs `SetEsPeers` tee; the ES
+nexthop group for aliasing / mass withdraw, LAG-as-port, single-active.
 
 ## Configuration walkthrough
 

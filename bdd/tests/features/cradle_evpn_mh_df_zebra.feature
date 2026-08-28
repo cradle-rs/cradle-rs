@@ -83,6 +83,29 @@ Feature: BGP EVPN DF election drives the non-DF filter in eBPF
     Then BGP session in "pe1" to "192.0.2.2" should be "Established"
     And BGP session in "pe1" to "192.0.2.3" should be "Established"
     And BGP session in "pe2" to "192.0.2.3" should be "Established"
+    # Split horizon, BGP-driven (RFC 8365 §8.3.1): give the CE's second leg
+    # its own MAC and address and send through it into pe3 — a non-DF still
+    # accepts the CE's traffic and floods it to pe1 and pe2. pe2 is the DF,
+    # so only the split horizon stops that copy coming back to the CE on
+    # eth0: zebra teed pe3's VTEP (its Type-4 originating IP, `vtep-source`)
+    # as pe2's ES-1 peer, and cradle drops what arrives from it. A flower
+    # counter on eth0 keyed on eth1's source MAC catches any echo.
+    When I execute "ip link set dev eth1 address 02:00:00:00:ce:03" in namespace "ce"
+    And I add address "10.0.0.3/24" to interface "eth1" in namespace "ce"
+    And I execute "tc qdisc add dev eth0 clsact" in namespace "ce"
+    And I execute "tc filter add dev eth0 ingress pref 1 flower src_mac 02:00:00:00:ce:03 action drop" in namespace "ce"
+    And I execute "ping -I eth1 -c 5 -W 1 10.0.0.1" in namespace "ce"
+    Then the cradle stat "l2_drop_sph" in namespace "pe2" via gRPC as "ctl2" should be nonzero
+    And command "tc -s filter show dev eth0 ingress pref 1" in namespace "ce" should eventually contain "Sent 0 bytes 0 pkt"
+    # Negative control: clear pe2's peer list underneath zebra (static
+    # override) and the same traffic echoes back onto eth0.
+    When I apply cradle config "pe2-nosph.json" to namespace "pe2" via gRPC as "ctl2"
+    # (Forget c1's MAC so the next ping starts with an ARP broadcast again —
+    # a cached neighbour would make it known unicast, which pe3 tunnels
+    # straight to pe1 without ever flooding it to pe2.)
+    And I execute "ip neigh flush dev eth1" in namespace "ce"
+    And I execute "ping -I eth1 -c 5 -W 1 10.0.0.1" in namespace "ce"
+    Then command "tc -s filter show dev eth0 ingress pref 1" in namespace "ce" should eventually not contain "Sent 0 bytes 0 pkt"
     # Now count what pe3 delivers on the CE's second leg: a drop rule whose
     # packet counter is the number of BUM copies the non-DF let through.
     # Installed only now so the one-off frame the kernel emits when pe3c

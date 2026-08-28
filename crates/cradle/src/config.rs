@@ -122,6 +122,12 @@ pub struct EthernetSegmentCfg {
     pub ports: Vec<String>,
     #[serde(default)]
     pub roles: Vec<EsRoleCfg>,
+    /// The other PEs on the segment (VTEP / overlay source addresses):
+    /// overlay BUM from one of them is never sent back onto `ports`
+    /// (split horizon / local bias, RFC 8365 §8.3.1). Replace semantics —
+    /// an empty list clears the filter.
+    #[serde(default)]
+    pub peers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -665,6 +671,7 @@ impl Config {
             for r in &es.roles {
                 ctl.set_es_role(&es.esi, r.bd, r.df).await?;
             }
+            ctl.set_es_peers(&es.esi, &es.peers).await?;
         }
         if let Some(src) = &self.srv6_source {
             let addr = src
