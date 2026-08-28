@@ -99,10 +99,35 @@ pub struct Config {
     pub policies: Vec<PolicyCfg>,
     #[serde(default)]
     pub l7_services: Vec<L7ServiceCfg>,
+    /// EVPN multihoming Ethernet Segments: local access ports + this PE's
+    /// per-bridge-domain DF role (a non-DF pair never receives BUM).
+    #[serde(default)]
+    pub ethernet_segments: Vec<EthernetSegmentCfg>,
 }
 
 fn default_fdb_age_secs() -> u64 {
     300
+}
+
+/// An Ethernet Segment (RFC 7432 §5) for a multihomed CE: the local access
+/// port(s), named like L2 ports, and the DF election outcome per bridge
+/// domain. `{"bd": 100, "df": false}` makes the segment's ports non-DF in
+/// domain 100 — broadcast, multicast and unknown-unicast copies are withheld
+/// there while known unicast still flows (all-active multihoming).
+#[derive(Debug, Deserialize)]
+pub struct EthernetSegmentCfg {
+    /// 10-octet ESI, colon-hex — the segment's name.
+    pub esi: String,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<EsRoleCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EsRoleCfg {
+    pub bd: u16,
+    pub df: bool,
 }
 
 /// A BUM ingress-replication slot: one remote PE in a bridge domain's flood
@@ -634,6 +659,12 @@ impl Config {
         }
         for (vlan, members) in l2_domains(&self.ports) {
             ctl.set_l2_domain(vlan, &members).await?;
+        }
+        for es in &self.ethernet_segments {
+            ctl.set_ethernet_segment(&es.esi, &es.ports).await?;
+            for r in &es.roles {
+                ctl.set_es_role(&es.esi, r.bd, r.df).await?;
+            }
         }
         if let Some(src) = &self.srv6_source {
             let addr = src

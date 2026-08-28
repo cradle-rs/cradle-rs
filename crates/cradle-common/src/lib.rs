@@ -770,6 +770,25 @@ pub struct L2MemberKey {
     pub slot: u16,
 }
 
+/// EVPN multihoming (RFC 7432 §8.5) per-`(port, bridge domain)` Ethernet
+/// Segment forwarding role, keyed by the flood-list member's ifindex. Only
+/// ports that belong to a multihomed segment have rows; absence = forward.
+/// Written by the control plane from the DF election result, consulted by
+/// `flood()` before each `clone_redirect` so a non-DF PE never delivers BUM
+/// to a CE another PE is the Designated Forwarder for.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EsDfKey {
+    pub ifindex: u32,
+    pub bd: u16,
+    pub _pad: u16,
+}
+
+/// This PE is NOT the Designated Forwarder for the segment in this bridge
+/// domain: withhold broadcast, multicast and unknown-unicast copies from the
+/// port (known unicast still flows — all-active multihoming).
+pub const ES_DF_F_NON_DF: u32 = 1 << 0;
+
 /// Per-port configuration (keyed by ifindex), shared by the L2 and L3 stages.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -1128,8 +1147,12 @@ pub const STAT_VXLAN_DX2: u32 = 49;
 /// frame emitted raw on its attachment circuit (the egress leg — the
 /// MPLS twin of `STAT_SRV6_DX2`; AC-ingress counts as `mpls_l2_encap`).
 pub const STAT_MPLS_DX2: u32 = 50;
+/// EVPN multihoming: a BUM copy withheld from an Ethernet Segment port
+/// because this PE is not the Designated Forwarder for it in that bridge
+/// domain (`ES_DF` non-DF row, RFC 7432 §8.5).
+pub const STAT_L2_DROP_NONDF: u32 = 51;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 51;
+pub const STAT_MAX: u32 = 52;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -1201,6 +1224,7 @@ mod user {
         Neigh6Key,
         NeighEntry,
         NhGroupKey,
+        EsDfKey,
         MplsEntry,
         Vrf4Key,
         VrfIdKey,

@@ -1,0 +1,31 @@
+{
+  "ports": [
+    { "name": "pe1c", "vlan": 100 },
+    { "name": "pe1u2", "l3": true },
+    { "name": "pe1u3", "l3": true },
+    { "name": "r12a", "vlan": 100 },
+    { "name": "r12b", "l3": true },
+    { "name": "r13a", "vlan": 100 },
+    { "name": "r13b", "l3": true }
+  ],
+  "vtep_source": "192.0.2.1",
+  "vnis": [
+    { "vni": 10100, "vlan": 100 }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe1u2", "gateway": "10.12.0.2" },
+    { "id": 2, "oif": "pe1u3", "gateway": "10.13.0.2" }
+  ],
+  "neighbors": [
+    { "oif": "pe1u2", "ip": "10.12.0.2", "mac": "02:00:00:00:02:0a" },
+    { "oif": "pe1u3", "ip": "10.13.0.2", "mac": "02:00:00:00:03:0a" }
+  ],
+  "repl_slots": [
+    { "flood_port": "r12a", "encap_port": "r12b", "remote_vtep": "192.0.2.2", "vni": 10100 },
+    { "flood_port": "r13a", "encap_port": "r13b", "remote_vtep": "192.0.2.3", "vni": 10100 }
+  ],
+  "routes": [
+    { "prefix": "192.0.2.2/32", "nexthop": 1 },
+    { "prefix": "192.0.2.3/32", "nexthop": 2 }
+  ]
+}

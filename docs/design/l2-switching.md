@@ -195,8 +195,16 @@ for each tagged group (vid):            vlan_push(vid); clone_redirect each; vla
 return TC_ACT_SHOT          // original consumed; clones did the work
 ```
 
-`PORT_F_NO_FLOOD` excludes a port from BUM (useful for EVPN split-horizon
-later); the ingress port is always excluded. Frames destined to the reserved
+The ingress port is always excluded. Two further per-member exclusions live
+in the same loop: a BUM replication slot is skipped for overlay-received
+frames (EVPN split horizon, `REPL_SID`), and an **EVPN multihoming non-DF
+port** is skipped for every BUM frame — `ES_DF`, keyed `(port ifindex, bridge
+domain)`, holds a row for each Ethernet Segment port whose Designated
+Forwarder in that domain is another PE (RFC 7432 §8.5). The control plane
+renders the rows from `SetEthernetSegment` (the segment's local ports) ×
+`SetEsRole` (the per-domain election result); a withheld copy counts as
+`l2_drop_nondf`. Known unicast never consults `ES_DF` (all-active
+multihoming). BDD: `cradle_evpn_mh_df`. Frames destined to the reserved
 `01-80-C2-00-00-0x` block (STP, LACP, LLDP) are **not** flooded — punt to the
 host (`TC_ACT_PIPE`), matching bridge behavior and leaving room for a future
 control protocol.
@@ -212,6 +220,10 @@ pub const PORT_F_BLOCK:    u32 = 1 << 2;  // drop everything (STP blocking)
 pub const PORT_F_NO_LEARN: u32 = 1 << 3;  // forward but don't learn
 pub const PORT_F_NO_FLOOD: u32 = 1 << 4;  // never a BUM target
 ```
+
+(None of the three is implemented yet. The EVPN non-DF case that
+`PORT_F_NO_FLOOD` was sketched for is served by the per-`(port, domain)`
+`ES_DF` table instead — a DF role is per bridge domain, not per port.)
 
 Until a loop-prevention agent exists, a physical loop is a broadcast storm —
 same as a Linux bridge with STP off. Documented, not defended (storm-control

@@ -20,16 +20,16 @@ use aya::{
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_VXLAN,
-    FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr,
-    GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP,
-    MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_GTP6,
-    NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry,
-    NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS,
-    POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN,
-    REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY,
-    ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L2,
-    VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, EsDfKey, FDB_F_MPLS, FDB_F_REMOTE,
+    FDB_F_VXLAN, FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap,
+    GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES,
+    MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP,
+    NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6,
+    REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
+    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
+    VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -190,6 +190,9 @@ pub struct Dataplane {
     ports: HashMap<MapData, u32, PortConfig>,
     l2_members: HashMap<MapData, L2MemberKey, u32>,
     l2_count: HashMap<MapData, u16, u32>,
+    /// EVPN multihoming DF roles: `(port, bridge domain)` → `ES_DF_F_*`; a
+    /// non-DF row withholds BUM from that port (`flood()`).
+    es_df: HashMap<MapData, EsDfKey, u32>,
     /// Links whose carrier/admin state is down — the datapath fails over to
     /// nexthop `backup_id`s while an ifindex is present here.
     link_down: HashMap<MapData, u32, u8>,
@@ -313,6 +316,7 @@ impl Dataplane {
                     .context("map L2_MEMBERS missing")?,
             )?,
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
+            es_df: HashMap::try_from(bpf.take_map("ES_DF").context("map ES_DF missing")?)?,
             link_down: HashMap::try_from(
                 bpf.take_map("LINK_DOWN").context("map LINK_DOWN missing")?,
             )?,
@@ -883,6 +887,32 @@ impl Dataplane {
             )?;
         }
         Ok(())
+    }
+
+    /// Set the EVPN multihoming forwarding role of Ethernet Segment port
+    /// `ifindex` in bridge domain `bd` (`ES_DF_F_*`). A row is only needed
+    /// while the role restricts forwarding — see `es_df_del`.
+    pub fn es_df_set(&mut self, ifindex: u32, bd: u16, flags: u32) -> Result<()> {
+        self.es_df.insert(
+            EsDfKey {
+                ifindex,
+                bd,
+                _pad: 0,
+            },
+            flags,
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Drop the `(ifindex, bd)` role row: the port forwards BUM again (it is
+    /// the Designated Forwarder, or no longer on a multihomed segment).
+    pub fn es_df_del(&mut self, ifindex: u32, bd: u16) {
+        let _ = self.es_df.remove(&EsDfKey {
+            ifindex,
+            bd,
+            _pad: 0,
+        });
     }
 
     /// Program a static overlay FDB entry (EVPN over SRv6): the MAC `mac` in

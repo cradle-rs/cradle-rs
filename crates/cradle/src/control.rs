@@ -34,13 +34,14 @@ use crate::{
     util,
 };
 use cradle_common::{
-    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
-    MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3, REPL_BRANCH_LOCAL,
-    REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, ReplBranch, ReplTarget, SRV6_BH_END,
-    SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6,
-    SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6,
-    SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X,
-    SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, STAT_MAX,
+    ES_DF_F_NON_DF, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3,
+    MPLS_OP_POP_XC, MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3,
+    REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, ReplBranch, ReplTarget,
+    SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
+    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
+    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
+    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
@@ -122,7 +123,24 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "mpls_l2_bum",
     "vxlan_dx2",
     "mpls_dx2",
+    "l2_drop_nondf",
 ];
+
+/// An Ethernet Segment (RFC 7432 §5) as the datapath sees it: the local
+/// access port(s) of a multihomed CE and, per bridge domain, whether this PE
+/// is the segment's elected Designated Forwarder. Rendered into `ES_DF` as
+/// one `(port, bd)` row per *non-DF* pair — the rows `flood()` consults to
+/// withhold BUM from a port another PE forwards for. A port belongs to at
+/// most one segment (RFC 7432 §5), so rows are owned, not shared.
+#[derive(Default)]
+struct EsState {
+    ports: Vec<String>,
+    /// Bridge domain → DF? A domain with no recorded role forwards (no row):
+    /// the control plane decides when election is pending.
+    roles: std::collections::BTreeMap<u16, bool>,
+    /// The `ES_DF` rows this segment currently owns.
+    programmed: Vec<(u32, u16)>,
+}
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
 type ReplSlot = (String, u32, u32);
@@ -252,6 +270,10 @@ pub struct Control {
     /// decaps a locally-delivered copy into the bridge domain. cradle
     /// creates/destroys the pair as segments gain/lose a local branch.
     repl_seg_veths: Arc<Mutex<std::collections::HashMap<Ipv6Addr, ReplSlot>>>,
+    /// EVPN multihoming Ethernet Segments by ESI (`SetEthernetSegment` /
+    /// `SetEsRole`), the source of the `ES_DF` non-DF rows. Lock order:
+    /// `es` → `dp` (never taken while `dp` is held).
+    es: Arc<Mutex<std::collections::BTreeMap<String, EsState>>>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
     /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
@@ -298,6 +320,7 @@ impl Control {
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             repl_seg_veths: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            es: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
@@ -632,6 +655,65 @@ impl Control {
             .map(|m| util::ifindex_of(m))
             .collect::<Result<Vec<_>>>()?;
         self.dp.lock().await.l2_domain_set(vlan, &idxs)?;
+        Ok(())
+    }
+
+    /// Define (or replace) the local access ports of Ethernet Segment `esi`
+    /// (EVPN multihoming, RFC 7432 §5). DF roles already set for the segment
+    /// are re-rendered onto the new port list; ports must exist (they are
+    /// resolved by name, like `set_l2_domain`).
+    pub async fn set_ethernet_segment(&self, esi: &str, ports: &[String]) -> Result<()> {
+        let mut es = self.es.lock().await;
+        let st = es.entry(esi.to_string()).or_default();
+        st.ports = ports.to_vec();
+        self.es_render(st).await
+    }
+
+    /// Forget Ethernet Segment `esi`: its ports forward BUM unconditionally
+    /// again. Idempotent.
+    pub async fn del_ethernet_segment(&self, esi: &str) -> Result<()> {
+        let mut es = self.es.lock().await;
+        if let Some(mut st) = es.remove(esi) {
+            st.ports.clear();
+            st.roles.clear();
+            self.es_render(&mut st).await?;
+        }
+        Ok(())
+    }
+
+    /// Record this PE's Designated Forwarder role for segment `esi` in bridge
+    /// domain `bd` (RFC 7432 §8.5): `df == false` withholds BUM from the
+    /// segment's ports in that domain, `true` (or no role) lets it through.
+    /// A role may be set before the segment's ports (they render when the
+    /// ports arrive).
+    pub async fn set_es_role(&self, esi: &str, bd: u16, df: bool) -> Result<()> {
+        let mut es = self.es.lock().await;
+        let st = es.entry(esi.to_string()).or_default();
+        st.roles.insert(bd, df);
+        self.es_render(st).await
+    }
+
+    /// Re-derive a segment's `ES_DF` rows from its ports × non-DF roles and
+    /// swap them in for the rows it owned before. Resolves every port name
+    /// first so a bad name leaves the datapath untouched.
+    async fn es_render(&self, st: &mut EsState) -> Result<()> {
+        let mut rows = Vec::new();
+        for p in &st.ports {
+            let ifindex = util::ifindex_of(p)?;
+            for (&bd, &df) in &st.roles {
+                if !df {
+                    rows.push((ifindex, bd));
+                }
+            }
+        }
+        let mut dp = self.dp.lock().await;
+        for (ifindex, bd) in st.programmed.drain(..) {
+            dp.es_df_del(ifindex, bd);
+        }
+        for &(ifindex, bd) in &rows {
+            dp.es_df_set(ifindex, bd, ES_DF_F_NON_DF)?;
+        }
+        st.programmed = rows;
         Ok(())
     }
 
@@ -2470,6 +2552,39 @@ impl Cradle for GrpcService {
         let d = req.into_inner();
         self.control
             .set_l2_domain(d.vlan as u16, &d.members)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_ethernet_segment(
+        &self,
+        req: Request<pb::EthernetSegment>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let e = req.into_inner();
+        self.control
+            .set_ethernet_segment(&e.esi, &e.ports)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn del_ethernet_segment(
+        &self,
+        req: Request<pb::EthernetSegmentDel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let e = req.into_inner();
+        self.control
+            .del_ethernet_segment(&e.esi)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_es_role(&self, req: Request<pb::EsRole>) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        self.control
+            .set_es_role(&r.esi, r.bd as u16, r.df)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
