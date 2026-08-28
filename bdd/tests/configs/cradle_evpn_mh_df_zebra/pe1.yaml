@@ -35,6 +35,7 @@ router:
     afi-safi:
     - name: evpn
       advertise-all-vni: true
+      vtep-source: 192.0.2.1
     neighbor:
     - remote-address: 192.0.2.2
       remote-as: 65001
