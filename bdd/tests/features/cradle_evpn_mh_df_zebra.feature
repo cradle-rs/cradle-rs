@@ -20,11 +20,15 @@ Feature: BGP EVPN DF election drives the non-DF filter in eBPF
                   └────10.0.13.0/24── pe3[cradle+zebra] ──pe3c── eth1 ┘
                                        VTEP .3  rid 10.0.0.3 (non-DF)   ES-1
   ```
-  ce owns 10.0.0.2 on eth0; eth1 has no address and drops everything under
-  a counting tc rule, so its packet count is the number of BUM copies the
-  non-DF PE let through. The CE ports join each PE's kernel bridge only as
-  zebra's EVI declaration (the RIB reports the port's VNIs to BGP from the
-  bridge membership); cradle owns the forwarding.
+  ce is a real multihomed station: one LAG (active-backup, transmitting on
+  the pe3 leg, receiving on both) with one MAC and one address. Per-leg tc
+  counters tell which PE delivered what: ARP from c1 on the pe3 leg is a
+  BUM copy the non-DF let through; the CE's own MAC arriving on the pe2 leg
+  is an echo the split horizon failed to stop. The CE ports join each PE's
+  kernel bridge only as zebra's EVI declaration (the RIB reports the port's
+  VNIs to BGP from the bridge membership); cradle owns the forwarding.
+  With the CE's MAC learned by pe3 and advertised with the ESI, pe1 aliases
+  it across {pe2, pe3} and pe2 installs it on its own segment port.
 
   Scenario: The BGP-elected DF alone delivers BUM to the multihomed CE
     Given a clean test environment
@@ -44,13 +48,22 @@ Feature: BGP EVPN DF election drives the non-DF filter in eBPF
     And I connect namespace "pe1" interface "pe1u2" to namespace "pe2" interface "pe2u"
     And I connect namespace "pe1" interface "pe1u3" to namespace "pe3" interface "pe3u"
     And I execute "ip link set dev eth0 address 02:00:00:00:c1:01" in namespace "c1"
-    And I execute "ip link set dev eth0 address 02:00:00:00:ce:02" in namespace "ce"
     And I add address "10.0.0.1/24" to interface "eth0" in namespace "c1"
-    And I add address "10.0.0.2/24" to interface "eth0" in namespace "ce"
-    # The CE's second leg: no address and no IPv6 chatter; it gets a
-    # counting drop rule once the fabric has converged (below).
+    # The dual-homed CE: an active-backup LAG over both legs — one MAC, one
+    # address, transmitting on the pe3 leg (primary eth1) and accepting
+    # frames on either (all_slaves_active: aliasing may deliver on eth0).
     And I execute "sysctl -q -w net.ipv6.conf.all.disable_ipv6=1" in namespace "ce"
+    And I execute "ip link add bond0 type bond mode active-backup all_slaves_active 1" in namespace "ce"
+    And I execute "ip link set bond0 address 02:00:00:00:ce:02" in namespace "ce"
+    And I execute "ip link set eth0 down" in namespace "ce"
+    And I execute "ip link set eth1 down" in namespace "ce"
+    And I execute "ip link set eth0 master bond0" in namespace "ce"
+    And I execute "ip link set eth1 master bond0" in namespace "ce"
+    And I execute "ip link set bond0 type bond primary eth1" in namespace "ce"
+    And I execute "ip link set eth0 up" in namespace "ce"
     And I execute "ip link set eth1 up" in namespace "ce"
+    And I execute "ip link set bond0 up" in namespace "ce"
+    And I add address "10.0.0.2/24" to interface "bond0" in namespace "ce"
     And I disable IPv4 forwarding in namespace "pe1"
     And I disable IPv4 forwarding in namespace "pe2"
     And I disable IPv4 forwarding in namespace "pe3"
@@ -83,19 +96,17 @@ Feature: BGP EVPN DF election drives the non-DF filter in eBPF
     Then BGP session in "pe1" to "192.0.2.2" should be "Established"
     And BGP session in "pe1" to "192.0.2.3" should be "Established"
     And BGP session in "pe2" to "192.0.2.3" should be "Established"
-    # Split horizon, BGP-driven (RFC 8365 §8.3.1): give the CE's second leg
-    # its own MAC and address and send through it into pe3 — a non-DF still
-    # accepts the CE's traffic and floods it to pe1 and pe2. pe2 is the DF,
-    # so only the split horizon stops that copy coming back to the CE on
-    # eth0: zebra teed pe3's VTEP (its Type-4 originating IP, `vtep-source`)
-    # as pe2's ES-1 peer, and cradle drops what arrives from it. A flower
-    # counter on eth0 keyed on eth1's source MAC catches any echo.
-    When I execute "ip link set dev eth1 address 02:00:00:00:ce:03" in namespace "ce"
-    And I add address "10.0.0.3/24" to interface "eth1" in namespace "ce"
-    And I execute "tc qdisc add dev eth0 clsact" in namespace "ce"
-    And I execute "tc filter add dev eth0 ingress pref 1 flower src_mac 02:00:00:00:ce:03 action drop" in namespace "ce"
-    And I execute "ping -I eth1 -c 5 -W 1 10.0.0.1" in namespace "ce"
-    Then the cradle stat "l2_drop_sph" in namespace "pe2" via gRPC as "ctl2" should be nonzero
+    # Split horizon, BGP-driven (RFC 8365 §8.3.1): the CE transmits on its
+    # pe3 leg — a non-DF still accepts the CE's traffic and floods it to
+    # pe1 and pe2. pe2 is the DF, so only the split horizon stops that copy
+    # coming back to the CE on eth0: zebra teed pe3's VTEP (its Type-4
+    # originating IP, `vtep-source`) as pe2's ES-1 peer, and cradle drops
+    # what arrives from it. A flower counter on eth0 keyed on the CE's own
+    # source MAC catches any echo (deliveries to the CE carry c1's).
+    When I execute "tc qdisc add dev eth0 clsact" in namespace "ce"
+    And I execute "tc filter add dev eth0 ingress pref 1 flower src_mac 02:00:00:00:ce:02 action drop" in namespace "ce"
+    Then ping from "ce" to "10.0.0.1" should eventually succeed
+    And the cradle stat "l2_drop_sph" in namespace "pe2" via gRPC as "ctl2" should be nonzero
     And command "tc -s filter show dev eth0 ingress pref 1" in namespace "ce" should eventually contain "Sent 0 bytes 0 pkt"
     # Negative control: clear pe2's peer list underneath zebra (static
     # override) and the same traffic echoes back onto eth0.
@@ -103,34 +114,40 @@ Feature: BGP EVPN DF election drives the non-DF filter in eBPF
     # (Forget c1's MAC so the next ping starts with an ARP broadcast again —
     # a cached neighbour would make it known unicast, which pe3 tunnels
     # straight to pe1 without ever flooding it to pe2.)
-    And I execute "ip neigh flush dev eth1" in namespace "ce"
-    And I execute "ping -I eth1 -c 5 -W 1 10.0.0.1" in namespace "ce"
-    Then command "tc -s filter show dev eth0 ingress pref 1" in namespace "ce" should eventually not contain "Sent 0 bytes 0 pkt"
-    # Now count what pe3 delivers on the CE's second leg: a drop rule whose
-    # packet counter is the number of BUM copies the non-DF let through.
-    # Installed only now so the one-off frame the kernel emits when pe3c
-    # joins its bridge does not count.
+    And I execute "ip neigh flush dev bond0" in namespace "ce"
+    Then ping from "ce" to "10.0.0.1" should eventually succeed
+    And command "tc -s filter show dev eth0 ingress pref 1" in namespace "ce" should eventually not contain "Sent 0 bytes 0 pkt"
+    # Now count the BUM copies pe3 delivers on the CE's second leg: an
+    # ARP-only counter (pass action) — known unicast may legitimately land
+    # here too, because c1's PE aliases the CE's MAC across both segment
+    # PEs. Installed only now so the one-off frame the kernel emits when
+    # pe3c joins its bridge does not count.
     When I execute "tc qdisc add dev eth1 clsact" in namespace "ce"
-    And I execute "tc filter add dev eth1 ingress matchall action drop" in namespace "ce"
-    # Reachability rides the DF (pe2): ARP and the unknown-unicast ICMP both
-    # reach ce on eth0.
+    And I execute "tc filter add dev eth1 ingress pref 1 protocol arp flower src_mac 02:00:00:00:c1:01 action pass" in namespace "ce"
+    # Reachability: c1's ARP rides the DF (pe2) to eth0; its ICMP is known
+    # unicast at pe1, sent through the {pe2, pe3} aliasing group BGP built
+    # from their per-ES + per-EVI A-D routes (RFC 7432 §8.4).
     Then ping from "c1" to "10.0.0.2" should eventually succeed
+    And the cradle stat "l2_es_nhg" in namespace "pe1" via gRPC as "ctl1" should be nonzero
     And the cradle stat "vxlan_decap" in namespace "pe2" via gRPC as "ctl2" should be nonzero
     # The non-DF (pe3) received the same overlay copies and withheld every
     # one of them from pe3c — the role BGP elected and zebra teed...
     And the cradle stat "vxlan_decap" in namespace "pe3" via gRPC as "ctl3" should be nonzero
     And the cradle stat "l2_drop_nondf" in namespace "pe3" via gRPC as "ctl3" should be nonzero
     And the cradle stat "l2_drop_nondf" in namespace "pe2" via gRPC as "ctl2" should be zero
-    # ...so the CE's second leg saw nothing: no duplicate BUM.
-    And command "tc -s filter show dev eth1 ingress" in namespace "ce" should eventually contain "Sent 0 bytes 0 pkt"
-    # Negative control, BGP-driven: take pe2 away. Its Type-4 is withdrawn,
-    # pe3 becomes the segment's only candidate, re-elects itself DF and
-    # zebra clears cradle's non-DF row — now pe3 delivers, and the copies
-    # show up on eth1 (the CE is unreachable meanwhile: eth1 drops them).
+    # ...so the CE's second leg saw no broadcast: no duplicate BUM.
+    And command "tc -s filter show dev eth1 ingress pref 1" in namespace "ce" should eventually contain "Sent 0 bytes 0 pkt"
+    # Negative control, BGP-driven: take pe2 away. Its Type-4 and A-D
+    # routes are withdrawn: pe3 becomes the segment's only candidate,
+    # re-elects itself DF and zebra clears cradle's non-DF row, while the
+    # per-ES A-D withdraw (the §8.2 mass withdraw) drops pe2 from pe1's
+    # aliasing group. The CE stays reachable through pe3 alone, and c1's
+    # next ARP — now delivered by pe3 — shows up on eth1.
     When I stop the zebra-rs tee in namespace "pe2"
     And I wait 3 seconds
-    Then ping from "c1" to "10.0.0.2" should fail
-    And command "tc -s filter show dev eth1 ingress" in namespace "ce" should eventually not contain "Sent 0 bytes 0 pkt"
+    And I execute "ip neigh flush dev eth0" in namespace "c1"
+    Then ping from "c1" to "10.0.0.2" should eventually succeed
+    And command "tc -s filter show dev eth1 ingress pref 1" in namespace "ce" should eventually not contain "Sent 0 bytes 0 pkt"
 
   Scenario: Teardown topology
     Given the test topology exists
