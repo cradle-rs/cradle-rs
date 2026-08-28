@@ -20,16 +20,17 @@ use aya::{
 };
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, EsDfKey, FDB_F_MPLS, FDB_F_REMOTE,
-    FDB_F_VXLAN, FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap,
-    GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES,
-    MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP,
-    NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
-    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6,
-    REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
-    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
-    VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, EsDfKey, EsNhgKey, EsNhgMemberKey,
+    FDB_F_ESNHG, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_STATIC, FDB_F_VXLAN, FIB_F_ECMP, FdbEntry, FdbKey,
+    FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey,
+    LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP,
+    MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_GTP6, NH_F_MPLS,
+    NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop,
+    NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
+    PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, REPL_ROLE_LEAF,
+    ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo,
+    ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L2, VNI_F_L3, VniInfo,
+    Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -199,6 +200,11 @@ pub struct Dataplane {
     /// segment bit is set for the frame's source).
     port_es: HashMap<MapData, u32, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
+    /// EVPN multihoming aliasing: the `(segment, bridge domain)` nexthop
+    /// group's member count and members (`FDB_F_ESNHG` entries resolve
+    /// through them by flow hash).
+    es_nhg: HashMap<MapData, EsNhgKey, u32>,
+    es_nhg_member: HashMap<MapData, EsNhgMemberKey, ReplTarget>,
     /// Links whose carrier/admin state is down — the datapath fails over to
     /// nexthop `backup_id`s while an ifindex is present here.
     link_down: HashMap<MapData, u32, u8>,
@@ -325,6 +331,11 @@ impl Dataplane {
             es_df: HashMap::try_from(bpf.take_map("ES_DF").context("map ES_DF missing")?)?,
             port_es: HashMap::try_from(bpf.take_map("PORT_ES").context("map PORT_ES missing")?)?,
             vtep_es: HashMap::try_from(bpf.take_map("VTEP_ES").context("map VTEP_ES missing")?)?,
+            es_nhg: HashMap::try_from(bpf.take_map("ES_NHG").context("map ES_NHG missing")?)?,
+            es_nhg_member: HashMap::try_from(
+                bpf.take_map("ES_NHG_MEMBER")
+                    .context("map ES_NHG_MEMBER missing")?,
+            )?,
             link_down: HashMap::try_from(
                 bpf.take_map("LINK_DOWN").context("map LINK_DOWN missing")?,
             )?,
@@ -935,6 +946,48 @@ impl Dataplane {
         let _ = self.port_es.remove(&ifindex);
     }
 
+    /// Replace the Ethernet Segment nexthop group for `(es_id, bd)` with
+    /// `members` (RFC 7432 §8.4 aliasing). Members are written before the
+    /// count grows and stale slots removed after it shrinks, so a reader
+    /// never indexes a slot the count does not cover. Empty = no group.
+    pub fn es_nhg_set(&mut self, es_id: u32, bd: u16, members: &[ReplTarget]) -> Result<()> {
+        let key = EsNhgKey { es_id, bd, _pad: 0 };
+        let old = self.es_nhg.get(&key, 0).unwrap_or(0);
+        let n = members.len().min(u16::MAX as usize) as u32;
+        for (slot, m) in members.iter().enumerate().take(n as usize) {
+            self.es_nhg_member.insert(
+                EsNhgMemberKey {
+                    es_id,
+                    bd,
+                    slot: slot as u16,
+                },
+                *m,
+                0,
+            )?;
+        }
+        if n == 0 {
+            let _ = self.es_nhg.remove(&key);
+        } else {
+            self.es_nhg.insert(key, n, 0)?;
+        }
+        for slot in n..old {
+            let _ = self.es_nhg_member.remove(&EsNhgMemberKey {
+                es_id,
+                bd,
+                slot: slot as u16,
+            });
+        }
+        Ok(())
+    }
+
+    /// Point `mac` in bridge domain `bd` at Ethernet Segment `es_id`'s
+    /// nexthop group (`FDB_F_ESNHG`): the encap target is picked per flow
+    /// from the `(es_id, bd)` group. Same displaced-local MAC-move semantics
+    /// as [`Self::fdb_remote_add`].
+    pub fn fdb_es_add(&mut self, mac: [u8; 6], bd: u16, es_id: u32) -> Result<bool> {
+        self.fdb_overlay_add(mac, bd, [0; 16], FDB_F_REMOTE | FDB_F_ESNHG, es_id, 0)
+    }
+
     /// Set peer PE `addr`'s segment bitmap (`bits == 0` removes the row):
     /// overlay BUM arriving from `addr` is withheld from every local port
     /// whose segment bit is set.
@@ -1045,10 +1098,34 @@ impl Dataplane {
     /// binding).
     pub fn fdb_remote_del(&mut self, mac: [u8; 6], bd: u16) -> Result<()> {
         let key = FdbKey { mac, vlan: bd };
-        if matches!(self.fdb.get(&key, 0), Ok(e) if e.flags & FDB_F_REMOTE == 0) {
+        if matches!(
+            self.fdb.get(&key, 0),
+            Ok(e) if e.flags & (FDB_F_REMOTE | FDB_F_STATIC) == 0
+        ) {
             return Ok(());
         }
         self.fdb.remove(&key)?;
+        Ok(())
+    }
+
+    /// Install `mac` in bridge domain `bd` as a control-plane LOCAL entry on
+    /// port `ifindex` (`FDB_F_STATIC`): forwarded like a learned entry, but
+    /// never aged or reported by `WatchFdb`. EVPN multihoming's "a MAC a
+    /// peer advertised on my own segment is reached over my segment port"
+    /// (RFC 7432 §8.4). Removed with `fdb_remote_del`.
+    pub fn fdb_local_add(&mut self, mac: [u8; 6], bd: u16, ifindex: u32) -> Result<()> {
+        self.fdb.insert(
+            FdbKey { mac, vlan: bd },
+            FdbEntry {
+                oif: ifindex,
+                flags: FDB_F_STATIC,
+                remote_sid: [0; 16],
+                last_seen: 0,
+                label: 0,
+                _pad: [0; 4],
+            },
+            0,
+        )?;
         Ok(())
     }
 

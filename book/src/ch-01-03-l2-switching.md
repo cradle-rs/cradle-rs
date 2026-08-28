@@ -81,6 +81,33 @@ An overlay frame whose source is one of `peers` is then never flooded to
 `SetEsPeers` (replace semantics; an empty list clears it). It applies to
 VXLAN and SRv6 overlays — MPLS frames carry no source address.
 
+The remote side of multihoming is **aliasing**: a MAC learned behind a
+segment may be sent to any PE on it. Give the segment a nexthop group per
+bridge domain and point the MAC at the segment instead of at one VTEP:
+
+```json
+{
+  "ethernet_segments": [
+    { "esi": "00:00:00:00:00:00:00:00:00:01",
+      "nhg": [ { "bd": 100,
+                 "members": [ { "remote_vtep": "192.0.2.2" },
+                              { "remote_vtep": "192.0.2.3" } ] } ] }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:ce:02", "bd": 100,
+      "esi": "00:00:00:00:00:00:00:00:00:01" }
+  ]
+}
+```
+
+Each flow to that MAC hashes onto one member (`l2_es_nhg`); replacing the
+member list — `SetEsNhg` over gRPC — moves every MAC behind the segment at
+once, which is how a PE leaving the segment (a mass withdraw) takes effect.
+Members may equally be SRv6 `remote_sid`s or MPLS `remote_pe` + `label`.
+A PE that is itself on the segment reaches such a MAC over its own port:
+`{ "mac": …, "bd": 100, "port": "pe3c" }` installs a static local entry
+(`AddFdbLocal`), which is never aged or reported as a learn.
+
 ## Mixing L2 and L3
 
 A single cradle instance can carry both routed and bridged ports at once: mark

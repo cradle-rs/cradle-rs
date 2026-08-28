@@ -41,25 +41,26 @@ use aya_ebpf::{
 use cradle_common::{
     AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
     CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, DPC_L3_ONLY,
-    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, ES_DF_F_NON_DF, EsDfKey, FDB_F_MPLS,
-    FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8,
-    FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
-    FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey,
-    GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS,
-    MAX_REPL_BRANCHES, MAX_SEGS, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3,
-    MPLS_OP_POP_XC, MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey,
-    MplsEntry, NH_F_GTP, NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
-    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED,
-    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2,
-    PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN,
-    ReplBranch, ReplSeg, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M,
-    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2,
-    SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
-    SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
-    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD,
-    SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT,
-    STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_DROP_NONDF,
-    STAT_L2_DROP_SPH, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
+    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, ES_DF_F_NON_DF, EsDfKey, EsNhgKey,
+    EsNhgMemberKey, FDB_F_ESNHG, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE,
+    FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
+    FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
+    FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD,
+    L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS,
+    MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
+    MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP,
+    NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
+    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
+    PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
+    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
+    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
+    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
+    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
+    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
+    STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_DROP_NONDF, STAT_L2_DROP_SPH,
+    STAT_L2_ES_NHG, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
     STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
     STAT_MPLS_DX2, STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP,
     STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP,
@@ -250,6 +251,15 @@ static PORT_ES: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 /// port whose `PORT_ES` id is set in it (RFC 8365 §8.3.1 local bias).
 #[map]
 static VTEP_ES: HashMap<[u8; 16], u64> = HashMap::with_max_entries(1024, 0);
+/// EVPN multihoming aliasing (RFC 7432 §8.4): per `(segment id, bridge
+/// domain)`, the number of PEs a MAC behind that segment can be sent to,
+/// and the members themselves (`slot` in `0..count`, each a [`ReplTarget`]).
+/// An `FDB_F_ESNHG` entry resolves through here by flow hash; a group
+/// update re-points every MAC on the segment at once (§8.2 mass withdraw).
+#[map]
+static ES_NHG: HashMap<EsNhgKey, u32> = HashMap::with_max_entries(1024, 0);
+#[map]
+static ES_NHG_MEMBER: HashMap<EsNhgMemberKey, ReplTarget> = HashMap::with_max_entries(4096, 0);
 
 // --- L4 ---
 #[map]
@@ -3282,19 +3292,87 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
             }
         }
     };
-    // A VXLAN entry needs the bridge domain's VNI binding; resolve it here so
+    // Resolve the encap target. A MAC behind a multihomed Ethernet Segment
+    // (`FDB_F_ESNHG`, RFC 7432 §8.4 aliasing) is sent to one of the
+    // segment's PEs, picked per flow from the `(segment, bd)` nexthop group
+    // — each member carries its own overlay kind / address / VNI-or-label,
+    // so the entry's own remote fields are unused. An empty group (every PE
+    // withdrew) passes to TC, where the remote entry floods like an unknown
+    // unicast. Otherwise the entry names its remote directly: a VXLAN entry
+    // needs the bridge domain's VNI binding, resolved here so
     // `l2_overlay_encap` takes an already-resolved value and the replication
-    // slot path (whose VNI comes from the slot, not the BD) can share it. An
+    // slot path (whose VNI comes from the slot, not the BD) can share it; an
     // MPLS entry's `aux` is instead the remote PE's EVI service label.
-    let aux = if ent.flags & FDB_F_VXLAN != 0 {
-        match VLAN_VNI.get_ptr(&bd) {
-            Some(v) => unsafe { *v },
-            None => return Ok(xdp_action::XDP_PASS), // BD not VNI-bound
-        }
+    let (addr, nh_id, flags, aux): (&[u8; 16], u32, u32, u32) = if ent.flags & FDB_F_ESNHG != 0 {
+        let Some(m) = es_nhg_member(ent.oif, bd, l2_flow_hash(ctx)) else {
+            return Ok(xdp_action::XDP_PASS);
+        };
+        stat_inc(STAT_L2_ES_NHG);
+        let flags = if m.kind == REPL_KIND_VXLAN {
+            FDB_F_VXLAN
+        } else if m.kind == REPL_KIND_MPLS {
+            FDB_F_MPLS
+        } else {
+            0
+        };
+        (&m.addr, 0, flags, m.vni)
     } else {
-        ent.label
+        let aux = if ent.flags & FDB_F_VXLAN != 0 {
+            match VLAN_VNI.get_ptr(&bd) {
+                Some(v) => unsafe { *v },
+                None => return Ok(xdp_action::XDP_PASS), // BD not VNI-bound
+            }
+        } else {
+            ent.label
+        };
+        (&ent.remote_sid, ent.oif, ent.flags, aux)
     };
-    l2_overlay_encap(ctx, &ent.remote_sid, ent.oif, ent.flags, aux, bum)
+    l2_overlay_encap(ctx, addr, nh_id, flags, aux, bum)
+}
+
+/// The Ethernet Segment nexthop-group member a flow with hash `hash` maps
+/// to (RFC 7432 §8.4 aliasing): `None` when the `(segment, bd)` group is
+/// absent or empty.
+#[inline(always)]
+fn es_nhg_member(es_id: u32, bd: u16, hash: u32) -> Option<&'static ReplTarget> {
+    let count = unsafe { *ES_NHG.get_ptr(&EsNhgKey { es_id, bd, _pad: 0 })? };
+    if count == 0 {
+        return None;
+    }
+    let slot = (hash % count) as u16;
+    ES_NHG_MEMBER
+        .get_ptr(&EsNhgMemberKey { es_id, bd, slot })
+        .map(|p| unsafe { &*p })
+}
+
+/// Per-flow hash of an L2 frame for Ethernet Segment member selection:
+/// both MACs, plus the IPv4/IPv6 addresses when the frame carries IP, so
+/// a station's conversations spread across the segment's PEs while each
+/// conversation stays on one. Scalar reads only (the frame is about to be
+/// grown; nothing here may outlive that).
+#[inline(always)]
+fn l2_flow_hash(ctx: &XdpContext) -> u32 {
+    let mut h: u32 = 0;
+    if let Ok(p) = xdp_ptr::<u32>(ctx, 2) {
+        h ^= unsafe { *p };
+    }
+    if let Ok(p) = xdp_ptr::<u32>(ctx, 8) {
+        h ^= unsafe { *p }.rotate_left(16);
+    }
+    if let Ok(t) = xdp_ptr::<u16>(ctx, ETH_TYPE_OFF) {
+        let (so, d_o) = match u16::from_be(unsafe { *t }) {
+            0x0800 => (IP_SRC_OFF, IP_DST_OFF),
+            0x86dd => (IP6_SRC_OFF + 12, IP6_DST_OFF + 12),
+            _ => return fmix32(h),
+        };
+        if let Ok(p) = xdp_ptr::<u32>(ctx, so) {
+            h ^= unsafe { *p }.rotate_left(8);
+        }
+        if let Ok(p) = xdp_ptr::<u32>(ctx, d_o) {
+            h ^= unsafe { *p }.rotate_left(24);
+        }
+    }
+    fmix32(h)
 }
 
 /// Tunnel an L2 frame toward the remote PE `addr` names, by overlay flavor:
