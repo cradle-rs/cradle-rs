@@ -139,6 +139,10 @@ pub struct EthernetSegmentCfg {
 #[derive(Debug, Deserialize)]
 pub struct EsNhgCfg {
     pub bd: u16,
+    /// RFC 7432 §14.1.1 single-active: only `members[0]` (the Designated
+    /// Forwarder) forwards; the rest are the pre-installed backup path.
+    #[serde(default)]
+    pub single_active: bool,
     #[serde(default)]
     pub members: Vec<EsNhgMemberCfg>,
 }
@@ -759,7 +763,8 @@ impl Config {
                         remote_label: m.label,
                     })
                     .collect();
-                ctl.set_es_nhg(&es.esi, g.bd, &members).await?;
+                ctl.set_es_nhg(&es.esi, g.bd, &members, g.single_active)
+                    .await?;
             }
         }
         for nh in &self.nexthops {

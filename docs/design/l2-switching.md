@@ -225,7 +225,13 @@ and get no split horizon (the ESI label is future work). BDD:
 segment rather than a remote: the XDP encap resolves it through the
 `(segment, domain)` nexthop group (`ES_NHG` count + `ES_NHG_MEMBER`
 slots, `ReplTarget`-shaped members) by inner-flow hash — RFC 7432 §8.4
-aliasing, with one group replace as the §8.2 mass withdraw — and an
+aliasing, with one group replace as the §8.2 mass withdraw. A group whose
+`ES_NHG` value carries `ES_NHG_F_SINGLE_ACTIVE` (count in the low 16 bits)
+is a single-active segment's: slot 0 — the Designated Forwarder, the PE the
+MACs were learned from — forwards alone, never a hash, and the slots behind
+it are the §14.1.1 pre-installed backup path the control plane promotes by
+re-ordering the group when the DF's per-ES A-D is withdrawn (BDD:
+`cradle_evpn_mh_sa_zebra`, the DF's port failing) — and an
 `FDB_F_STATIC` entry is a control-plane local entry (a peer's MAC on a
 segment we share, reached over our own port), exempt from aging and
 `WatchFdb`. BDD: `cradle_evpn_mh_nhg`. Frames destined to the reserved

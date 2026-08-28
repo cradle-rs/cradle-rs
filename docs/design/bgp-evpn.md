@@ -290,9 +290,17 @@ segment. BDD `cradle_evpn_mh_lag`.
 **Single-active** (RFC 7432 §14.1.1): `SetEsRole{single_active}` makes a
 non-DF port a standby — `ES_DF_F_BLOCK` drops known unicast toward it and
 anything the CE sends into it (`l2_drop_sa`), on top of the BUM filter.
-Remote PEs reach the CE through the DF only: zebra forms no aliasing group
-for a segment whose ESI-label EC says single-active. BDD `cradle_evpn_mh_sa`
-(the standby drops both ways; all-active on the same port lets it through).
+Remote PEs reach the CE through the DF only, yet still hold the **backup
+path** (§14.1.1): for a segment whose ESI-label EC says single-active, zebra
+tees the `(ESI, EVI)` group with `single_active` set and the DF — the PE
+that advertised the segment's MACs — in slot 0, the other attached PEs
+behind it; cradle forwards to slot 0 alone. When the DF's segment port
+fails it withholds its per-ES A-D at once while its cradle-learned Type-2s
+linger, and that one group update moves every MAC to the backup before any
+per-MAC route does. BDD `cradle_evpn_mh_sa` (the standby drops both ways;
+all-active on the same port lets it through) and `cradle_evpn_mh_sa_zebra`
+(BGP-driven: the group's primary/backup, and the failover on the DF's port
+loss with the stale route still installed).
 
 ## Configuration walkthrough
 

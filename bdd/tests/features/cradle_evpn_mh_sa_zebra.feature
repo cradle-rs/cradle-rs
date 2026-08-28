@@ -11,8 +11,10 @@ Feature: BGP EVPN single-active multihoming drives the standby port block
   for VNI 100; zebra tees `SetEsRole{df: false, single_active: true}` to
   pe3, whose segment port cradle then blocks both ways (`ES_DF_F_BLOCK`,
   `l2_drop_sa`). The per-ES A-D routes carry a single-active ESI-label EC,
-  so pe1 forms no aliasing group for the segment and sends the CE's MAC
-  to its advertiser — the DF — alone.
+  so pe1's group for the segment is single-active: the DF (the PE that
+  advertised the CE's MAC) in slot 0, forwarded to alone, and pe3 behind
+  it as the pre-installed backup path (RFC 7432 §14.1.1) — the DF's
+  per-ES A-D withdrawal fails the CE's MAC over in one group update.
   ```
         c1 ── pe1[cradle+zebra] ──10.0.12.0/24── pe2[cradle+zebra] ──pe2c── eth0 ┐
    bd 100         │  VTEP 192.0.2.1              VTEP .2 (DF, active)          ce bond0
@@ -79,9 +81,12 @@ Feature: BGP EVPN single-active multihoming drives the standby port block
     Then BGP session in "pe1" to "192.0.2.2" should be "Established"
     And BGP session in "pe1" to "192.0.2.3" should be "Established"
     And BGP session in "pe2" to "192.0.2.3" should be "Established"
-    # The DF (pe2) carries the CE; pe1 aliases nothing under single-active.
+    # The DF (pe2) carries the CE. pe1's group for the segment is
+    # single-active — primary pe2, backup pe3 pre-installed — and known
+    # unicast to the CE rides it (slot 0, never hashed).
     And ping from "c1" to "10.0.0.2" should eventually succeed
-    And the cradle stat "l2_es_nhg" in namespace "pe1" via gRPC as "ctl1" should be zero
+    And show command "show bgp evpn ethernet-segment" in namespace "pe1" should eventually contain "00:00:00:00:00:00:00:00:00:01 bd 100: single-active primary 192.0.2.2, backup 192.0.2.3"
+    And the cradle stat "l2_es_nhg" in namespace "pe1" via gRPC as "ctl1" should be nonzero
     And the cradle stat "l2_drop_sa" in namespace "pe2" via gRPC as "ctl2" should be zero
     # The standby (pe3) blocks inward: flip the CE's active leg to it and
     # its frames are dropped before anything is learned from them.
@@ -91,14 +96,22 @@ Feature: BGP EVPN single-active multihoming drives the standby port block
     And the cradle stat "l2_drop_sa" in namespace "pe3" via gRPC as "ctl3" should be nonzero
     When I execute "ip link set bond0 type bond primary eth0" in namespace "ce"
     Then ping from "ce" to "10.0.0.1" should eventually succeed
-    # Failover: take the DF away. pe3 re-elects itself DF, zebra clears the
-    # block, the CE (now active on pe3's leg) is reachable again.
-    When I stop the zebra-rs tee in namespace "pe2"
-    And I wait 3 seconds
-    And I execute "ip link set bond0 type bond primary eth1" in namespace "ce"
+    # Failover: the DF's segment port fails. pe2 withholds its ES routes
+    # (Type-4, per-ES A-D) at once, but its Type-2 for the CE's MAC stays —
+    # cradle-learned, nothing flushes it — so without the backup path pe1
+    # would keep sending the CE's traffic to a dead port until that route
+    # aged out. Instead pe1's group drops pe2 and pe3 becomes the primary in
+    # that one update; pe3 re-elects itself DF and unblocks; the CE
+    # (active-backup, no link monitor) is flipped by hand.
+    When I execute "ip link set pe2c down" in namespace "pe2"
+    Then show command "show bgp evpn ethernet-segment" in namespace "pe1" should eventually contain "bd 100: single-active primary 192.0.2.3"
+    # The stale route is still there — pe3 has not learned the CE yet.
+    And show command "show bgp evpn" in namespace "pe1" should contain "[2]:[0]:[48]:[02:00:00:00:ce:02]"
+    When I execute "ip link set bond0 type bond primary eth1" in namespace "ce"
     And I execute "ip neigh flush dev bond0" in namespace "ce"
     And I execute "ip neigh flush dev eth0" in namespace "c1"
-    Then ping from "ce" to "10.0.0.1" should eventually succeed
+    Then ping from "c1" to "10.0.0.2" should eventually succeed
+    And ping from "ce" to "10.0.0.1" should eventually succeed
 
   Scenario: Teardown topology
     Given the test topology exists

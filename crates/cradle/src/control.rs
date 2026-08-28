@@ -170,8 +170,10 @@ struct EsState {
     /// The peers whose `VTEP_ES` bitmap currently carries this segment's bit.
     programmed_peers: Vec<IpAddr>,
     /// Per bridge domain, the PEs a MAC behind this segment may be sent to
-    /// (the aliasing nexthop group, RFC 7432 §8.4).
-    nhg: std::collections::BTreeMap<u16, Vec<EsMember>>,
+    /// (the aliasing nexthop group, RFC 7432 §8.4), with whether the
+    /// segment is single-active (§14.1.1): then the first member is the
+    /// primary and the rest the pre-installed backup path.
+    nhg: std::collections::BTreeMap<u16, (bool, Vec<EsMember>)>,
     /// The bridge domains whose `ES_NHG` group this segment currently owns.
     programmed_nhg: Vec<u16>,
 }
@@ -821,7 +823,13 @@ impl Control {
     /// that bridge domain, each as `(remote_sid | remote_vtep | remote_pe,
     /// remote_label)`. Empty = no group (every PE withdrew — §8.2 mass
     /// withdraw leaves the segment's MACs to flood like unknown unicast).
-    pub async fn set_es_nhg(&self, esi: &str, bd: u16, members: &[pb::EsNhgMember]) -> Result<()> {
+    pub async fn set_es_nhg(
+        &self,
+        esi: &str,
+        bd: u16,
+        members: &[pb::EsNhgMember],
+        single_active: bool,
+    ) -> Result<()> {
         let mut parsed = Vec::with_capacity(members.len());
         for m in members {
             let set = [
@@ -864,7 +872,7 @@ impl Control {
         if parsed.is_empty() {
             st.nhg.remove(&bd);
         } else {
-            st.nhg.insert(bd, parsed);
+            st.nhg.insert(bd, (single_active, parsed));
         }
         self.es_render(&mut tbl, esi).await
     }
@@ -929,8 +937,8 @@ impl Control {
         let mut dp = self.dp.lock().await;
         // Aliasing groups: a VXLAN member tunnels with the bridge domain's
         // VNI, resolved now (the SetVni binding must precede the group).
-        let mut groups: Vec<(u16, Vec<ReplTarget>)> = Vec::with_capacity(st.nhg.len());
-        for (&bd, members) in &st.nhg {
+        let mut groups: Vec<(u16, bool, Vec<ReplTarget>)> = Vec::with_capacity(st.nhg.len());
+        for (&bd, (single_active, members)) in &st.nhg {
             let mut targets = Vec::with_capacity(members.len());
             for m in members {
                 targets.push(match *m {
@@ -953,17 +961,17 @@ impl Control {
                     },
                 });
             }
-            groups.push((bd, targets));
+            groups.push((bd, *single_active, targets));
         }
         for bd in st.programmed_nhg.drain(..) {
             if !st.nhg.contains_key(&bd) {
-                dp.es_nhg_set(st.id as u32, bd, &[])?;
+                dp.es_nhg_set(st.id as u32, bd, &[], false)?;
             }
         }
-        for (bd, targets) in &groups {
-            dp.es_nhg_set(st.id as u32, *bd, targets)?;
+        for (bd, single_active, targets) in &groups {
+            dp.es_nhg_set(st.id as u32, *bd, targets, *single_active)?;
         }
-        st.programmed_nhg = groups.iter().map(|(bd, _)| *bd).collect();
+        st.programmed_nhg = groups.iter().map(|(bd, _, _)| *bd).collect();
         for (ifindex, bd) in st.programmed.drain(..) {
             dp.es_df_del(ifindex, bd);
         }
@@ -2894,7 +2902,7 @@ impl Cradle for GrpcService {
     async fn set_es_nhg(&self, req: Request<pb::EsNhg>) -> Result<Response<pb::Empty>, Status> {
         let g = req.into_inner();
         self.control
-            .set_es_nhg(&g.esi, g.bd as u16, &g.members)
+            .set_es_nhg(&g.esi, g.bd as u16, &g.members, g.single_active)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
