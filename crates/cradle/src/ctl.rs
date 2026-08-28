@@ -121,6 +121,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         .set_es_nhg(pb::EsNhg {
                             esi: es.esi.clone(),
                             bd: g.bd as u32,
+                            single_active: g.single_active,
                             members: g
                                 .members
                                 .iter()

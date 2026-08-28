@@ -111,6 +111,22 @@ A PE that is itself on the segment reaches such a MAC over its own port:
 `{ "mac": …, "bd": 100, "port": "pe3c" }` installs a static local entry
 (`AddFdbLocal`), which is never aged or reported as a learn.
 
+A **single-active** segment gets the same group with `"single_active":
+true`, and then the order of the members is the point: the first is the
+Designated Forwarder — the one PE that learned the MACs — and every frame
+goes to it alone, never hashed; the members behind it are the backup path,
+already installed. When the DF loses the segment, the control plane sends
+the group again without it (zebra-rs does this the moment the DF's per-ES
+A-D route is withdrawn, before any per-MAC route moves), and the next
+member takes over every MAC in that one update:
+
+```json
+{ "esi": "00:00:00:00:00:00:00:00:00:01",
+  "nhg": [ { "bd": 100, "single_active": true,
+             "members": [ { "remote_vtep": "192.0.2.2" },
+                          { "remote_vtep": "192.0.2.3" } ] } ] }
+```
+
 ## Mixing L2 and L3
 
 A single cradle instance can carry both routed and bridged ports at once: mark

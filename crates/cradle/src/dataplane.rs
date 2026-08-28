@@ -969,9 +969,15 @@ impl Dataplane {
     /// `members` (RFC 7432 §8.4 aliasing). Members are written before the
     /// count grows and stale slots removed after it shrinks, so a reader
     /// never indexes a slot the count does not cover. Empty = no group.
-    pub fn es_nhg_set(&mut self, es_id: u32, bd: u16, members: &[ReplTarget]) -> Result<()> {
+    pub fn es_nhg_set(
+        &mut self,
+        es_id: u32,
+        bd: u16,
+        members: &[ReplTarget],
+        single_active: bool,
+    ) -> Result<()> {
         let key = EsNhgKey { es_id, bd, _pad: 0 };
-        let old = self.es_nhg.get(&key, 0).unwrap_or(0);
+        let old = self.es_nhg.get(&key, 0).unwrap_or(0) & cradle_common::ES_NHG_COUNT_MASK;
         let n = members.len().min(u16::MAX as usize) as u32;
         for (slot, m) in members.iter().enumerate().take(n as usize) {
             self.es_nhg_member.insert(
@@ -987,7 +993,13 @@ impl Dataplane {
         if n == 0 {
             let _ = self.es_nhg.remove(&key);
         } else {
-            self.es_nhg.insert(key, n, 0)?;
+            // Count plus the single-active flag (slot 0 only, no hash).
+            let flag = if single_active {
+                cradle_common::ES_NHG_F_SINGLE_ACTIVE
+            } else {
+                0
+            };
+            self.es_nhg.insert(key, n | flag, 0)?;
         }
         for slot in n..old {
             let _ = self.es_nhg_member.remove(&EsNhgMemberKey {

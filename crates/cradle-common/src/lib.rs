@@ -803,6 +803,16 @@ pub struct EsNhgMemberKey {
     pub slot: u16,
 }
 
+/// `ES_NHG` value layout: the member count in the low 16 bits
+/// ([`ES_NHG_COUNT_MASK`]) and [`ES_NHG_F_SINGLE_ACTIVE`] above it. A
+/// single-active group (RFC 7432 §14.1.1) forwards to slot 0 alone — the
+/// Designated Forwarder, the PE the segment's MACs were learned from —
+/// never a per-flow hash; the other slots are the pre-installed backup
+/// path, promoted by the control plane re-ordering the group when the
+/// primary's per-ES A-D is withdrawn.
+pub const ES_NHG_COUNT_MASK: u32 = 0xffff;
+pub const ES_NHG_F_SINGLE_ACTIVE: u32 = 1 << 16;
+
 /// Membership of an L2 (VLAN/bridge) domain — enumerates the ports a BUM or
 /// unknown-unicast frame is flooded to. Keyed by `(vlan, slot)` where `slot` is
 /// a dense index `0..count` (the count is held in a separate per-VLAN map).
