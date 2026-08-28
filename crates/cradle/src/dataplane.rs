@@ -200,6 +200,8 @@ pub struct Dataplane {
     /// segment bit is set for the frame's source).
     port_es: HashMap<MapData, u32, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
+    /// LAG member ifindex → its bond (the cradle port), for the XDP stage.
+    port_master: HashMap<MapData, u32, u32>,
     /// EVPN multihoming aliasing: the `(segment, bridge domain)` nexthop
     /// group's member count and members (`FDB_F_ESNHG` entries resolve
     /// through them by flow hash).
@@ -331,6 +333,10 @@ impl Dataplane {
             es_df: HashMap::try_from(bpf.take_map("ES_DF").context("map ES_DF missing")?)?,
             port_es: HashMap::try_from(bpf.take_map("PORT_ES").context("map PORT_ES missing")?)?,
             vtep_es: HashMap::try_from(bpf.take_map("VTEP_ES").context("map VTEP_ES missing")?)?,
+            port_master: HashMap::try_from(
+                bpf.take_map("PORT_MASTER")
+                    .context("map PORT_MASTER missing")?,
+            )?,
             es_nhg: HashMap::try_from(bpf.take_map("ES_NHG").context("map ES_NHG missing")?)?,
             es_nhg_member: HashMap::try_from(
                 bpf.take_map("ES_NHG_MEMBER")
@@ -944,6 +950,19 @@ impl Dataplane {
     /// The port is no longer on a multihomed segment.
     pub fn port_es_del(&mut self, ifindex: u32) {
         let _ = self.port_es.remove(&ifindex);
+    }
+
+    /// Alias LAG member `member` to its bond `port` for the XDP stage (a
+    /// native XDP program attached to a bond runs on the members and sees
+    /// their ifindex).
+    pub fn port_master_set(&mut self, member: u32, port: u32) -> Result<()> {
+        self.port_master.insert(member, port, 0)?;
+        Ok(())
+    }
+
+    /// `member` left its bond (or the bond is no longer a port).
+    pub fn port_master_del(&mut self, member: u32) {
+        let _ = self.port_master.remove(&member);
     }
 
     /// Replace the Ethernet Segment nexthop group for `(es_id, bd)` with

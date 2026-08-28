@@ -275,9 +275,17 @@ half of §8.4 — a MAC a peer advertised on a segment *this* node is also
 on is reached over the local segment port — is `AddFdbLocal` (`FDB_F_STATIC`:
 not aged, not reported by `WatchFdb`). Static config:
 `ethernet_segments[].nhg`, `fdb[].esi`, `fdb[].port`. BDD
-`cradle_evpn_mh_nhg` (a bonded CE; the MAC follows the group). Next: the
-zebra-rs receive-side consumer (per-ES + per-EVI A-D → `SetEsNhg`, own-ES
-Type-2 → `AddFdbLocal`), then LAG-as-port and single-active.
+`cradle_evpn_mh_nhg` (a bonded CE; the MAC follows the group); zebra-rs
+derives the groups from the per-ES + per-EVI A-D routes (`SetEsNhg`) and
+installs a peer's MAC on one of its own segments over its port
+(`AddFdbLocal`) — `cradle_evpn_mh_df_zebra` proves aliasing and failover
+BGP-driven.
+
+**LAG as the segment port**: the PE's leg of the CE's LACP LAG is a kernel
+bond, and cradle attaches to it as the port (`PORT_MASTER` member aliasing
+for the XDP stage, reserved-MAC punt for LACPDUs — see l2-switching.md
+§LAG ports). MC-LAG needs the same `ad_actor_system` on every PE of the
+segment. BDD `cradle_evpn_mh_lag`. Remaining: single-active.
 
 ## Configuration walkthrough
 
