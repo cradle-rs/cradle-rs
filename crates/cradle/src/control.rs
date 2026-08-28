@@ -34,7 +34,7 @@ use crate::{
     util,
 };
 use cradle_common::{
-    ES_DF_F_NON_DF, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3,
+    ES_DF_F_BLOCK, ES_DF_F_NON_DF, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3,
     MPLS_OP_POP_XC, MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, NH_F_V6, NextHop, PORT_F_L2, PORT_F_L3,
     REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, ReplBranch, ReplTarget,
     SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
@@ -126,6 +126,7 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "l2_drop_nondf",
     "l2_drop_sph",
     "l2_es_nhg",
+    "l2_drop_sa",
 ];
 
 /// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
@@ -155,9 +156,11 @@ struct EsState {
     /// Segment id 0..64 — the `PORT_ES` value and the `VTEP_ES` bit.
     id: u8,
     ports: Vec<String>,
-    /// Bridge domain → DF? A domain with no recorded role forwards (no row):
-    /// the control plane decides when election is pending.
-    roles: std::collections::BTreeMap<u16, bool>,
+    /// Bridge domain → `(DF?, single-active?)`. A domain with no recorded
+    /// role forwards (no row): the control plane decides when election is
+    /// pending. A non-DF in single-active is a standby that blocks all
+    /// traffic (`ES_DF_F_BLOCK`), not only BUM.
+    roles: std::collections::BTreeMap<u16, (bool, bool)>,
     /// The other PEs on this segment (their VTEP / overlay source).
     peers: std::collections::BTreeSet<IpAddr>,
     /// The `ES_DF` rows this segment currently owns.
@@ -779,11 +782,20 @@ impl Control {
     /// Record this PE's Designated Forwarder role for segment `esi` in bridge
     /// domain `bd` (RFC 7432 §8.5): `df == false` withholds BUM from the
     /// segment's ports in that domain, `true` (or no role) lets it through.
-    /// A role may be set before the segment's ports (they render when the
-    /// ports arrive).
-    pub async fn set_es_role(&self, esi: &str, bd: u16, df: bool) -> Result<()> {
+    /// Under `single_active` (§14.1.1) a non-DF port is a standby that
+    /// passes nothing in either direction. A role may be set before the
+    /// segment's ports (they render when the ports arrive).
+    pub async fn set_es_role(
+        &self,
+        esi: &str,
+        bd: u16,
+        df: bool,
+        single_active: bool,
+    ) -> Result<()> {
         let mut tbl = self.es.lock().await;
-        es_entry(&mut tbl, esi)?.roles.insert(bd, df);
+        es_entry(&mut tbl, esi)?
+            .roles
+            .insert(bd, (df, single_active));
         self.es_render(&mut tbl, esi).await
     }
 
@@ -902,9 +914,14 @@ impl Control {
         }
         let mut rows = Vec::new();
         for &ifindex in &ifindexes {
-            for (&bd, &df) in &st.roles {
+            for (&bd, &(df, single_active)) in &st.roles {
                 if !df {
-                    rows.push((ifindex, bd));
+                    let flags = if single_active {
+                        ES_DF_F_NON_DF | ES_DF_F_BLOCK
+                    } else {
+                        ES_DF_F_NON_DF
+                    };
+                    rows.push((ifindex, bd, flags));
                 }
             }
         }
@@ -962,8 +979,8 @@ impl Control {
             }
             dp.vtep_es_set(peer, bits)?;
         }
-        for &(ifindex, bd) in &rows {
-            dp.es_df_set(ifindex, bd, ES_DF_F_NON_DF)?;
+        for &(ifindex, bd, flags) in &rows {
+            dp.es_df_set(ifindex, bd, flags)?;
         }
         for &ifindex in &ifindexes {
             dp.port_es_set(ifindex, st.id as u32)?;
@@ -973,7 +990,7 @@ impl Control {
             *bits |= bit;
             dp.vtep_es_set(peer, *bits)?;
         }
-        st.programmed = rows;
+        st.programmed = rows.iter().map(|&(ifindex, bd, _)| (ifindex, bd)).collect();
         st.programmed_ports = ifindexes;
         st.programmed_peers = st.peers.iter().copied().collect();
         Ok(())
@@ -2846,7 +2863,7 @@ impl Cradle for GrpcService {
     async fn set_es_role(&self, req: Request<pb::EsRole>) -> Result<Response<pb::Empty>, Status> {
         let r = req.into_inner();
         self.control
-            .set_es_role(&r.esi, r.bd as u16, r.df)
+            .set_es_role(&r.esi, r.bd as u16, r.df, r.single_active)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

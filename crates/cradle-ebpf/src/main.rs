@@ -41,12 +41,12 @@ use aya_ebpf::{
 use cradle_common::{
     AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
     CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, DPC_L3_ONLY,
-    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, ES_DF_F_NON_DF, EsDfKey, EsNhgKey,
-    EsNhgMemberKey, FDB_F_ESNHG, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE,
-    FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS,
-    FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry,
-    FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD,
-    L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS,
+    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, ES_DF_F_BLOCK, ES_DF_F_NON_DF,
+    EsDfKey, EsNhgKey, EsNhgMemberKey, FDB_F_ESNHG, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_VXLAN,
+    FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID, FLOW_AUDITED,
+    FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED, FdbEntry,
+    FdbKey, FibEntry, FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr, GtpPdrKey,
+    IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MAX_SEGS,
     MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
     MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP,
     NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
@@ -59,18 +59,18 @@ use cradle_common::{
     SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
     SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
     STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_DROP_NONDF, STAT_L2_DROP_SPH,
-    STAT_L2_ES_NHG, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
-    STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
-    STAT_MPLS_DX2, STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP,
-    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP,
-    STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END,
-    STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
-    STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD,
-    STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP,
-    STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
-    Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key,
-    VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
+    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_DROP_NONDF, STAT_L2_DROP_SA,
+    STAT_L2_DROP_SPH, STAT_L2_ES_NHG, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL,
+    STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ,
+    STAT_MAX, STAT_MPLS_DX2, STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP,
+    STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT,
+    STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP,
+    STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM,
+    STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE,
+    STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_DX2,
+    STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD, SVC_F_AFFINITY, ServiceInfo, ServiceKey,
+    ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key,
+    VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
     XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack,
     mpls_lse, mpls_lse_unpack,
 };
@@ -840,6 +840,11 @@ fn l2_switch(
     }
 
     if !from_overlay {
+        // A standby single-active segment port passes nothing inward.
+        if es_blocked(iif, vlan) {
+            stat_inc(STAT_L2_DROP_SA);
+            return Ok(TC_ACT_SHOT as i32);
+        }
         let src: [u8; 6] = ctx.load(ETH_SRC_OFF).map_err(|_| ())?;
         let _ = FDB.insert(
             &FdbKey { mac: src, vlan },
@@ -870,6 +875,11 @@ fn l2_switch(
             let oif = unsafe { (*e).oif };
             if oif == iif {
                 Ok(TC_ACT_SHOT as i32) // hairpin to the same port
+            } else if es_blocked(oif, vlan) {
+                // Single-active: known unicast toward a standby segment port
+                // is dropped too (the DF on another PE delivers it).
+                stat_inc(STAT_L2_DROP_SA);
+                Ok(TC_ACT_SHOT as i32)
             } else {
                 stat_inc(STAT_L2_FORWARD);
                 Ok(unsafe { bpf_redirect(oif, 0) } as i32)
@@ -921,15 +931,29 @@ fn vtep6_es_bits(p: *const [u8; 16]) -> u64 {
 /// outside any segment have no `ES_DF` row and always forward.
 #[inline(always)]
 fn es_non_df(oif: u32, bd: u16) -> bool {
-    let flags = match ES_DF.get_ptr(&EsDfKey {
-        ifindex: oif,
+    es_df_flags(oif, bd) & ES_DF_F_NON_DF != 0
+}
+
+/// The `ES_DF_F_*` role of port `ifindex` in bridge domain `bd` (0 = not a
+/// segment port, or the DF).
+#[inline(always)]
+fn es_df_flags(ifindex: u32, bd: u16) -> u32 {
+    match ES_DF.get_ptr(&EsDfKey {
+        ifindex,
         bd,
         _pad: 0,
     }) {
         Some(f) => unsafe { *f },
         None => 0,
-    };
-    flags & ES_DF_F_NON_DF != 0
+    }
+}
+
+/// EVPN multihoming single-active (RFC 7432 §14.1.1): is `ifindex` a
+/// standby segment port in `bd` — one that must pass nothing in either
+/// direction while another PE is the Designated Forwarder?
+#[inline(always)]
+fn es_blocked(ifindex: u32, bd: u16) -> bool {
+    es_df_flags(ifindex, bd) & ES_DF_F_BLOCK != 0
 }
 
 /// EVPN multihoming split horizon (RFC 8365 §8.3.1 local bias): is `oif`
@@ -3287,9 +3311,15 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
     if is_reserved_l2(unsafe { &*xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? }) {
         return Ok(xdp_action::XDP_PASS);
     }
+    let iif = xdp_iif(ctx);
+    // A standby single-active segment port passes nothing inward (RFC 7432
+    // §14.1.1) — dropped here so nothing is learned or tunneled from it.
+    if es_blocked(iif, bd) {
+        stat_inc(STAT_L2_DROP_SA);
+        return Ok(xdp_action::XDP_DROP);
+    }
     let src = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? };
     if src[0] & 0x01 == 0 {
-        let iif = xdp_iif(ctx);
         let _ = FDB.insert(
             &FdbKey { mac: src, vlan: bd },
             &FdbEntry {

@@ -57,6 +57,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                             esi: es.esi.clone(),
                             bd: r.bd as u32,
                             df: r.df,
+                            single_active: r.single_active,
                         })
                         .await?;
                 }
@@ -87,6 +88,31 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         rmac: v.rmac.clone().unwrap_or_default(),
                     })
                     .await?;
+            }
+            // Static overlay / segment / local FDB entries (the in-process
+            // `apply_control` twin; the datapath owns learned ones).
+            for f in &cfg.fdb {
+                let mut msg = pb::FdbRemote {
+                    mac: f.mac.clone(),
+                    bd: f.bd as u32,
+                    remote_sid: f.remote_sid.clone().unwrap_or_default(),
+                    nexthop_id: f.nexthop,
+                    remote_vtep: f.remote_vtep.clone().unwrap_or_default(),
+                    remote_pe: f.remote_pe.clone().unwrap_or_default(),
+                    remote_label: f.label,
+                    esi: f.esi.clone().unwrap_or_default(),
+                };
+                if let Some(port) = &f.port {
+                    client
+                        .add_fdb_local(pb::FdbLocal {
+                            mac: std::mem::take(&mut msg.mac),
+                            bd: f.bd as u32,
+                            port: port.clone(),
+                        })
+                        .await?;
+                    continue;
+                }
+                client.add_fdb_remote(msg).await?;
             }
             // Aliasing groups after the VNI bindings they resolve against.
             for es in &cfg.ethernet_segments {

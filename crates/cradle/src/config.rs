@@ -161,6 +161,10 @@ pub struct EsNhgMemberCfg {
 pub struct EsRoleCfg {
     pub bd: u16,
     pub df: bool,
+    /// Single-active redundancy (RFC 7432 §14.1.1): a non-DF port is a
+    /// standby that passes nothing in either direction, not only BUM.
+    #[serde(default)]
+    pub single_active: bool,
 }
 
 /// A BUM ingress-replication slot: one remote PE in a bridge domain's flood
@@ -707,7 +711,8 @@ impl Config {
         for es in &self.ethernet_segments {
             ctl.set_ethernet_segment(&es.esi, &es.ports).await?;
             for r in &es.roles {
-                ctl.set_es_role(&es.esi, r.bd, r.df).await?;
+                ctl.set_es_role(&es.esi, r.bd, r.df, r.single_active)
+                    .await?;
             }
             ctl.set_es_peers(&es.esi, &es.peers).await?;
         }

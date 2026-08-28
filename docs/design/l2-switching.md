@@ -203,8 +203,14 @@ domain)`, holds a row for each Ethernet Segment port whose Designated
 Forwarder in that domain is another PE (RFC 7432 §8.5). The control plane
 renders the rows from `SetEthernetSegment` (the segment's local ports) ×
 `SetEsRole` (the per-domain election result); a withheld copy counts as
-`l2_drop_nondf`. Known unicast never consults `ES_DF` (all-active
-multihoming). BDD: `cradle_evpn_mh_df`. The third exclusion is the
+`l2_drop_nondf`. Known unicast never consults `ES_DF` under all-active
+multihoming. BDD: `cradle_evpn_mh_df`. Under **single-active** (RFC 7432
+§14.1.1, `SetEsRole{single_active}`) a non-DF row also carries
+`ES_DF_F_BLOCK`: the port is a standby that passes nothing in either
+direction — `l2_switch` drops on its ingress and before a unicast redirect
+to it, and the XDP stage drops before learning or tunneling from it
+(`l2_drop_sa`). Remote PEs send to the DF alone (no aliasing group for a
+single-active segment). BDD: `cradle_evpn_mh_sa`. The third exclusion is the
 **multihoming split horizon** (RFC 8365 §8.3.1 local bias): at decap the
 XDP stage resolves the overlay *source* (VXLAN source VTEP, v4-mapped, or
 the SRv6 outer source) through `VTEP_ES` into a bitmap of the segments that
