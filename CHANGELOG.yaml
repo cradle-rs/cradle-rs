@@ -11,6 +11,84 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.0
+  date: 2026-08-28T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN multihoming
+        * RFC 7432 multihoming lands in the cradle dataplane: a CE
+          dual-homed to two PEs over one Ethernet Segment, with the
+          non-DF filter, split horizon, aliasing, mass withdraw, LAG
+          ports and single-active redundancy — every piece the kernel
+          bridge has no primitive for, driven by zebra-rs over gRPC
+          and proven end to end in BDD
+
+    - note: |
+        ### Designated Forwarder and split horizon
+        * Non-DF filter (RFC 7432 §8.5): the `ES_DF` gate in the flood
+          loop — a segment port whose DF in the bridge domain is another
+          PE delivers no BUM to the CE; `l2_drop_nondf` counts it
+        * Split-horizon / local-bias filter (RFC 8365 §8.3.1): the VXLAN
+          v4/v6 and SRv6 DT2U decaps resolve the outer source VTEP to
+          the bitmap of segments it shares with us (`VTEP_ES`), and the
+          flood skips the segment's local ports (`PORT_ES`,
+          `l2_drop_sph`) so a peer's copy never echoes back to the CE
+
+    - note: |
+        ### Aliasing and mass withdraw
+        * Ethernet Segment nexthop groups (RFC 7432 §8.4, §8.2): an FDB
+          entry may name a segment instead of a VTEP (`FDB_F_ESNHG`);
+          known unicast is spread over the group's members by
+          `l2_flow_hash`, and a PE leaving the segment moves every MAC
+          behind it with one group update, no per-MAC churn
+        * Control-plane local entries (`FDB_F_STATIC`) — a peer's MAC on
+          a shared segment reached over our own port, never aged or
+          reported
+
+    - note: |
+        ### LAG ports
+        * A kernel bond (802.3ad / MC-LAG to the CE) is a port: `PORT_MASTER`
+          maps bond members to their bond, so every XDP-stage port
+          decision on a native-XDP member resolves to the bond that TC
+          sees; `SetPort` reads the membership from sysfs
+        * Reserved group addresses `01:80:c2:00:00:0x` (LACP, STP, LLDP)
+          are punted to the host — never learned, tunneled or flooded
+
+    - note: |
+        ### Single-active redundancy
+        * RFC 7432 §14.1.1: a single-active non-DF's segment port is a
+          standby that blocks both directions (`ES_DF_F_BLOCK`,
+          `l2_drop_sa`), stronger than the all-active BUM-only filter
+        * Single-active nexthop groups are ordered, not hashed: slot 0
+          (the DF) forwards and the rest is a pre-installed backup path;
+          zebra-rs promotes the backup the moment the DF's per-ES A-D is
+          withdrawn, before any per-MAC route moves
+
+    - note: |
+        ### Control plane and configuration
+        * New gRPC verbs: `SetEthernetSegment` / `DelEthernetSegment`,
+          `SetEsRole {df, single_active}`, `SetEsPeers`, `SetEsNhg`,
+          `AddFdbLocal`; `FdbRemote` carries the ESI
+        * Static config `ethernet_segments[]` (ports, peers, roles, nhg)
+          and `fdb[]` (esi, port) for serve and `ctl apply`; `ctl apply`
+          gains the `fdb` section
+        * `CradleXdpMeta` grows to 16 bytes to carry the shared-segment
+          bitmap across the decap
+
+    - note: |
+        ### BDD / test infrastructure
+        * Static-config features for every slice — `cradle_evpn_mh_df`,
+          `_sph`, `_nhg`, `_lag`, `_sa` — each with a negative control
+          that makes the duplicates, echoes or drops appear
+        * BGP-driven twins `cradle_evpn_mh_df_zebra` and
+          `cradle_evpn_mh_sa_zebra`: Type-4 DF election, split horizon
+          via the peers tee, aliasing over the {pe2, pe3} group, real
+          LACP through cradle, and failover when the DF's zebra dies
+        * CI: pin bpf-linker to 0.10.3 (0.11 defaults to system LLVM)
+
 - semver: 1.0.0
   date: 2026-08-01T18:00:00+09:00
   distribution: unstable
