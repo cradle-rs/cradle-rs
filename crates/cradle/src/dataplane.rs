@@ -193,6 +193,12 @@ pub struct Dataplane {
     /// EVPN multihoming DF roles: `(port, bridge domain)` → `ES_DF_F_*`; a
     /// non-DF row withholds BUM from that port (`flood()`).
     es_df: HashMap<MapData, EsDfKey, u32>,
+    /// EVPN multihoming split horizon: access port → segment id, and peer
+    /// PE address (v4-mapped or IPv6) → bitmap of the segments it shares
+    /// with us (`flood()` drops an overlay copy toward a port whose
+    /// segment bit is set for the frame's source).
+    port_es: HashMap<MapData, u32, u32>,
+    vtep_es: HashMap<MapData, In6Key, u64>,
     /// Links whose carrier/admin state is down — the datapath fails over to
     /// nexthop `backup_id`s while an ifindex is present here.
     link_down: HashMap<MapData, u32, u8>,
@@ -317,6 +323,8 @@ impl Dataplane {
             )?,
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
             es_df: HashMap::try_from(bpf.take_map("ES_DF").context("map ES_DF missing")?)?,
+            port_es: HashMap::try_from(bpf.take_map("PORT_ES").context("map PORT_ES missing")?)?,
+            vtep_es: HashMap::try_from(bpf.take_map("VTEP_ES").context("map VTEP_ES missing")?)?,
             link_down: HashMap::try_from(
                 bpf.take_map("LINK_DOWN").context("map LINK_DOWN missing")?,
             )?,
@@ -913,6 +921,31 @@ impl Dataplane {
             bd,
             _pad: 0,
         });
+    }
+
+    /// Bind access port `ifindex` to Ethernet Segment `id` (0..64) for the
+    /// split-horizon check.
+    pub fn port_es_set(&mut self, ifindex: u32, id: u32) -> Result<()> {
+        self.port_es.insert(ifindex, id, 0)?;
+        Ok(())
+    }
+
+    /// The port is no longer on a multihomed segment.
+    pub fn port_es_del(&mut self, ifindex: u32) {
+        let _ = self.port_es.remove(&ifindex);
+    }
+
+    /// Set peer PE `addr`'s segment bitmap (`bits == 0` removes the row):
+    /// overlay BUM arriving from `addr` is withheld from every local port
+    /// whose segment bit is set.
+    pub fn vtep_es_set(&mut self, addr: IpAddr, bits: u64) -> Result<()> {
+        let key = In6Key(ip_to_v6_bytes(addr));
+        if bits == 0 {
+            let _ = self.vtep_es.remove(&key);
+        } else {
+            self.vtep_es.insert(key, bits, 0)?;
+        }
+        Ok(())
     }
 
     /// Program a static overlay FDB entry (EVPN over SRv6): the MAC `mac` in

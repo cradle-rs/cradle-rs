@@ -124,22 +124,65 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "vxlan_dx2",
     "mpls_dx2",
     "l2_drop_nondf",
+    "l2_drop_sph",
 ];
 
 /// An Ethernet Segment (RFC 7432 §5) as the datapath sees it: the local
-/// access port(s) of a multihomed CE and, per bridge domain, whether this PE
-/// is the segment's elected Designated Forwarder. Rendered into `ES_DF` as
-/// one `(port, bd)` row per *non-DF* pair — the rows `flood()` consults to
-/// withhold BUM from a port another PE forwards for. A port belongs to at
-/// most one segment (RFC 7432 §5), so rows are owned, not shared.
+/// access port(s) of a multihomed CE, per bridge domain whether this PE is
+/// the segment's elected Designated Forwarder, and the peer PEs attached to
+/// it. Rendered into `ES_DF` (one `(port, bd)` row per *non-DF* pair — the
+/// rows `flood()` consults to withhold BUM from a port another PE forwards
+/// for), `PORT_ES` (port → segment id) and `VTEP_ES` (peer → bitmap of the
+/// segments it shares with us; the split-horizon side). A port belongs to at
+/// most one segment (RFC 7432 §5), so its rows are owned, not shared; a
+/// peer's bitmap is shared across segments and maintained in `EsTable`.
 #[derive(Default)]
 struct EsState {
+    /// Segment id 0..64 — the `PORT_ES` value and the `VTEP_ES` bit.
+    id: u8,
     ports: Vec<String>,
     /// Bridge domain → DF? A domain with no recorded role forwards (no row):
     /// the control plane decides when election is pending.
     roles: std::collections::BTreeMap<u16, bool>,
+    /// The other PEs on this segment (their VTEP / overlay source).
+    peers: std::collections::BTreeSet<IpAddr>,
     /// The `ES_DF` rows this segment currently owns.
     programmed: Vec<(u32, u16)>,
+    /// The `PORT_ES` rows this segment currently owns.
+    programmed_ports: Vec<u32>,
+    /// The peers whose `VTEP_ES` bitmap currently carries this segment's bit.
+    programmed_peers: Vec<IpAddr>,
+}
+
+/// All Ethernet Segments plus the state shared between them: the id
+/// allocator (64 ids — the `VTEP_ES` bitmap width) and each peer PE's
+/// current bitmap.
+#[derive(Default)]
+struct EsTable {
+    segments: std::collections::BTreeMap<String, EsState>,
+    /// Allocated segment ids (bit i = id i in use).
+    ids: u64,
+    /// Peer PE → the bitmap of segments it shares with us (what `VTEP_ES`
+    /// holds); an entry with no bits left is removed from both.
+    vtep_bits: HashMap<IpAddr, u64>,
+}
+
+/// The segment named `esi`, created with a fresh id if unknown.
+fn es_entry<'a>(tbl: &'a mut EsTable, esi: &str) -> Result<&'a mut EsState> {
+    if !tbl.segments.contains_key(esi) {
+        let id = (0..64u8)
+            .find(|i| tbl.ids & (1u64 << i) == 0)
+            .context("too many Ethernet Segments (max 64)")?;
+        tbl.ids |= 1u64 << id;
+        tbl.segments.insert(
+            esi.to_string(),
+            EsState {
+                id,
+                ..Default::default()
+            },
+        );
+    }
+    Ok(tbl.segments.get_mut(esi).expect("just inserted"))
 }
 
 /// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
@@ -271,9 +314,10 @@ pub struct Control {
     /// creates/destroys the pair as segments gain/lose a local branch.
     repl_seg_veths: Arc<Mutex<std::collections::HashMap<Ipv6Addr, ReplSlot>>>,
     /// EVPN multihoming Ethernet Segments by ESI (`SetEthernetSegment` /
-    /// `SetEsRole`), the source of the `ES_DF` non-DF rows. Lock order:
-    /// `es` → `dp` (never taken while `dp` is held).
-    es: Arc<Mutex<std::collections::BTreeMap<String, EsState>>>,
+    /// `SetEsRole` / `SetEsPeers`), the source of the `ES_DF`, `PORT_ES` and
+    /// `VTEP_ES` rows. Lock order: `es` → `dp` (never taken while `dp` is
+    /// held).
+    es: Arc<Mutex<EsTable>>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
     /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
@@ -320,7 +364,7 @@ impl Control {
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             repl_seg_veths: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            es: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            es: Arc::new(Mutex::new(EsTable::default())),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
@@ -663,21 +707,27 @@ impl Control {
     /// are re-rendered onto the new port list; ports must exist (they are
     /// resolved by name, like `set_l2_domain`).
     pub async fn set_ethernet_segment(&self, esi: &str, ports: &[String]) -> Result<()> {
-        let mut es = self.es.lock().await;
-        let st = es.entry(esi.to_string()).or_default();
-        st.ports = ports.to_vec();
-        self.es_render(st).await
+        let mut tbl = self.es.lock().await;
+        es_entry(&mut tbl, esi)?.ports = ports.to_vec();
+        self.es_render(&mut tbl, esi).await
     }
 
     /// Forget Ethernet Segment `esi`: its ports forward BUM unconditionally
-    /// again. Idempotent.
+    /// again, its peers lose the segment's split-horizon bit, and its id is
+    /// freed. Idempotent.
     pub async fn del_ethernet_segment(&self, esi: &str) -> Result<()> {
-        let mut es = self.es.lock().await;
-        if let Some(mut st) = es.remove(esi) {
+        let mut tbl = self.es.lock().await;
+        let Some(id) = tbl.segments.get_mut(esi).map(|st| {
             st.ports.clear();
             st.roles.clear();
-            self.es_render(&mut st).await?;
-        }
+            st.peers.clear();
+            st.id
+        }) else {
+            return Ok(());
+        };
+        self.es_render(&mut tbl, esi).await?;
+        tbl.segments.remove(esi);
+        tbl.ids &= !(1u64 << id);
         Ok(())
     }
 
@@ -687,33 +737,84 @@ impl Control {
     /// A role may be set before the segment's ports (they render when the
     /// ports arrive).
     pub async fn set_es_role(&self, esi: &str, bd: u16, df: bool) -> Result<()> {
-        let mut es = self.es.lock().await;
-        let st = es.entry(esi.to_string()).or_default();
-        st.roles.insert(bd, df);
-        self.es_render(st).await
+        let mut tbl = self.es.lock().await;
+        es_entry(&mut tbl, esi)?.roles.insert(bd, df);
+        self.es_render(&mut tbl, esi).await
     }
 
-    /// Re-derive a segment's `ES_DF` rows from its ports × non-DF roles and
-    /// swap them in for the rows it owned before. Resolves every port name
-    /// first so a bad name leaves the datapath untouched.
-    async fn es_render(&self, st: &mut EsState) -> Result<()> {
-        let mut rows = Vec::new();
+    /// Record the other PEs attached to segment `esi` (their VTEP / overlay
+    /// source addresses; replace semantics). Overlay BUM arriving from one
+    /// of them is withheld from the segment's ports — the split horizon /
+    /// local bias of RFC 8365 §8.3.1.
+    pub async fn set_es_peers(&self, esi: &str, vteps: &[String]) -> Result<()> {
+        let peers = vteps
+            .iter()
+            .map(|v| {
+                v.parse::<IpAddr>()
+                    .with_context(|| format!("bad Ethernet Segment peer address {v:?}"))
+            })
+            .collect::<Result<std::collections::BTreeSet<_>>>()?;
+        let mut tbl = self.es.lock().await;
+        es_entry(&mut tbl, esi)?.peers = peers;
+        self.es_render(&mut tbl, esi).await
+    }
+
+    /// Re-derive segment `esi`'s datapath rows — `ES_DF` from ports × non-DF
+    /// roles, `PORT_ES` from its ports, its bit in each peer's `VTEP_ES`
+    /// bitmap — and swap them in for the rows it owned before. Resolves
+    /// every port name first so a bad name leaves the datapath untouched.
+    async fn es_render(&self, tbl: &mut EsTable, esi: &str) -> Result<()> {
+        let EsTable {
+            segments,
+            vtep_bits,
+            ..
+        } = tbl;
+        let Some(st) = segments.get_mut(esi) else {
+            return Ok(());
+        };
+        let mut ifindexes = Vec::with_capacity(st.ports.len());
         for p in &st.ports {
-            let ifindex = util::ifindex_of(p)?;
+            ifindexes.push(util::ifindex_of(p)?);
+        }
+        let mut rows = Vec::new();
+        for &ifindex in &ifindexes {
             for (&bd, &df) in &st.roles {
                 if !df {
                     rows.push((ifindex, bd));
                 }
             }
         }
+        let bit = 1u64 << st.id;
         let mut dp = self.dp.lock().await;
         for (ifindex, bd) in st.programmed.drain(..) {
             dp.es_df_del(ifindex, bd);
         }
+        for ifindex in st.programmed_ports.drain(..) {
+            dp.port_es_del(ifindex);
+        }
+        for peer in st.programmed_peers.drain(..) {
+            let bits = vtep_bits.entry(peer).or_default();
+            *bits &= !bit;
+            let bits = *bits;
+            if bits == 0 {
+                vtep_bits.remove(&peer);
+            }
+            dp.vtep_es_set(peer, bits)?;
+        }
         for &(ifindex, bd) in &rows {
             dp.es_df_set(ifindex, bd, ES_DF_F_NON_DF)?;
         }
+        for &ifindex in &ifindexes {
+            dp.port_es_set(ifindex, st.id as u32)?;
+        }
+        for &peer in &st.peers {
+            let bits = vtep_bits.entry(peer).or_default();
+            *bits |= bit;
+            dp.vtep_es_set(peer, *bits)?;
+        }
         st.programmed = rows;
+        st.programmed_ports = ifindexes;
+        st.programmed_peers = st.peers.iter().copied().collect();
         Ok(())
     }
 
@@ -2585,6 +2686,15 @@ impl Cradle for GrpcService {
         let r = req.into_inner();
         self.control
             .set_es_role(&r.esi, r.bd as u16, r.df)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_es_peers(&self, req: Request<pb::EsPeers>) -> Result<Response<pb::Empty>, Status> {
+        let p = req.into_inner();
+        self.control
+            .set_es_peers(&p.esi, &p.vteps)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

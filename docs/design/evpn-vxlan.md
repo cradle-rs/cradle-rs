@@ -33,7 +33,7 @@ The roles, by EVPN route type:
 | **Type-2 (MAC/IP)** | L2 unicast (+ ARP/ND suppression) | remote MAC → remote VTEP (VXLAN FDB) | `mac_add` → kernel bridge+VXLAN FDB rows |
 | **Type-3 (IMET)** | BUM | per-VNI ingress-replication slots | `mdb_add` → kernel zero-MAC FDB (append) |
 | **Type-5 (IP prefix)** | L3 over the fabric | route the inner packet | plain **VRF IP route** (`route_ipv4/6_add`) |
-| **Type-4 (ES) / AR** | multihoming, assisted replication | split-horizon, DF election | DF election computed; the non-DF filter is in cradle (`ES_DF`, see bgp-evpn.md §Multihoming), not yet driven from zebra; split-horizon pending |
+| **Type-4 (ES) / AR** | multihoming, assisted replication | split-horizon, DF election | DF election computed and teed; the non-DF filter (`ES_DF`) and the split-horizon / local-bias filter (`VTEP_ES` × `PORT_ES`, see bgp-evpn.md §Multihoming) are in cradle |
 
 Two things the zebra-rs exploration made clear, and this design accounts for:
 

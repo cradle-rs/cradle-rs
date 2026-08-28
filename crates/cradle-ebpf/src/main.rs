@@ -59,18 +59,19 @@ use cradle_common::{
     SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD,
     SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT,
     STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_DROP_NONDF,
-    STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
-    STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_DX2,
-    STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP, STAT_MPLS_PUSH,
-    STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6,
-    STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM,
-    STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
-    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID,
-    STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD,
-    STAT_XDP_L3_FWD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE,
-    VNI_F_ELINE_VLAN, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
-    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2,
-    XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
+    STAT_L2_DROP_SPH, STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD,
+    STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX,
+    STAT_MPLS_DX2, STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP,
+    STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP,
+    STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END,
+    STAT_SRV6_ENDM, STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP,
+    STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD,
+    STAT_SRV6_USID, STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP,
+    STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6,
+    Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key,
+    VrfIdKey, VxlanEncap, XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2,
+    XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2, XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack,
+    mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
 
@@ -238,6 +239,17 @@ static L2_COUNT: HashMap<u16, u32> = HashMap::with_max_entries(256, 0);
 /// says this PE is not the segment's Designated Forwarder (RFC 7432 §8.5).
 #[map]
 static ES_DF: HashMap<EsDfKey, u32> = HashMap::with_max_entries(1024, 0);
+/// EVPN multihoming split horizon, port side: local access port ifindex →
+/// the id (0..64) of the Ethernet Segment it belongs to.
+#[map]
+static PORT_ES: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
+/// EVPN multihoming split horizon, overlay side: remote PE address (VXLAN
+/// VTEP v4-mapped `::ffff:a.b.c.d`, or the IPv6 VTEP / SRv6 source) → the
+/// bitmap of Ethernet Segment ids that PE shares with this node. Resolved
+/// at decap into `CradleXdpMeta::es_bits`; `flood()` drops a copy toward a
+/// port whose `PORT_ES` id is set in it (RFC 8365 §8.3.1 local bias).
+#[map]
+static VTEP_ES: HashMap<[u8; 16], u64> = HashMap::with_max_entries(1024, 0);
 
 // --- L4 ---
 #[map]
@@ -708,8 +720,8 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     if dx2_oif != 0 {
         return Ok(unsafe { bpf_redirect(dx2_oif, 0) } as i32);
     }
-    if let Some(bd) = tc_meta_l2(ctx) {
-        return l2_switch(ctx, iif, bd, true);
+    if let Some((bd, es_bits)) = tc_meta_l2(ctx) {
+        return l2_switch(ctx, iif, bd, true, es_bits);
     }
     // End.Replicate (RFC 9524): the XDP stage matched a local Replication SID
     // and tagged the (still-encapped) frame; fan it out to the segment's
@@ -723,7 +735,7 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
     };
 
     if port.flags & PORT_F_L2 != 0 {
-        l2_switch(ctx, iif, port.vlan, false)
+        l2_switch(ctx, iif, port.vlan, false, 0)
     } else if port.flags & PORT_F_L3 != 0 {
         // Single-hook benchmark mode (`--ebpf-mode tc-only`): skip the L7 / NAT
         // / conntrack / egress-policy stages and forward plain IPv4 only, so
@@ -766,9 +778,17 @@ fn try_main(ctx: &TcContext) -> Result<i32, ()> {
 /// remote station reachable over the overlay, not on the underlay port it
 /// arrived through — learning it there would blackhole the return path — and
 /// flooding it back toward the overlay's replication slots would loop it
-/// (EVPN split horizon), so both are suppressed.
+/// (EVPN split horizon), so both are suppressed. `es_bits` (overlay frames
+/// only) names the Ethernet Segments the overlay source is a peer on, for
+/// the multihoming split horizon in `flood()`.
 #[inline(always)]
-fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result<i32, ()> {
+fn l2_switch(
+    ctx: &TcContext,
+    iif: u32,
+    vlan: u16,
+    from_overlay: bool,
+    es_bits: u64,
+) -> Result<i32, ()> {
     let dst: [u8; 6] = ctx.load(ETH_DST_OFF).map_err(|_| ())?;
 
     if !from_overlay {
@@ -788,7 +808,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result
     }
 
     if dst[0] & 0x01 != 0 {
-        return Ok(flood(ctx, iif, vlan, from_overlay)); // broadcast / multicast
+        return Ok(flood(ctx, iif, vlan, from_overlay, es_bits)); // broadcast / multicast
     }
 
     match FDB.get_ptr(&FdbKey { mac: dst, vlan }) {
@@ -797,7 +817,7 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result
             // reaches TC (XDP not attached, or a race) flood rather than
             // redirect to the fake oif that holds the nexthop id.
             if unsafe { (*e).flags } & FDB_F_REMOTE != 0 {
-                return Ok(flood(ctx, iif, vlan, from_overlay));
+                return Ok(flood(ctx, iif, vlan, from_overlay, es_bits));
             }
             let oif = unsafe { (*e).oif };
             if oif == iif {
@@ -807,7 +827,44 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result
                 Ok(unsafe { bpf_redirect(oif, 0) } as i32)
             }
         }
-        None => Ok(flood(ctx, iif, vlan, from_overlay)),
+        None => Ok(flood(ctx, iif, vlan, from_overlay, es_bits)),
+    }
+}
+
+/// EVPN multihoming split horizon: the `VTEP_ES` bitmap of an overlay
+/// source VTEP `s` (outer IPv4 source, v4-mapped for the lookup). Zero when
+/// the source shares no Ethernet Segment with this node, so the common
+/// single-homed case costs one map miss.
+///
+/// Deliberately NOT inlined: the 16-byte key lives in this subprogram's
+/// frame, not `cradle_xdp`'s flattened one (see `overlay_fib_nexthop_id`).
+/// The caller does the bounds-checked packet read and passes the value:
+/// touching `ctx.data_end` inside a non-inlined subprogram makes LLVM widen
+/// the 32-bit load with shifts on a register the verifier types as
+/// `pkt_end` ("pointer arithmetic on pkt_end prohibited"); so does zeroing
+/// a `[0u8; 16]` piecemeal (out-of-line memset, then register reuse) —
+/// hence the single array literal.
+#[inline(never)]
+fn vtep4_es_bits(s: [u8; 4]) -> u64 {
+    let key: [u8; 16] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, s[0], s[1], s[2], s[3],
+    ];
+    match VTEP_ES.get_ptr(&key) {
+        Some(b) => unsafe { *b },
+        None => 0,
+    }
+}
+
+/// The IPv6 twin of [`vtep4_es_bits`]: `p` points at the outer IPv6 source
+/// (an IPv6 VTEP or the SRv6 outer source) inside the packet, already
+/// bounds-checked by the caller (`xdp_ptr`), and is copied into the key
+/// here so the copy lives in this frame.
+#[inline(never)]
+fn vtep6_es_bits(p: *const [u8; 16]) -> u64 {
+    let key: [u8; 16] = unsafe { *p };
+    match VTEP_ES.get_ptr(&key) {
+        Some(b) => unsafe { *b },
+        None => 0,
     }
 }
 
@@ -827,15 +884,31 @@ fn es_non_df(oif: u32, bd: u16) -> bool {
     flags & ES_DF_F_NON_DF != 0
 }
 
+/// EVPN multihoming split horizon (RFC 8365 §8.3.1 local bias): is `oif`
+/// an Ethernet Segment port whose segment id is set in `es_bits` — the
+/// segments the overlay *source* of this frame is a peer on? Then that
+/// peer PE already delivered the frame to the CE; a second copy from here
+/// would be the duplicate (or, for a frame the CE itself sent, the loop).
+#[inline(always)]
+fn es_peer_port(oif: u32, es_bits: u64) -> bool {
+    match PORT_ES.get_ptr(&oif) {
+        Some(id) => es_bits & (1u64 << (unsafe { *id } & 63)) != 0,
+        None => false,
+    }
+}
+
 /// Clone the frame to every member of `vlan` except the ingress port.
 /// `local_only` additionally skips BUM replication slots (members present in
 /// `REPL_SID`) — EVPN split horizon: a frame that already crossed the overlay
 /// must never be flooded back into it. A member that is a multihomed
 /// Ethernet Segment port receives the copy only when this PE is the
-/// segment's Designated Forwarder in this domain (`ES_DF`): the non-DF
-/// filter that stops the CE seeing one BUM frame per PE it is attached to.
+/// segment's Designated Forwarder in this domain (`ES_DF`) — the non-DF
+/// filter that stops the CE seeing one BUM frame per PE it is attached to —
+/// and only when the overlay source is not itself a peer on that segment
+/// (`es_bits`, from `VTEP_ES` at decap) — the local-bias split horizon that
+/// stops a CE's own frame coming back to it via the other PE.
 #[inline(always)]
-fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool) -> i32 {
+fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -> i32 {
     stat_inc(STAT_L2_FLOOD);
     let count = match L2_COUNT.get_ptr(&vlan) {
         Some(c) => unsafe { *c },
@@ -851,6 +924,8 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool) -> i32 {
             if oif != iif && !(local_only && REPL_SID.get_ptr(&oif).is_some()) {
                 if es_non_df(oif, vlan) {
                     stat_inc(STAT_L2_DROP_NONDF);
+                } else if es_bits != 0 && es_peer_port(oif, es_bits) {
+                    stat_inc(STAT_L2_DROP_SPH);
                 } else {
                     let _ = ctx.clone_redirect(oif, 0);
                 }
@@ -1725,7 +1800,7 @@ fn tc_meta_from_gtp(ctx: &TcContext) -> bool {
 /// `Some(bd)` when the frame is a decapsulated inner Ethernet frame to switch,
 /// guarded by the L2 magic. `None` for everything else.
 #[inline(always)]
-fn tc_meta_l2(ctx: &TcContext) -> Option<u16> {
+fn tc_meta_l2(ctx: &TcContext) -> Option<(u16, u64)> {
     let skb = ctx.skb.skb;
     let meta = unsafe { (*skb).data_meta } as usize;
     let data = unsafe { (*skb).data } as usize;
@@ -1737,7 +1812,7 @@ fn tc_meta_l2(ctx: &TcContext) -> Option<u16> {
         if (*m).magic != XDP_META_MAGIC_L2 ^ meta_cookie() {
             return None;
         }
-        Some((*m).vrf_id as u16)
+        Some(((*m).vrf_id as u16, (*m).es_bits))
     }
 }
 
@@ -3763,6 +3838,7 @@ fn pop_decap_local(ctx: &XdpContext, vrf_id: u32, ttl: u8, uniform: bool) -> Res
         unsafe {
             (*meta).magic = XDP_META_MAGIC ^ meta_cookie();
             (*meta).vrf_id = vrf_id;
+            (*meta).es_bits = 0;
         }
     }
     Ok(xdp_action::XDP_PASS)
@@ -3873,6 +3949,7 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_GTP ^ meta_cookie();
         (*meta).vrf_id = pdr.vrf_id;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -3960,6 +4037,7 @@ fn try_gtp6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_GTP ^ meta_cookie();
         (*meta).vrf_id = pdr.vrf_id;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -4033,6 +4111,13 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         (XDP_META_MAGIC_L2, info.vlan as u32, STAT_VXLAN_DECAP)
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
+    // Multihoming split horizon: which Ethernet Segments the source VTEP
+    // shares with us — read now, the outer header is about to go.
+    let es_bits = if magic == XDP_META_MAGIC_L2 {
+        vtep4_es_bits(unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_SRC_OFF)? })
+    } else {
+        0
+    };
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN_ENCAP_HDR_LEN as i32) } != 0 {
         return Err(());
     }
@@ -4046,6 +4131,7 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = magic ^ meta_cookie();
         (*meta).vrf_id = vrf;
+        (*meta).es_bits = es_bits;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -4109,6 +4195,11 @@ fn try_vxlan6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         (XDP_META_MAGIC_L2, info.vlan as u32, STAT_VXLAN_DECAP)
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
+    let es_bits = if magic == XDP_META_MAGIC_L2 {
+        vtep6_es_bits(xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)?)
+    } else {
+        0
+    };
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, VXLAN6_ENCAP_HDR_LEN as i32) } != 0 {
         return Err(());
     }
@@ -4122,6 +4213,7 @@ fn try_vxlan6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = magic ^ meta_cookie();
         (*meta).vrf_id = vrf;
+        (*meta).es_bits = es_bits;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -4301,6 +4393,7 @@ fn srv6_decap_meta(ctx: &XdpContext, vrf_id: u32) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_SRV6 ^ meta_cookie();
         (*meta).vrf_id = vrf_id;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -4765,6 +4858,7 @@ fn srv6_dx(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_DX ^ meta_cookie();
         (*meta).vrf_id = sid.nexthop_id;
+        (*meta).es_bits = 0;
     }
     stat_inc(STAT_SRV6_DX);
     Ok(xdp_action::XDP_PASS)
@@ -4825,6 +4919,7 @@ fn srv6_dx2(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_DX2 ^ meta_cookie();
         (*meta).vrf_id = oif;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -5002,6 +5097,9 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     if outer_nh != IPPROTO_ETHERNET {
         return Ok(xdp_action::XDP_PASS); // SRH-carried L2 not handled yet
     }
+    // Multihoming split horizon: the segments the outer source PE shares
+    // with us — read before the outer header goes.
+    let es_bits = vtep6_es_bits(xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)?);
     // Drop the outer eth + outer IPv6: the inner eth frame moves to the front.
     let strip = (EthHdr::LEN + IP6_HDR_LEN) as i32;
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
@@ -5018,6 +5116,7 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = sid.vrf_id;
+        (*meta).es_bits = es_bits;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -5053,6 +5152,7 @@ fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = bd;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -5113,6 +5213,7 @@ fn pop_decap_xc(ctx: &XdpContext, s: u8, target: u32, vlan_scoped: bool) -> Resu
     unsafe {
         (*meta).magic = XDP_META_MAGIC_DX2 ^ meta_cookie();
         (*meta).vrf_id = oif;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }
@@ -5132,6 +5233,7 @@ fn replicate_meta(ctx: &XdpContext) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_REPL ^ meta_cookie();
         (*meta).vrf_id = 0;
+        (*meta).es_bits = 0;
     }
     Ok(xdp_action::XDP_PASS)
 }

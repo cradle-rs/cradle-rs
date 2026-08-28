@@ -64,6 +64,23 @@ requires. Over gRPC the same two facts are `SetEthernetSegment` and
 `SetEsRole`, which is how a control plane replays a DF re-election. Ports
 outside any segment are unaffected.
 
+The second half of multihoming is the **split horizon** (local bias): a
+BUM frame the CE sends into one PE is flooded to the other PE too, which
+must not send it back onto the same segment. Name the segment's other PEs
+by their VTEP / overlay source address:
+
+```json
+    { "esi": "00:00:00:00:00:00:00:00:00:01",
+      "ports": ["pe3c"],
+      "roles": [ { "bd": 100, "df": true } ],
+      "peers": ["192.0.2.2"] }
+```
+
+An overlay frame whose source is one of `peers` is then never flooded to
+`ports`, even on the DF (counted as `l2_drop_sph`). Over gRPC this is
+`SetEsPeers` (replace semantics; an empty list clears it). It applies to
+VXLAN and SRv6 overlays — MPLS frames carry no source address.
+
 ## Mixing L2 and L3
 
 A single cradle instance can carry both routed and bridged ports at once: mark

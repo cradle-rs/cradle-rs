@@ -203,6 +203,14 @@ pub struct CradleXdpMeta {
     /// L3 decap (`XDP_META_MAGIC`): the VRF table for the inner IP lookup.
     /// L2 decap (`XDP_META_MAGIC_L2`): the bridge domain for the inner frame.
     pub vrf_id: u32,
+    /// L2 decap only: the Ethernet Segments the overlay *source* (VXLAN
+    /// source VTEP / SRv6 outer source) is a member of, as a bitmap of ES
+    /// ids — `VTEP_ES` resolved while the outer header was still there.
+    /// The TC flood loop withholds the frame from any local port on one of
+    /// those segments (EVPN split horizon / local bias, RFC 8365 §8.3.1):
+    /// the peer PE already delivered it to the multihomed CE. Zero = not a
+    /// segment peer (or an MPLS decap, which carries no source address).
+    pub es_bits: u64,
 }
 
 /// L3 (`End.DT4/6/46`) decap: TC routes the inner IP packet in `vrf_id`.
@@ -1151,8 +1159,12 @@ pub const STAT_MPLS_DX2: u32 = 50;
 /// because this PE is not the Designated Forwarder for it in that bridge
 /// domain (`ES_DF` non-DF row, RFC 7432 §8.5).
 pub const STAT_L2_DROP_NONDF: u32 = 51;
+/// EVPN multihoming: an overlay BUM copy withheld from an Ethernet Segment
+/// port because the overlay source is a peer PE on that same segment
+/// (split horizon / local bias, RFC 8365 §8.3.1 — `VTEP_ES` × `PORT_ES`).
+pub const STAT_L2_DROP_SPH: u32 = 52;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 52;
+pub const STAT_MAX: u32 = 53;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
