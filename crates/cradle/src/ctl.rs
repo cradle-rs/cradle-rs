@@ -44,6 +44,23 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            for es in &cfg.ethernet_segments {
+                client
+                    .set_ethernet_segment(pb::EthernetSegment {
+                        esi: es.esi.clone(),
+                        ports: es.ports.clone(),
+                    })
+                    .await?;
+                for r in &es.roles {
+                    client
+                        .set_es_role(pb::EsRole {
+                            esi: es.esi.clone(),
+                            bd: r.bd as u32,
+                            df: r.df,
+                        })
+                        .await?;
+                }
+            }
             if let Some(src) = &cfg.srv6_source {
                 client
                     .set_srv6_encap_source(pb::Srv6EncapSource { addr: src.clone() })

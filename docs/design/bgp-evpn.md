@@ -237,11 +237,22 @@ FIB.
 
 Type-1/4 are originated for configured Ethernet Segments and DF election is
 computed (`bgp/ethernet_segment.rs`) — but consumed only by `show`; nothing
-enforces DF in forwarding, and `mac_add` stores the ESI without programming
-ESI-based paths. cradle's enforcement surface is already designed
-(`PORT_F_NO_FLOOD` for non-DF ports, split-horizon in the VXLAN path), so when
-zebra wires DF results into install messages, cradle consumes them as port
-flag updates. Watching brief; Phase E.
+in zebra yet pushes the result down, and `mac_add` stores the ESI without
+programming ESI-based paths. Multihoming is **cradle-only** by decision
+(zebra-rs `docs/design/bgp-evpn-multihoming-dataplane.md`, 2026-08-28): the
+kernel bridge has no dataplane for the non-DF or split-horizon filters, so
+they live here.
+
+Delivered so far — **the non-DF filter** (RFC 7432 §8.5): `SetEthernetSegment
+{esi, ports}` names a segment's local access ports and `SetEsRole {esi, bd,
+df}` records this PE's per-bridge-domain election result; the control plane
+renders them into `ES_DF` `(port, bd)` rows and `flood()` withholds BUM from
+a non-DF row (`l2_drop_nondf`). Known unicast is untouched (all-active).
+Static config: `ethernet_segments[]`. BDD `cradle_evpn_mh_df` (dual-homed CE
+sees exactly one copy). Next: the zebra-rs tee of DF results; then the
+split-horizon filter (ingress VTEP in `CradleXdpMeta` + per-ES peer VTEPs),
+the ES nexthop group for aliasing / mass withdraw, LAG-as-port, and
+single-active.
 
 ## Configuration walkthrough
 

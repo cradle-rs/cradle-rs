@@ -38,6 +38,32 @@ The `l2_forward` and `l2_flood` counters record these two paths and are visible
 through `cradle stats` — see
 [Observability and Counters](ch-03-01-observability.md).
 
+## EVPN multihoming: the non-DF filter
+
+When a CE is attached to two PEs over one Ethernet Segment (EVPN
+multihoming, RFC 7432), both PEs receive every BUM frame from the overlay
+but only the elected **Designated Forwarder** may deliver it to the CE —
+otherwise the CE sees one copy per PE. cradle enforces that in the flood
+loop. Declare the segment's local ports and, per bridge domain, whether this
+PE won the election:
+
+```json
+{
+  "ethernet_segments": [
+    { "esi": "00:00:00:00:00:00:00:00:00:01",
+      "ports": ["pe3c"],
+      "roles": [ { "bd": 100, "df": false } ] }
+  ]
+}
+```
+
+A `"df": false` role withholds broadcast, multicast and unknown-unicast
+copies from the segment's ports in that domain (counted as
+`l2_drop_nondf`); known unicast still flows, as all-active multihoming
+requires. Over gRPC the same two facts are `SetEthernetSegment` and
+`SetEsRole`, which is how a control plane replays a DF re-election. Ports
+outside any segment are unaffected.
+
 ## Mixing L2 and L3
 
 A single cradle instance can carry both routed and bridged ports at once: mark

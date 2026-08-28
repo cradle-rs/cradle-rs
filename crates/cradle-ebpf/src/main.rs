@@ -41,35 +41,35 @@ use aya_ebpf::{
 use cradle_common::{
     AFFINITY_TIMEOUT_NS, AffinityKey, AffinityVal, Backend, Backend6, BackendKey, CT_F_DNAT,
     CT_F_SNAT, CradleXdpMeta, CtEntry, CtEntry6, CtKey, CtKey6, DPC_FIB4_DIR24, DPC_L3_ONLY,
-    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, FDB_F_MPLS, FDB_F_REMOTE,
-    FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8, FIBW_VALID,
-    FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED, FLOW_TRANSLATED,
-    FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr,
-    GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES,
-    MAX_SEGS, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3, MPLS_OP_POP_XC,
-    MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey, MplsEntry, NH_F_GTP,
-    NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
-    NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED, POLICY_DENY,
-    POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2, PORT_F_L3,
-    PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN, ReplBranch, ReplSeg,
-    ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M, SRV6_BH_END_DT2U, SRV6_BH_END_DT4,
-    SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2, SRV6_BH_END_DX2V, SRV6_BH_END_DX4,
-    SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP, SRV6_BH_END_REPLICATE, SRV6_BH_END_T,
-    SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
-    SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD, SRV6_FLAVOR_USP, STAT_DROP,
-    STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT, STAT_FIB4_VRF_HIT,
-    STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_FLOOD, STAT_L2_FORWARD,
-    STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD, STAT_L4_DNAT, STAT_L4_SNAT,
-    STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_DX2, STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP,
-    STAT_MPLS_L2_ENCAP, STAT_MPLS_POP, STAT_MPLS_PUSH, STAT_MPLS_SWAP, STAT_NH_BACKUP,
-    STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6, STAT_SRV6_DECAP, STAT_SRV6_DX,
-    STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM, STAT_SRV6_ENDT,
-    STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP, STAT_SRV6_PSP,
-    STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID, STAT_SRV6_USP,
-    STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD, STAT_XDP_L3_FWD,
-    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
-    VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap, XDP_META_MAGIC,
-    XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2,
+    Dx2vKey, EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, ES_DF_F_NON_DF, EsDfKey, FDB_F_MPLS,
+    FDB_F_REMOTE, FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_ECMP, FIB_F_LOCAL, FIBW_ID_MASK, FIBW_TBL8,
+    FIBW_VALID, FLOW_AUDITED, FLOW_DIR_EGRESS, FLOW_DIR_INGRESS, FLOW_DROPPED, FLOW_FORWARDED,
+    FLOW_TRANSLATED, FdbEntry, FdbKey, FibEntry, FibWord, FlowRecord, Gtp6Encap, Gtp6PdrKey,
+    GtpEncap, GtpPdr, GtpPdrKey, IDENTITY_WORLD, L2MemberKey, L7_PROXY_PORT, LocalSid, MAX_LABELS,
+    MAX_REPL_BRANCHES, MAX_SEGS, MPLS_E_TTL_UNIFORM, MPLS_OP_POP, MPLS_OP_POP_L2, MPLS_OP_POP_L3,
+    MPLS_OP_POP_XC, MPLS_OP_POP_XC_VLAN, MPLS_OP_SWAP, MPLS_PIPE_TTL, MirrorEntry, MirrorKey,
+    MplsEntry, NH_F_GTP, NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
+    Neigh4Key, Neigh6Key, NeighEntry, NextHop, NhGroupKey, PCT_INBOUND, PCT_POD_INITIATED,
+    POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN, PORT_F_ENDPOINT, PORT_F_L2,
+    PORT_F_L3, PolicyKey, PortConfig, REPL_BRANCH_LOCAL, REPL_KIND_MPLS, REPL_KIND_VXLAN,
+    ReplBranch, ReplSeg, ReplTarget, SRV6_BH_END, SRV6_BH_END_B6, SRV6_BH_END_DT2M,
+    SRV6_BH_END_DT2U, SRV6_BH_END_DT4, SRV6_BH_END_DT6, SRV6_BH_END_DT46, SRV6_BH_END_DX2,
+    SRV6_BH_END_DX2V, SRV6_BH_END_DX4, SRV6_BH_END_DX6, SRV6_BH_END_M, SRV6_BH_END_REP,
+    SRV6_BH_END_REPLICATE, SRV6_BH_END_T, SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA,
+    SRV6_BH_UALIB, SRV6_BH_UN, SRV6_ENCAP_MODE_INSERT, SRV6_FLAVOR_PSP, SRV6_FLAVOR_USD,
+    SRV6_FLAVOR_USP, STAT_DROP, STAT_FIB4_DEFAULT, STAT_FIB4_TBL8_HIT, STAT_FIB4_TBL24_HIT,
+    STAT_FIB4_VRF_HIT, STAT_FIB6_VRF_HIT, STAT_GTP_DECAP, STAT_GTP_ENCAP, STAT_L2_DROP_NONDF,
+    STAT_L2_FLOOD, STAT_L2_FORWARD, STAT_L3_LOCAL, STAT_L3V4_FORWARD, STAT_L3V6_FORWARD,
+    STAT_L4_DNAT, STAT_L4_SNAT, STAT_L7_REDIRECT, STAT_MASQ, STAT_MAX, STAT_MPLS_DX2,
+    STAT_MPLS_L2_BUM, STAT_MPLS_L2_DECAP, STAT_MPLS_L2_ENCAP, STAT_MPLS_POP, STAT_MPLS_PUSH,
+    STAT_MPLS_SWAP, STAT_NH_BACKUP, STAT_POLICY_AUDIT, STAT_POLICY_DROP, STAT_SRV6_B6,
+    STAT_SRV6_DECAP, STAT_SRV6_DX, STAT_SRV6_DX2, STAT_SRV6_ENCAP, STAT_SRV6_END, STAT_SRV6_ENDM,
+    STAT_SRV6_ENDT, STAT_SRV6_HINSERT, STAT_SRV6_L2_BUM, STAT_SRV6_L2_DECAP, STAT_SRV6_L2_ENCAP,
+    STAT_SRV6_PSP, STAT_SRV6_REPLACE, STAT_SRV6_REPLICATE, STAT_SRV6_USD, STAT_SRV6_USID,
+    STAT_SRV6_USP, STAT_VXLAN_DECAP, STAT_VXLAN_DX2, STAT_VXLAN_ENCAP, STAT_VXLAN_FLOOD,
+    STAT_XDP_L3_FWD, SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE,
+    VNI_F_ELINE_VLAN, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    XDP_META_MAGIC, XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2,
     XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use network_types::eth::EthHdr;
@@ -233,6 +233,11 @@ static MIRROR: LpmTrie<MirrorKey, MirrorEntry> = LpmTrie::with_max_entries(1024,
 static L2_MEMBERS: HashMap<L2MemberKey, u32> = HashMap::with_max_entries(4096, 0);
 #[map]
 static L2_COUNT: HashMap<u16, u32> = HashMap::with_max_entries(256, 0);
+/// EVPN multihoming DF roles: `(port ifindex, bridge domain)` → `ES_DF_F_*`.
+/// Only Ethernet Segment ports have rows; `flood()` skips a member whose row
+/// says this PE is not the segment's Designated Forwarder (RFC 7432 §8.5).
+#[map]
+static ES_DF: HashMap<EsDfKey, u32> = HashMap::with_max_entries(1024, 0);
 
 // --- L4 ---
 #[map]
@@ -806,10 +811,29 @@ fn l2_switch(ctx: &TcContext, iif: u32, vlan: u16, from_overlay: bool) -> Result
     }
 }
 
+/// EVPN multihoming non-DF filter (RFC 7432 §8.5): is `oif` an Ethernet
+/// Segment port in `bd` whose Designated Forwarder is another PE? Ports
+/// outside any segment have no `ES_DF` row and always forward.
+#[inline(always)]
+fn es_non_df(oif: u32, bd: u16) -> bool {
+    let flags = match ES_DF.get_ptr(&EsDfKey {
+        ifindex: oif,
+        bd,
+        _pad: 0,
+    }) {
+        Some(f) => unsafe { *f },
+        None => 0,
+    };
+    flags & ES_DF_F_NON_DF != 0
+}
+
 /// Clone the frame to every member of `vlan` except the ingress port.
 /// `local_only` additionally skips BUM replication slots (members present in
 /// `REPL_SID`) — EVPN split horizon: a frame that already crossed the overlay
-/// must never be flooded back into it.
+/// must never be flooded back into it. A member that is a multihomed
+/// Ethernet Segment port receives the copy only when this PE is the
+/// segment's Designated Forwarder in this domain (`ES_DF`): the non-DF
+/// filter that stops the CE seeing one BUM frame per PE it is attached to.
 #[inline(always)]
 fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool) -> i32 {
     stat_inc(STAT_L2_FLOOD);
@@ -825,7 +849,11 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool) -> i32 {
         if let Some(p) = L2_MEMBERS.get_ptr(&L2MemberKey { vlan, slot }) {
             let oif = unsafe { *p };
             if oif != iif && !(local_only && REPL_SID.get_ptr(&oif).is_some()) {
-                let _ = ctx.clone_redirect(oif, 0);
+                if es_non_df(oif, vlan) {
+                    stat_inc(STAT_L2_DROP_NONDF);
+                } else {
+                    let _ = ctx.clone_redirect(oif, 0);
+                }
             }
         }
         slot += 1;
