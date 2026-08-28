@@ -128,6 +128,33 @@ pub struct EthernetSegmentCfg {
     /// an empty list clears the filter.
     #[serde(default)]
     pub peers: Vec<String>,
+    /// Per bridge domain, the PEs a MAC behind this segment may be sent to
+    /// (the aliasing nexthop group, RFC 7432 §8.4); `fdb[].esi` entries
+    /// resolve through it per flow. Replace semantics per `bd`. Applied
+    /// after `vnis` (a VXLAN member needs the domain's VNI binding).
+    #[serde(default)]
+    pub nhg: Vec<EsNhgCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EsNhgCfg {
+    pub bd: u16,
+    #[serde(default)]
+    pub members: Vec<EsNhgMemberCfg>,
+}
+
+/// One aliasing-group member: exactly one of `remote_sid` (the PE's
+/// `End.DT2U` SID for the domain), `remote_vtep`, or `remote_pe` + `label`.
+#[derive(Debug, Deserialize)]
+pub struct EsNhgMemberCfg {
+    #[serde(default)]
+    pub remote_sid: Option<String>,
+    #[serde(default)]
+    pub remote_vtep: Option<String>,
+    #[serde(default)]
+    pub remote_pe: Option<String>,
+    #[serde(default)]
+    pub label: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +240,17 @@ pub struct FdbCfg {
     pub label: u32,
     #[serde(default)]
     pub nexthop: u32,
+    /// EVPN multihoming aliasing: the MAC sits behind this Ethernet Segment
+    /// and is reached through the segment's `nhg` group for `bd` (a member
+    /// per flow) instead of a single remote — the remote_* fields are then
+    /// unused.
+    #[serde(default)]
+    pub esi: Option<String>,
+    /// A control-plane LOCAL entry instead: the MAC is reached over this
+    /// local port (never aged, never reported by `WatchFdb`) — EVPN
+    /// multihoming's "a peer's MAC on my own segment" (RFC 7432 §8.4).
+    #[serde(default)]
+    pub port: Option<String>,
 }
 
 /// An EVPN/VXLAN VNI binding. An **L2VNI** (default): frames in bridge domain
@@ -703,6 +741,22 @@ impl Config {
                 ctl.set_vni(v.vni, v.vlan).await?;
             }
         }
+        // Aliasing groups after the VNI bindings they resolve against.
+        for es in &self.ethernet_segments {
+            for g in &es.nhg {
+                let members: Vec<crate::pb::EsNhgMember> = g
+                    .members
+                    .iter()
+                    .map(|m| crate::pb::EsNhgMember {
+                        remote_sid: m.remote_sid.clone().unwrap_or_default(),
+                        remote_vtep: m.remote_vtep.clone().unwrap_or_default(),
+                        remote_pe: m.remote_pe.clone().unwrap_or_default(),
+                        remote_label: m.label,
+                    })
+                    .collect();
+                ctl.set_es_nhg(&es.esi, g.bd, &members).await?;
+            }
+        }
         for nh in &self.nexthops {
             if let Some(vtep) = &nh.vxlan_vtep {
                 let gw = match &nh.gateway {
@@ -853,6 +907,14 @@ impl Config {
         }
         for f in &self.fdb {
             let mac = util::parse_mac(&f.mac)?;
+            if let Some(port) = &f.port {
+                ctl.add_fdb_local(mac, f.bd, port).await?;
+                continue;
+            }
+            if let Some(esi) = &f.esi {
+                ctl.add_fdb_remote_es(mac, f.bd, esi).await?;
+                continue;
+            }
             match (&f.remote_sid, &f.remote_vtep, &f.remote_pe) {
                 (Some(sid), None, None) => {
                     let remote_sid = sid

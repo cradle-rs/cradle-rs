@@ -767,6 +767,41 @@ pub const FDB_F_VXLAN: u32 = 1 << 2;
 /// resolved nexthop's `labels` are the transport LSP imposed above the
 /// service label).
 pub const FDB_F_MPLS: u32 = 1 << 3;
+/// This MAC is behind a multihomed Ethernet Segment (set together with
+/// `FDB_F_REMOTE`): `oif` is the segment id and the encap target is picked
+/// per flow from the `(segment, bridge domain)` nexthop group (`ES_NHG` /
+/// `ES_NHG_MEMBER`) — RFC 7432 §8.4 aliasing. `remote_sid`, `label` and the
+/// per-encap flags are unused; each group member carries its own
+/// (kind, addr, vni/label). One group update re-points every MAC on the
+/// segment (§8.2 mass withdraw).
+pub const FDB_F_ESNHG: u32 = 1 << 4;
+/// A control-plane-installed LOCAL entry: `oif` is a local port, like a
+/// learned entry, but it is neither aged nor reported by `WatchFdb`. EVPN
+/// multihoming installs one for a MAC a peer PE advertised on a segment
+/// this node is also attached to (RFC 7432 §8.4: reach it over the local
+/// segment port, not the overlay). A datapath learn on that port replaces
+/// it with a dynamic entry.
+pub const FDB_F_STATIC: u32 = 1 << 5;
+
+/// EVPN multihoming aliasing: the `(segment id, bridge domain)` nexthop
+/// group — its member count (`ES_NHG`), and each member (`ES_NHG_MEMBER`,
+/// keyed with the dense `slot` in `0..count`). Members are [`ReplTarget`]s:
+/// the same (kind, vni/label, addr) triple a replication slot names.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EsNhgKey {
+    pub es_id: u32,
+    pub bd: u16,
+    pub _pad: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EsNhgMemberKey {
+    pub es_id: u32,
+    pub bd: u16,
+    pub slot: u16,
+}
 
 /// Membership of an L2 (VLAN/bridge) domain — enumerates the ports a BUM or
 /// unknown-unicast frame is flooded to. Keyed by `(vlan, slot)` where `slot` is
@@ -1163,8 +1198,12 @@ pub const STAT_L2_DROP_NONDF: u32 = 51;
 /// port because the overlay source is a peer PE on that same segment
 /// (split horizon / local bias, RFC 8365 §8.3.1 — `VTEP_ES` × `PORT_ES`).
 pub const STAT_L2_DROP_SPH: u32 = 52;
+/// EVPN multihoming aliasing: a known-unicast frame whose MAC sits behind
+/// an Ethernet Segment, encapsulated toward a member picked by flow hash
+/// from the segment's nexthop group (RFC 7432 §8.4).
+pub const STAT_L2_ES_NHG: u32 = 53;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 53;
+pub const STAT_MAX: u32 = 54;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -1237,6 +1276,8 @@ mod user {
         NeighEntry,
         NhGroupKey,
         EsDfKey,
+        EsNhgKey,
+        EsNhgMemberKey,
         MplsEntry,
         Vrf4Key,
         VrfIdKey,

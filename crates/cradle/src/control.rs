@@ -125,7 +125,21 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "mpls_dx2",
     "l2_drop_nondf",
     "l2_drop_sph",
+    "l2_es_nhg",
 ];
+
+/// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
+/// the remote in `ReplTarget` shape, before the bridge domain's VNI is
+/// resolved for a VXLAN member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EsMember {
+    /// The PE's `End.DT2U` SID for the bridge domain.
+    Srv6(Ipv6Addr),
+    /// The PE's VTEP; tunnels with the bridge domain's VNI.
+    Vxlan(IpAddr),
+    /// The PE's address and its EVI service label for the bridge domain.
+    Mpls(IpAddr, u32),
+}
 
 /// An Ethernet Segment (RFC 7432 §5) as the datapath sees it: the local
 /// access port(s) of a multihomed CE, per bridge domain whether this PE is
@@ -152,6 +166,11 @@ struct EsState {
     programmed_ports: Vec<u32>,
     /// The peers whose `VTEP_ES` bitmap currently carries this segment's bit.
     programmed_peers: Vec<IpAddr>,
+    /// Per bridge domain, the PEs a MAC behind this segment may be sent to
+    /// (the aliasing nexthop group, RFC 7432 §8.4).
+    nhg: std::collections::BTreeMap<u16, Vec<EsMember>>,
+    /// The bridge domains whose `ES_NHG` group this segment currently owns.
+    programmed_nhg: Vec<u16>,
 }
 
 /// All Ethernet Segments plus the state shared between them: the id
@@ -721,6 +740,7 @@ impl Control {
             st.ports.clear();
             st.roles.clear();
             st.peers.clear();
+            st.nhg.clear();
             st.id
         }) else {
             return Ok(());
@@ -759,6 +779,85 @@ impl Control {
         self.es_render(&mut tbl, esi).await
     }
 
+    /// Replace the Ethernet Segment nexthop group for `(esi, bd)` (RFC 7432
+    /// §8.4 aliasing): the PEs a MAC behind the segment may be sent to in
+    /// that bridge domain, each as `(remote_sid | remote_vtep | remote_pe,
+    /// remote_label)`. Empty = no group (every PE withdrew — §8.2 mass
+    /// withdraw leaves the segment's MACs to flood like unknown unicast).
+    pub async fn set_es_nhg(&self, esi: &str, bd: u16, members: &[pb::EsNhgMember]) -> Result<()> {
+        let mut parsed = Vec::with_capacity(members.len());
+        for m in members {
+            let set = [
+                !m.remote_sid.is_empty(),
+                !m.remote_vtep.is_empty(),
+                !m.remote_pe.is_empty(),
+            ];
+            anyhow::ensure!(
+                set.iter().filter(|s| **s).count() == 1,
+                "ES {esi} bd {bd} member: exactly one of remote_sid / remote_vtep / remote_pe"
+            );
+            parsed.push(if !m.remote_sid.is_empty() {
+                EsMember::Srv6(
+                    m.remote_sid
+                        .parse()
+                        .with_context(|| format!("bad remote SID {:?}", m.remote_sid))?,
+                )
+            } else if !m.remote_vtep.is_empty() {
+                EsMember::Vxlan(
+                    m.remote_vtep
+                        .parse()
+                        .with_context(|| format!("bad remote VTEP {:?}", m.remote_vtep))?,
+                )
+            } else {
+                anyhow::ensure!(
+                    m.remote_label != 0 && m.remote_label < (1 << 20),
+                    "ES {esi} bd {bd} member {}: remote_label is not a 20-bit label",
+                    m.remote_pe
+                );
+                EsMember::Mpls(
+                    m.remote_pe
+                        .parse()
+                        .with_context(|| format!("bad remote PE {:?}", m.remote_pe))?,
+                    m.remote_label,
+                )
+            });
+        }
+        let mut tbl = self.es.lock().await;
+        let st = es_entry(&mut tbl, esi)?;
+        if parsed.is_empty() {
+            st.nhg.remove(&bd);
+        } else {
+            st.nhg.insert(bd, parsed);
+        }
+        self.es_render(&mut tbl, esi).await
+    }
+
+    /// Install `mac` in bridge domain `bd` as a control-plane LOCAL entry on
+    /// `port` (`AddFdbLocal`, `FDB_F_STATIC`): EVPN multihoming's "a MAC a
+    /// peer advertised on my own segment is reached over my segment port"
+    /// (RFC 7432 §8.4). Not aged, not reported by `WatchFdb`.
+    pub async fn add_fdb_local(&self, mac: [u8; 6], bd: u16, port: &str) -> Result<()> {
+        let ifindex = util::ifindex_of(port)?;
+        self.dp.lock().await.fdb_local_add(mac, bd, ifindex)?;
+        Ok(())
+    }
+
+    /// Point `mac` in bridge domain `bd` at Ethernet Segment `esi`'s
+    /// nexthop group (`FdbRemote.esi`): the encap target is picked per
+    /// flow from the group `set_es_nhg` maintains for `(esi, bd)`. Same
+    /// MAC-move-away hint semantics as [`Self::add_fdb_remote`].
+    pub async fn add_fdb_remote_es(&self, mac: [u8; 6], bd: u16, esi: &str) -> Result<()> {
+        let es_id = {
+            let mut tbl = self.es.lock().await;
+            es_entry(&mut tbl, esi)?.id as u32
+        };
+        let displaced_local = self.dp.lock().await.fdb_es_add(mac, bd, es_id)?;
+        if displaced_local {
+            let _ = self.fdb_hint_tx.send((mac, bd));
+        }
+        Ok(())
+    }
+
     /// Re-derive segment `esi`'s datapath rows — `ES_DF` from ports × non-DF
     /// roles, `PORT_ES` from its ports, its bit in each peer's `VTEP_ES`
     /// bitmap — and swap them in for the rows it owned before. Resolves
@@ -786,6 +885,43 @@ impl Control {
         }
         let bit = 1u64 << st.id;
         let mut dp = self.dp.lock().await;
+        // Aliasing groups: a VXLAN member tunnels with the bridge domain's
+        // VNI, resolved now (the SetVni binding must precede the group).
+        let mut groups: Vec<(u16, Vec<ReplTarget>)> = Vec::with_capacity(st.nhg.len());
+        for (&bd, members) in &st.nhg {
+            let mut targets = Vec::with_capacity(members.len());
+            for m in members {
+                targets.push(match *m {
+                    EsMember::Srv6(sid) => ReplTarget {
+                        kind: REPL_KIND_SRV6,
+                        vni: 0,
+                        addr: sid.octets(),
+                    },
+                    EsMember::Vxlan(vtep) => ReplTarget {
+                        kind: REPL_KIND_VXLAN,
+                        vni: dp
+                            .vni_of(bd)
+                            .with_context(|| format!("ES {esi} bd {bd}: no VNI bound (SetVni)"))?,
+                        addr: util::ip_to_v6_bytes(vtep),
+                    },
+                    EsMember::Mpls(pe, label) => ReplTarget {
+                        kind: REPL_KIND_MPLS,
+                        vni: label,
+                        addr: util::ip_to_v6_bytes(pe),
+                    },
+                });
+            }
+            groups.push((bd, targets));
+        }
+        for bd in st.programmed_nhg.drain(..) {
+            if !st.nhg.contains_key(&bd) {
+                dp.es_nhg_set(st.id as u32, bd, &[])?;
+            }
+        }
+        for (bd, targets) in &groups {
+            dp.es_nhg_set(st.id as u32, *bd, targets)?;
+        }
+        st.programmed_nhg = groups.iter().map(|(bd, _)| *bd).collect();
         for (ifindex, bd) in st.programmed.drain(..) {
             dp.es_df_del(ifindex, bd);
         }
@@ -2700,6 +2836,28 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn add_fdb_local(
+        &self,
+        req: Request<pb::FdbLocal>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let f = req.into_inner();
+        let mac = util::parse_mac(&f.mac).map_err(st)?;
+        self.control
+            .add_fdb_local(mac, f.bd as u16, &f.port)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_es_nhg(&self, req: Request<pb::EsNhg>) -> Result<Response<pb::Empty>, Status> {
+        let g = req.into_inner();
+        self.control
+            .set_es_nhg(&g.esi, g.bd as u16, &g.members)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn flush_fdb(&self, req: Request<pb::FdbFlush>) -> Result<Response<pb::Empty>, Status> {
         let f = req.into_inner();
         let port = Some(f.port.as_str()).filter(|p| !p.is_empty());
@@ -3056,6 +3214,14 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let f = req.into_inner();
         let mac = util::parse_mac(&f.mac).map_err(st)?;
+        if !f.esi.is_empty() {
+            // Behind a multihomed segment: the group picks the remote.
+            self.control
+                .add_fdb_remote_es(mac, f.bd as u16, &f.esi)
+                .await
+                .map_err(st)?;
+            return Ok(Response::new(pb::Empty {}));
+        }
         let overlays = [
             !f.remote_sid.is_empty(),
             !f.remote_vtep.is_empty(),

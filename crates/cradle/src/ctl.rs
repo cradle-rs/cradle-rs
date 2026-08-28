@@ -88,6 +88,27 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            // Aliasing groups after the VNI bindings they resolve against.
+            for es in &cfg.ethernet_segments {
+                for g in &es.nhg {
+                    client
+                        .set_es_nhg(pb::EsNhg {
+                            esi: es.esi.clone(),
+                            bd: g.bd as u32,
+                            members: g
+                                .members
+                                .iter()
+                                .map(|m| pb::EsNhgMember {
+                                    remote_sid: m.remote_sid.clone().unwrap_or_default(),
+                                    remote_vtep: m.remote_vtep.clone().unwrap_or_default(),
+                                    remote_pe: m.remote_pe.clone().unwrap_or_default(),
+                                    remote_label: m.label,
+                                })
+                                .collect(),
+                        })
+                        .await?;
+                }
+            }
             for nh in &cfg.nexthops {
                 client
                     .set_nexthop(pb::Nexthop {

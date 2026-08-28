@@ -261,8 +261,23 @@ XDP stage looks the outer source up in `VTEP_ES` and carries the bitmap in
 segment bit is set (`l2_drop_sph`). Covers VXLAN (v4/v6) and SRv6 (outer
 source); MPLS has no source address (ESI label: future). Static config:
 `ethernet_segments[].peers`. BDD `cradle_evpn_mh_sph` (the DF must not echo
-the CE's own frames back). Next: the zebra-rs `SetEsPeers` tee; the ES
-nexthop group for aliasing / mass withdraw, LAG-as-port, single-active.
+the CE's own frames back); zebra-rs tees the Type-4 peers (`SetEsPeers`).
+
+**Aliasing and mass withdraw** (RFC 7432 §8.4 / §8.2): `SetEsNhg {esi, bd,
+members}` is the Ethernet Segment nexthop group for one bridge domain —
+every PE attached to the segment there, each as the (DT2U SID | VTEP |
+PE+label) triple a replication slot names. `FdbRemote.esi` points a MAC at
+the segment instead of one remote (`FDB_F_ESNHG`, `oif` = segment id); the
+XDP encap picks a member by inner-flow hash (`l2_es_nhg`) at the single
+`l2_overlay_encap` call site, and one group replace re-points every such
+MAC (an empty group leaves them to flood like unknown unicast). The other
+half of §8.4 — a MAC a peer advertised on a segment *this* node is also
+on is reached over the local segment port — is `AddFdbLocal` (`FDB_F_STATIC`:
+not aged, not reported by `WatchFdb`). Static config:
+`ethernet_segments[].nhg`, `fdb[].esi`, `fdb[].port`. BDD
+`cradle_evpn_mh_nhg` (a bonded CE; the MAC follows the group). Next: the
+zebra-rs receive-side consumer (per-ES + per-EVI A-D → `SetEsNhg`, own-ES
+Type-2 → `AddFdbLocal`), then LAG-as-port and single-active.
 
 ## Configuration walkthrough
 
