@@ -223,9 +223,31 @@ aliasing, with one group replace as the §8.2 mass withdraw — and an
 `FDB_F_STATIC` entry is a control-plane local entry (a peer's MAC on a
 segment we share, reached over our own port), exempt from aging and
 `WatchFdb`. BDD: `cradle_evpn_mh_nhg`. Frames destined to the reserved
-`01-80-C2-00-00-0x` block (STP, LACP, LLDP) are **not** flooded — punt to the
-host (`TC_ACT_PIPE`), matching bridge behavior and leaving room for a future
-control protocol.
+`01-80-C2-00-00-0x` block (STP, LACP, LLDP) are **not** learned, tunneled
+or flooded — the XDP stage passes them and `l2_switch` returns `TC_ACT_OK`,
+handing them to the host, matching bridge behavior. That is what lets a
+kernel bond be a cradle port: LACPDUs reach the bonding driver.
+
+### LAG ports
+
+An Ethernet Segment is a LAG, so the CE-facing port of a multihomed PE is
+a kernel bond (802.3ad with the same `ad_actor_system` on every PE of the
+segment — an MC-LAG to the CE — or a static bond). cradle attaches to the
+bond like any port; two things make it work. TC on the bond sees the bond,
+but a native XDP program attached to a bond runs on its **members**, so
+`ingress_ifindex` is the member's: `PORT_MASTER` (member → bond, resolved
+from `/sys/class/net/<bond>/bonding/slaves` at `SetPort`; re-`SetPort`
+after changing membership) is consulted by `xdp_iif()` at every XDP-stage
+port decision, so learning records the bond and every per-port table keys
+on it. Delivery toward the bond is a plain `redirect(bond)`; the bonding
+driver hashes onto a member. The reserved-MAC punt above keeps LACP alive
+through the datapath. Bond XDP supports the xor, 802.3ad and active-backup
+modes. BDD: `cradle_evpn_mh_lag` (LACP aggregates through cradle; the
+aliasing disabled, the CE's frames stop being unicast-encapsulated). Note
+the punt is not what keeps LACP up there: the bonding driver consumes
+LACPDUs on the member before either hook, and with slot-based replication
+the XDP stage passes BUM anyway — the punt matters for the BUM-sentinel
+(single-remote SRv6) path and for STP/LLDP at the TC stage.
 
 ### Port state
 

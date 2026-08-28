@@ -64,3 +64,27 @@ See [L2 Switching](ch-01-03-l2-switching.md).
 ```
 
 The three ports above form one flood domain in VLAN 0.
+
+## LAG (bond) ports
+
+A kernel bond can be a port like any other — name it, and cradle attaches to
+the bond. This is how a multihomed Ethernet Segment is wired: the CE bundles
+its links to two PEs with LACP, and each PE's leg of that LAG is a one-member
+802.3ad bond carrying the **same** `ad_actor_system` (and `ad_user_port_key`)
+on both PEs, so the CE sees one partner:
+
+```sh
+ip link add bond0 type bond mode 802.3ad ad_actor_system 02:00:00:00:aa:01 ad_user_port_key 7
+ip link set eth1 master bond0
+```
+
+```json
+{ "ports": [ {"name": "bond0", "vlan": 100} ] }
+```
+
+Under the hood cradle aliases the bond's members to it for the XDP stage
+(which runs on the members) and hands link-local control frames —
+`01:80:c2:00:00:0x`, so LACPDUs, STP, LLDP — to the host rather than the
+bridge domain, which is what keeps the aggregation up. Re-apply the port
+(`SetPort`) after changing the bond's membership. Supported bond modes are
+those the kernel supports XDP on: balance-xor, 802.3ad and active-backup.

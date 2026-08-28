@@ -54,6 +54,14 @@ pub fn gen_dfz_prefixes(count: u64, seed: u64) -> Vec<(u32, u8)> {
 }
 
 /// Resolve an interface name to its kernel ifindex via sysfs.
+/// The member (slave) interface names of a kernel bond, via sysfs; empty
+/// for anything that is not a bond.
+pub fn lag_members(name: &str) -> Vec<String> {
+    fs::read_to_string(format!("/sys/class/net/{name}/bonding/slaves"))
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 pub fn ifindex_of(name: &str) -> Result<u32> {
     let path = format!("/sys/class/net/{name}/ifindex");
     let s = fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;

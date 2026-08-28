@@ -278,6 +278,11 @@ struct PortAttachment {
     /// was attached — the attach-time derivation then saw none).
     l3: bool,
     vrf_id: u32,
+    /// The port's LAG members (a kernel bond's slaves), aliased to it in
+    /// `PORT_MASTER` so the XDP stage — which runs on the members — sees
+    /// the bond. Resolved at `set_port`; re-`SetPort` after changing the
+    /// bond's membership.
+    lag_members: Vec<u32>,
 }
 
 /// Swap a port's derived local/connected FIB artifacts for `new_derived`,
@@ -595,6 +600,7 @@ impl Control {
                 derived: Default::default(),
                 l3,
                 vrf_id: 0,
+                lag_members: Vec::new(),
             },
         );
         Ok(())
@@ -631,10 +637,26 @@ impl Control {
         // Reconcile against what an earlier set_port derived (different VRF,
         // addresses, or an L3→L2 role change): the new set was just
         // (re-)inserted above, so remove only the leftovers.
+        // A LAG (kernel bond) port: alias its members to it for the XDP
+        // stage, which runs on the members. Replace semantics.
+        let members: Vec<u32> = util::lag_members(name)
+            .iter()
+            .filter_map(|m| util::ifindex_of(m).ok())
+            .collect();
         if let Some(att) = attached.get_mut(&ifindex) {
             reconcile_derived(att, &mut dp, new_derived);
             att.l3 = l3;
             att.vrf_id = vrf_id;
+            for old in att.lag_members.drain(..) {
+                dp.port_master_del(old);
+            }
+            for &m in &members {
+                dp.port_master_set(m, ifindex)?;
+            }
+            if !members.is_empty() {
+                info!("port {name}: LAG with {} member(s) aliased", members.len());
+            }
+            att.lag_members = members;
         }
         Ok(())
     }
@@ -662,6 +684,9 @@ impl Control {
         let mut dp = self.dp.lock().await;
         drop(attached);
         dp.port_del(ifindex)?;
+        for m in &att.lag_members {
+            dp.port_master_del(*m);
+        }
         for (vrf, prefix, plen) in &att.derived.v4 {
             let _ = dp.route4_del(*vrf, *prefix, *plen);
         }

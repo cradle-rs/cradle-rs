@@ -256,6 +256,13 @@ static VTEP_ES: HashMap<[u8; 16], u64> = HashMap::with_max_entries(1024, 0);
 /// and the members themselves (`slot` in `0..count`, each a [`ReplTarget`]).
 /// An `FDB_F_ESNHG` entry resolves through here by flow hash; a group
 /// update re-points every MAC on the segment at once (§8.2 mass withdraw).
+/// LAG member → the bond (cradle port) it belongs to. A native XDP program
+/// attached to a bond runs on its members, so `ingress_ifindex` is the
+/// member's; every XDP-stage port decision (`PORTS`, learning, the
+/// replication-slot and VPWS tables) wants the bond. TC on the bond already
+/// sees the bond. Written by the control plane from the bond's member list.
+#[map]
+static PORT_MASTER: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 #[map]
 static ES_NHG: HashMap<EsNhgKey, u32> = HashMap::with_max_entries(1024, 0);
 #[map]
@@ -621,6 +628,32 @@ fn meta_cookie() -> u32 {
     }
 }
 
+/// The cradle port a packet arrived on, as the XDP stage sees it: the
+/// ingress device, or — when that is a LAG member (`PORT_MASTER`) — the
+/// bond it belongs to, which is the port cradle knows.
+#[inline(always)]
+fn xdp_iif(ctx: &XdpContext) -> u32 {
+    let raw = unsafe { (*ctx.ctx).ingress_ifindex };
+    match PORT_MASTER.get_ptr(&raw) {
+        Some(m) => unsafe { *m },
+        None => raw,
+    }
+}
+
+/// IEEE 802.1D reserved group addresses `01:80:c2:00:00:00`–`0f` (STP,
+/// LACP, LLDP, …): link-local control frames a bridge must not forward.
+/// cradle hands them to the host — LACPDUs feed the kernel bonding driver
+/// that runs the LAG a multihomed CE hangs off.
+#[inline(always)]
+fn is_reserved_l2(dst: &[u8; 6]) -> bool {
+    dst[0] == 0x01
+        && dst[1] == 0x80
+        && dst[2] == 0xc2
+        && dst[3] == 0
+        && dst[4] == 0
+        && dst[5] & 0xf0 == 0
+}
+
 #[inline(always)]
 fn stat_inc(idx: u32) {
     if let Some(c) = STATS.get_ptr_mut(idx) {
@@ -800,6 +833,11 @@ fn l2_switch(
     es_bits: u64,
 ) -> Result<i32, ()> {
     let dst: [u8; 6] = ctx.load(ETH_DST_OFF).map_err(|_| ())?;
+    // Link-local control frames (STP, LLDP; LACP is consumed by the bonding
+    // driver before a bond's TC hook) go to the host, never into the domain.
+    if is_reserved_l2(&dst) {
+        return Ok(aya_ebpf::bindings::TC_ACT_OK as i32);
+    }
 
     if !from_overlay {
         let src: [u8; 6] = ctx.load(ETH_SRC_OFF).map_err(|_| ())?;
@@ -3011,7 +3049,7 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // MAC-in-SRv6 encapsulated here — TC's `adjust_room` is -ENOTSUPP for the
     // non-IP frames (ARP) an L2 domain carries, so the grow must run in XDP.
     // Everything else on an L2 port passes to the TC `l2_switch`.
-    let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    let iif = xdp_iif(ctx);
     // A BUM replication slot, a VLAN-scoped VPWS AC (RFC 8214 VLAN-based
     // E-Line — an 802.1Q-tagged frame picks its E-Line by (AC ifindex,
     // VID), the tag riding through the encapsulation for the remote end to
@@ -3244,9 +3282,14 @@ fn l2_evpn_bum_tunnel(bd: u16) -> Option<&'static FdbEntry> {
 /// toward its `End.DT2U` SID. Everything else passes to the TC `l2_switch`.
 #[inline(always)]
 fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
+    // Link-local control frames (LACP, STP, LLDP) belong to the host, not
+    // the bridge domain — before any learning or tunneling.
+    if is_reserved_l2(unsafe { &*xdp_ptr::<[u8; 6]>(ctx, ETH_DST_OFF)? }) {
+        return Ok(xdp_action::XDP_PASS);
+    }
     let src = unsafe { *xdp_ptr::<[u8; 6]>(ctx, ETH_SRC_OFF)? };
     if src[0] & 0x01 == 0 {
-        let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+        let iif = xdp_iif(ctx);
         let _ = FDB.insert(
             &FdbKey { mac: src, vlan: bd },
             &FdbEntry {
@@ -3985,7 +4028,7 @@ fn try_gtp_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // address/TEID are on-wire bytes; the match VRF is the ingress port's
     // binding (0 = global), so a tunnel is only terminated in the VRF it
     // was installed for and the same (dst, teid) may coexist per VRF.
-    let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    let iif = xdp_iif(ctx);
     let vrf_id = match PORTS.get_ptr(&iif) {
         Some(p) => unsafe { (*p).vrf_id },
         None => 0,
@@ -4074,7 +4117,7 @@ fn try_gtp6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // Outer IPv6(40) + UDP(8) + the actual GTP-U header.
     let strip = IP6_HDR_LEN + 8 + gtp_hdr_len;
     // PDR lookup keyed by (ingress port's VRF, local tunnel endpoint, TEID).
-    let iif = unsafe { (*ctx.ctx).ingress_ifindex };
+    let iif = xdp_iif(ctx);
     let vrf_id = match PORTS.get_ptr(&iif) {
         Some(p) => unsafe { (*p).vrf_id },
         None => 0,
