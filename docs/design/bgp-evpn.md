@@ -285,7 +285,14 @@ BGP-driven.
 bond, and cradle attaches to it as the port (`PORT_MASTER` member aliasing
 for the XDP stage, reserved-MAC punt for LACPDUs — see l2-switching.md
 §LAG ports). MC-LAG needs the same `ad_actor_system` on every PE of the
-segment. BDD `cradle_evpn_mh_lag`. Remaining: single-active.
+segment. BDD `cradle_evpn_mh_lag`.
+
+**Single-active** (RFC 7432 §14.1.1): `SetEsRole{single_active}` makes a
+non-DF port a standby — `ES_DF_F_BLOCK` drops known unicast toward it and
+anything the CE sends into it (`l2_drop_sa`), on top of the BUM filter.
+Remote PEs reach the CE through the DF only: zebra forms no aliasing group
+for a segment whose ESI-label EC says single-active. BDD `cradle_evpn_mh_sa`
+(the standby drops both ways; all-active on the same port lets it through).
 
 ## Configuration walkthrough
 

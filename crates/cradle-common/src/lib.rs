@@ -831,6 +831,11 @@ pub struct EsDfKey {
 /// domain: withhold broadcast, multicast and unknown-unicast copies from the
 /// port (known unicast still flows — all-active multihoming).
 pub const ES_DF_F_NON_DF: u32 = 1 << 0;
+/// Single-active redundancy (RFC 7432 §14.1.1): this PE is not the
+/// Designated Forwarder and the segment's port is a standby — block every
+/// frame in both directions (known unicast toward the CE, and anything the
+/// CE sends into it), not only BUM. Set together with `ES_DF_F_NON_DF`.
+pub const ES_DF_F_BLOCK: u32 = 1 << 1;
 
 /// Per-port configuration (keyed by ifindex), shared by the L2 and L3 stages.
 #[repr(C)]
@@ -1202,8 +1207,11 @@ pub const STAT_L2_DROP_SPH: u32 = 52;
 /// an Ethernet Segment, encapsulated toward a member picked by flow hash
 /// from the segment's nexthop group (RFC 7432 §8.4).
 pub const STAT_L2_ES_NHG: u32 = 53;
+/// EVPN multihoming single-active: a frame dropped at a standby segment
+/// port (`ES_DF_F_BLOCK`) — toward the CE or arriving from it.
+pub const STAT_L2_DROP_SA: u32 = 54;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 54;
+pub const STAT_MAX: u32 = 55;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 

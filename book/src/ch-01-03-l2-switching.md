@@ -62,7 +62,10 @@ copies from the segment's ports in that domain (counted as
 `l2_drop_nondf`); known unicast still flows, as all-active multihoming
 requires. Over gRPC the same two facts are `SetEthernetSegment` and
 `SetEsRole`, which is how a control plane replays a DF re-election. Ports
-outside any segment are unaffected.
+outside any segment are unaffected. Add `"single_active": true` to a role
+for single-active redundancy: a non-DF port is then a standby that passes
+nothing in either direction (`l2_drop_sa`), and the DF alone carries the
+CE's traffic.
 
 The second half of multihoming is the **split horizon** (local bias): a
 BUM frame the CE sends into one PE is flooded to the other PE too, which
