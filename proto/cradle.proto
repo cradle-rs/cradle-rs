@@ -30,6 +30,11 @@ message L2Domain {
 message EthernetSegment {
   string esi = 1;             // 10-octet ESI, colon-hex — the segment's name
   repeated string ports = 2;  // local access port interface names
+  // RFC 7432 §8.3 (EVPN over MPLS): the ESI label this PE advertised for
+  // the segment in its per-ES A-D route. A peer PE of the segment pushes it
+  // under our EVI label on BUM that entered the segment through it, and
+  // cradle then withholds the copy from `ports` (split horizon). 0 = none.
+  uint32 esi_label = 3;
 }
 
 message EthernetSegmentDel {
@@ -344,6 +349,13 @@ message ReplSlot {
   string remote_vtep = 3;
   string remote_pe    = 4;  // MPLS: remote PE address (IPv4 or IPv6)
   uint32 remote_label = 5;  // MPLS: that PE's BUM (EVI) service label
+  // RFC 7432 §8.3 (MPLS only): an Ethernet Segment this slot serves
+  // exclusively — BUM that entered through it, toward `remote_pe` (a peer
+  // PE of the segment), each copy carrying that PE's `esi_label` for it
+  // under the service label. The plain slot toward the same PE stops
+  // serving that segment. Empty = the plain slot.
+  string esi = 6;
+  uint32 esi_label = 7;
 }
 
 // An RFC 9524 Replication segment: the local End.Replicate SID `sid` is a P2MP

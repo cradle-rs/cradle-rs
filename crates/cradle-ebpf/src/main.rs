@@ -74,6 +74,7 @@ use cradle_common::{
     XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2,
     XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
+use cradle_common::{STAT_MPLS_L2_ESI_POP, STAT_MPLS_L2_ESI_PUSH, SlotEs};
 use network_types::eth::EthHdr;
 
 // --- shared ---
@@ -263,6 +264,20 @@ static VTEP_ES: HashMap<[u8; 16], u64> = HashMap::with_max_entries(1024, 0);
 /// sees the bond. Written by the control plane from the bond's member list.
 #[map]
 static PORT_MASTER: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
+/// EVPN multihoming over MPLS (RFC 7432 §8.3), ingress side: a BUM
+/// replication slot (its flood-side ifindex, the bridge-domain member) →
+/// its Ethernet Segment affinity. `flood()` sends BUM that entered through
+/// segment N to a peer of N only through the slot carrying that peer's ESI
+/// label for N. See [`SlotEs`].
+#[map]
+static SLOT_ES: HashMap<u32, SlotEs> = HashMap::with_max_entries(256, 0);
+/// EVPN multihoming over MPLS (RFC 7432 §8.3), egress side: an ESI label
+/// this PE advertised in a per-ES A-D route → the segment id. A peer
+/// pushes it under our EVI label on BUM that entered the segment through
+/// it; `pop_decap_l2` pops it into `es_bits`, and `flood()` withholds the
+/// copy from the segment's ports like a VXLAN local-bias match.
+#[map]
+static ESI_LABEL: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 #[map]
 static ES_NHG: HashMap<EsNhgKey, u32> = HashMap::with_max_entries(1024, 0);
 #[map]
@@ -986,6 +1001,14 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
         Some(c) => unsafe { *c },
         None => 0,
     };
+    // RFC 7432 §8.3 (MPLS): the segment this frame entered through, as
+    // id + 1 (0 = not a segment port), picks which replication slot toward
+    // a peer of that segment gets the copy — the one carrying the peer's
+    // ESI label — and keeps it off the peer's plain slot (`SLOT_ES`).
+    let in_es: u32 = match PORT_ES.get_ptr(&iif) {
+        Some(id) => (unsafe { *id }) + 1,
+        None => 0,
+    };
     let mut slot: u16 = 0;
     while slot < MAX_L2_MEMBERS {
         if slot as u32 >= count {
@@ -993,7 +1016,18 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
         }
         if let Some(p) = L2_MEMBERS.get_ptr(&L2MemberKey { vlan, slot }) {
             let oif = unsafe { *p };
-            if oif != iif && !(local_only && REPL_SID.get_ptr(&oif).is_some()) {
+            let affinity_ok = match SLOT_ES.get_ptr(&oif) {
+                Some(r) => {
+                    let r = unsafe { &*r };
+                    if r.only != 0 {
+                        r.only == in_es
+                    } else {
+                        in_es == 0 || r.skip & (1u64 << ((in_es - 1) & 63)) == 0
+                    }
+                }
+                None => true,
+            };
+            if affinity_ok && oif != iif && !(local_only && REPL_SID.get_ptr(&oif).is_some()) {
                 if es_non_df(oif, vlan) {
                     stat_inc(STAT_L2_DROP_NONDF);
                 } else if es_bits != 0 && es_peer_port(oif, es_bits) {
@@ -3118,7 +3152,7 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
             REPL_KIND_MPLS => FDB_F_MPLS,
             _ => 0,
         };
-        return l2_overlay_encap(ctx, &t.addr, 0, flags, t.vni, bum);
+        return l2_overlay_encap(ctx, &t.addr, 0, flags, t.vni, t.esi_label, bum);
     }
     if let Some(p) = PORTS.get_ptr(&iif) {
         if unsafe { (*p).flags } & PORT_F_L2 != 0 {
@@ -3400,7 +3434,7 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
         };
         (&ent.remote_sid, ent.oif, ent.flags, aux)
     };
-    l2_overlay_encap(ctx, addr, nh_id, flags, aux, bum)
+    l2_overlay_encap(ctx, addr, nh_id, flags, aux, 0, bum)
 }
 
 /// The Ethernet Segment nexthop-group member a flow with hash `hash` maps
@@ -3475,6 +3509,7 @@ fn l2_overlay_encap(
     nh_id: u32,
     flags: u32,
     aux: u32,
+    esi_label: u32,
     bum: bool,
 ) -> Result<u32, ()> {
     if flags & FDB_F_MPLS != 0 {
@@ -3483,7 +3518,7 @@ fn l2_overlay_encap(
         } else {
             STAT_MPLS_L2_ENCAP
         };
-        l2_mpls_encap(ctx, addr, nh_id, aux, stat)
+        l2_mpls_encap(ctx, addr, nh_id, aux, esi_label, stat)
     } else if flags & FDB_F_VXLAN != 0 {
         let stat = if bum {
             STAT_VXLAN_FLOOD
@@ -3780,6 +3815,7 @@ fn l2_mpls_encap(
     addr: &[u8; 16],
     nh_id: u32,
     label: u32,
+    esi_label: u32,
     stat: u32,
 ) -> Result<u32, ()> {
     // Underlay adjacency: an explicit nexthop id (static config / a
@@ -3812,7 +3848,11 @@ fn l2_mpls_encap(
     if n > MAX_LABELS {
         return Ok(xdp_action::XDP_PASS);
     }
-    let grow = (EthHdr::LEN + 4 * (n + 1)) as i32;
+    // RFC 7432 §8.3: a BUM copy toward a peer PE of the segment the frame
+    // entered through carries that PE's ESI label under the service label
+    // (which is then no longer bottom of stack).
+    let esi = esi_label != 0;
+    let grow = (EthHdr::LEN + 4 * (n + 1) + if esi { 4 } else { 0 }) as i32;
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, -grow) } != 0 {
         return Err(());
     }
@@ -3833,12 +3873,22 @@ fn l2_mpls_encap(
     // The EVI service label, bottom of stack. `n <= MAX_LABELS`, so the offset
     // is one of a small constant set — spelled out rather than computed so the
     // verifier sees a constant packet offset per branch.
-    let svc = mpls_lse(label, 0, 1, MPLS_PIPE_TTL).to_be();
+    let svc = mpls_lse(label, 0, if esi { 0 } else { 1 }, MPLS_PIPE_TTL).to_be();
     match n {
         0 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF)? = svc },
         1 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 4)? = svc },
         2 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 8)? = svc },
         _ => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 12)? = svc },
+    }
+    if esi {
+        let lse = mpls_lse(esi_label, 0, 1, MPLS_PIPE_TTL).to_be();
+        match n {
+            0 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 4)? = lse },
+            1 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 8)? = lse },
+            2 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 12)? = lse },
+            _ => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 16)? = lse },
+        }
+        stat_inc(STAT_MPLS_L2_ESI_PUSH);
     }
     stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
@@ -5286,17 +5336,38 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
 /// MPLS counterpart of `srv6_dt2u`, sharing its `XDP_META_MAGIC_L2` hand-off
 /// (and with it `l2_switch`'s `from_overlay` split horizon).
 ///
-/// A service label that is not bottom-of-stack is malformed — what sits under
-/// it is not an Ethernet frame — so it is dropped rather than misparsed.
+/// A service label that is not bottom-of-stack carries exactly one more
+/// label under it: an ESI label (RFC 7432 §8.3) this PE advertised for one
+/// of its Ethernet Segments, pushed by a peer PE of that segment on BUM
+/// that entered the segment through it. It resolves (`ESI_LABEL`) to the
+/// segment's bit in `es_bits`, and the flood loop withholds the copy from
+/// the segment's ports — the MPLS split horizon, where no source address
+/// identifies the ingress PE. Anything else under the service label is
+/// malformed — not an Ethernet frame — and dropped rather than misparsed.
 #[inline(always)]
 fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
-    if s != 1 {
-        stat_inc(STAT_DROP);
-        return Ok(xdp_action::XDP_DROP);
-    }
-    // Drop the outer eth + the service LSE: the inner eth frame moves to the
-    // front, exactly as the `End.DT2U` decap leaves it.
-    let strip = (EthHdr::LEN + 4) as i32;
+    let (strip, es_bits) = if s == 1 {
+        ((EthHdr::LEN + 4) as i32, 0u64)
+    } else {
+        let lse = u32::from_be(unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 4)? });
+        let (esi_label, _tc, s2, _ttl) = mpls_lse_unpack(lse);
+        if s2 != 1 {
+            stat_inc(STAT_DROP);
+            return Ok(xdp_action::XDP_DROP);
+        }
+        match ESI_LABEL.get_ptr(&esi_label) {
+            Some(id) => {
+                stat_inc(STAT_MPLS_L2_ESI_POP);
+                ((EthHdr::LEN + 8) as i32, 1u64 << (unsafe { *id } & 63))
+            }
+            None => {
+                stat_inc(STAT_DROP);
+                return Ok(xdp_action::XDP_DROP);
+            }
+        }
+    };
+    // Drop the outer eth + the service LSE (+ the ESI LSE): the inner eth
+    // frame moves to the front, exactly as the `End.DT2U` decap leaves it.
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
         return Err(());
     }
@@ -5310,7 +5381,7 @@ fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
     unsafe {
         (*meta).magic = XDP_META_MAGIC_L2 ^ meta_cookie();
         (*meta).vrf_id = bd;
-        (*meta).es_bits = 0;
+        (*meta).es_bits = es_bits;
     }
     Ok(xdp_action::XDP_PASS)
 }

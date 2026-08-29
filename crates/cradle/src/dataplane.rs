@@ -18,6 +18,7 @@ use aya::{
         lpm_trie::{Key, LpmTrie},
     },
 };
+use cradle_common::SlotEs;
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
     EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, EsDfKey, EsNhgKey, EsNhgMemberKey,
@@ -199,6 +200,8 @@ pub struct Dataplane {
     /// with us (`flood()` drops an overlay copy toward a port whose
     /// segment bit is set for the frame's source).
     port_es: HashMap<MapData, u32, u32>,
+    slot_es: HashMap<MapData, u32, SlotEs>,
+    esi_label: HashMap<MapData, u32, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
     /// LAG member ifindex → its bond (the cradle port), for the XDP stage.
     port_master: HashMap<MapData, u32, u32>,
@@ -332,6 +335,10 @@ impl Dataplane {
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
             es_df: HashMap::try_from(bpf.take_map("ES_DF").context("map ES_DF missing")?)?,
             port_es: HashMap::try_from(bpf.take_map("PORT_ES").context("map PORT_ES missing")?)?,
+            slot_es: HashMap::try_from(bpf.take_map("SLOT_ES").context("map SLOT_ES missing")?)?,
+            esi_label: HashMap::try_from(
+                bpf.take_map("ESI_LABEL").context("map ESI_LABEL missing")?,
+            )?,
             vtep_es: HashMap::try_from(bpf.take_map("VTEP_ES").context("map VTEP_ES missing")?)?,
             port_master: HashMap::try_from(
                 bpf.take_map("PORT_MASTER")
@@ -952,6 +959,41 @@ impl Dataplane {
         let _ = self.port_es.remove(&ifindex);
     }
 
+    /// RFC 7432 §8.3 (MPLS): replication slot `flood_ifindex`'s Ethernet
+    /// Segment affinity — `only` = segment id + 1 for a slot carrying a
+    /// peer's ESI label for that segment, or 0 with `skip` = the bitmap of
+    /// segments a plain slot must not serve (their BUM goes through the
+    /// ESI-label slots instead). Both zero removes the row.
+    pub fn slot_es_set(&mut self, flood_ifindex: u32, only: u32, skip: u64) -> Result<()> {
+        if only == 0 && skip == 0 {
+            let _ = self.slot_es.remove(&flood_ifindex);
+        } else {
+            self.slot_es.insert(
+                flood_ifindex,
+                SlotEs {
+                    only,
+                    _pad: 0,
+                    skip,
+                },
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// RFC 7432 §8.3 (MPLS): `label` is an ESI label this PE advertised for
+    /// the segment with id `es_id` — a received BUM copy carrying it under
+    /// our service label is withheld from that segment's ports.
+    pub fn esi_label_set(&mut self, label: u32, es_id: u32) -> Result<()> {
+        self.esi_label.insert(label, es_id, 0)?;
+        Ok(())
+    }
+
+    /// The ESI label is no longer ours.
+    pub fn esi_label_del(&mut self, label: u32) {
+        let _ = self.esi_label.remove(&label);
+    }
+
     /// Alias LAG member `member` to its bond `port` for the XDP stage (a
     /// native XDP program attached to a bond runs on the members and sees
     /// their ifindex).
@@ -1441,6 +1483,7 @@ impl Dataplane {
             encap_ifindex,
             ReplTarget {
                 kind: REPL_KIND_SRV6,
+                esi_label: 0,
                 vni: 0,
                 addr: remote_sid.octets(),
             },
@@ -1461,6 +1504,7 @@ impl Dataplane {
             encap_ifindex,
             ReplTarget {
                 kind: REPL_KIND_VXLAN,
+                esi_label: 0,
                 vni,
                 addr: ip_to_v6_bytes(vtep),
             },
@@ -1471,18 +1515,24 @@ impl Dataplane {
     /// is MPLS-encapsulated toward PE `pe` with that PE's EVI service `label`
     /// at the bottom of the stack, under the transport LSP the underlay route
     /// to `pe` carries.
+    ///
+    /// `esi_label` (RFC 7432 §8.3): when non-zero, every copy also carries
+    /// it under the service label — the slot serves BUM that entered through
+    /// one Ethernet Segment toward a peer PE of it (see `slot_es_set`).
     pub fn repl_slot_add_mpls(
         &mut self,
         flood_ifindex: u32,
         encap_ifindex: u32,
         pe: IpAddr,
         label: u32,
+        esi_label: u32,
     ) -> Result<()> {
         self.repl_target_add(
             flood_ifindex,
             encap_ifindex,
             ReplTarget {
                 kind: REPL_KIND_MPLS,
+                esi_label,
                 vni: label,
                 addr: ip_to_v6_bytes(pe),
             },

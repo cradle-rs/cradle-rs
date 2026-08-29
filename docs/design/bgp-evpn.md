@@ -259,9 +259,23 @@ the control plane gives each segment an id (0..64), renders `PORT_ES`
 XDP stage looks the outer source up in `VTEP_ES` and carries the bitmap in
 `CradleXdpMeta::es_bits`; `flood()` withholds the copy from any port whose
 segment bit is set (`l2_drop_sph`). Covers VXLAN (v4/v6) and SRv6 (outer
-source); MPLS has no source address (ESI label: future). Static config:
-`ethernet_segments[].peers`. BDD `cradle_evpn_mh_sph` (the DF must not echo
-the CE's own frames back); zebra-rs tees the Type-4 peers (`SetEsPeers`).
+source). Static config: `ethernet_segments[].peers`. BDD
+`cradle_evpn_mh_sph` (the DF must not echo the CE's own frames back);
+zebra-rs tees the Type-4 peers (`SetEsPeers`).
+
+**Over MPLS — the ESI label** (RFC 7432 §8.3): no source address, so the
+ingress segment travels as a label. `SetEthernetSegment.esi_label` is the
+label this PE advertised for the segment (its per-ES A-D route); an
+incoming copy carrying it under our EVI label decaps into the segment's
+`es_bits` bit (`ESI_LABEL`, `mpls_l2_esi_pop`) and the flood loop
+withholds it from the segment's ports. Toward a peer PE of the segment the
+control plane adds a second replication slot `AddReplSlot {remote_pe,
+remote_label, esi, esi_label}` carrying that peer's label
+(`mpls_l2_esi_push`); `SLOT_ES` makes it the only slot the segment's BUM
+uses toward that PE and keeps the segment off the plain slot. Static
+config: `ethernet_segments[].esi_label`, `repl_slots[].esi` +
+`.esi_label`. BDD `cradle_evpn_mh_mpls`; zebra-rs allocates the labels,
+advertises them in the ESI Label EC and tees both sides.
 
 **Aliasing and mass withdraw** (RFC 7432 §8.4 / §8.2): `SetEsNhg {esi, bd,
 members}` is the Ethernet Segment nexthop group for one bridge domain —

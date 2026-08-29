@@ -625,6 +625,12 @@ pub struct ReplTarget {
     /// full IPv6 (IPv6-underlay VXLAN).
     /// `REPL_KIND_MPLS`: the remote PE's address (v4-mapped or full IPv6).
     pub addr: [u8; 16],
+    /// RFC 7432 §8.3 (`REPL_KIND_MPLS` only): the ESI label pushed under
+    /// the service label on each copy — the remote PE's label for the
+    /// Ethernet Segment the frame entered through, so it can withhold the
+    /// copy from that segment. 0 = none (every other kind, every unicast
+    /// target, and a slot serving no segment).
+    pub esi_label: u32,
 }
 
 /// [`ReplTarget::addr`] is a remote `End.DT2M` SID (MAC-in-SRv6 per copy).
@@ -636,6 +642,22 @@ pub const REPL_KIND_VXLAN: u32 = 1;
 /// ingress replication, RFC 7432): each copy is imposed with that PE's EVI
 /// service label ([`ReplTarget::vni`]) under the transport LSP.
 pub const REPL_KIND_MPLS: u32 = 2;
+
+/// A BUM replication slot's Ethernet Segment affinity (the `SLOT_ES` map's
+/// value, keyed by the slot's flood-side ifindex) — RFC 7432 §8.3 split
+/// horizon for EVPN over MPLS, where no source address identifies the
+/// ingress PE and the ESI label does instead. BUM a CE sent into segment
+/// N reaches a peer PE of N through a slot whose copies carry that PE's
+/// ESI label for N: `only` = N's id + 1 on that slot (it serves no other
+/// ingress), and N's bit in `skip` on the peer's plain slot (which serves
+/// every other ingress). A slot with no row serves everything.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SlotEs {
+    pub only: u32,
+    pub _pad: u32,
+    pub skip: u64,
+}
 
 /// Maximum downstream branches of one Replication segment (RFC 9524).
 pub const MAX_REPL_BRANCHES: usize = 16;
@@ -1220,8 +1242,15 @@ pub const STAT_L2_ES_NHG: u32 = 53;
 /// EVPN multihoming single-active: a frame dropped at a standby segment
 /// port (`ES_DF_F_BLOCK`) — toward the CE or arriving from it.
 pub const STAT_L2_DROP_SA: u32 = 54;
+/// EVPN multihoming over MPLS (RFC 7432 §8.3): a BUM copy sent with an ESI
+/// label under the service label — toward a peer PE of the Ethernet
+/// Segment the frame entered through.
+pub const STAT_MPLS_L2_ESI_PUSH: u32 = 55;
+/// EVPN multihoming over MPLS (RFC 7432 §8.3): a received BUM copy whose
+/// ESI label named one of this PE's segments, popped into `es_bits`.
+pub const STAT_MPLS_L2_ESI_POP: u32 = 56;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 55;
+pub const STAT_MAX: u32 = 57;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -1296,6 +1325,7 @@ mod user {
         EsDfKey,
         EsNhgKey,
         EsNhgMemberKey,
+        SlotEs,
         MplsEntry,
         Vrf4Key,
         VrfIdKey,
