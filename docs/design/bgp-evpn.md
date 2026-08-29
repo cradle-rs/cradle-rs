@@ -287,6 +287,17 @@ for the XDP stage, reserved-MAC punt for LACPDUs — see l2-switching.md
 §LAG ports). MC-LAG needs the same `ad_actor_system` on every PE of the
 segment. BDD `cradle_evpn_mh_lag`.
 
+**Over SRv6**: none of the above is VXLAN-specific — the DF gate is an
+egress check, the aliasing group's members carry their own overlay kind
+(`remote_sid` = the PE's `End.DT2U` SID), and the split horizon keys the
+segment bitmap on the outer source, which for MAC-in-SRv6 is the outer
+IPv6 source (`srv6_source`). So an ES peer under SRv6 is the PE's outer
+source address, not a SID; zebra-rs makes its outer source the IPv6 EVPN
+source it advertises as its Type-4 Originating IP (`vtep-source`) so the
+peers' match holds. BDD `cradle_evpn_mh_srv6` (static: split horizon,
+non-DF filter, aliasing, both negative controls) and
+`cradle_evpn_mh_srv6_zebra` (BGP-driven, incl. the DF's withdrawal).
+
 **Single-active** (RFC 7432 §14.1.1): `SetEsRole{single_active}` makes a
 non-DF port a standby — `ES_DF_F_BLOCK` drops known unicast toward it and
 anything the CE sends into it (`l2_drop_sa`), on top of the BUM filter.
