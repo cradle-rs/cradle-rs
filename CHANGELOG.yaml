@@ -11,6 +11,62 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.1
+  date: 2026-08-28T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN multihoming over MPLS
+        * ESI label split horizon (RFC 7432 §8.3): over MPLS no outer
+          source identifies the ingress PE, so a CE's BUM entering the
+          non-DF used to come back to it through the DF. Each PE now
+          owns an ESI label per segment; a peer PE pushes it under the
+          EVI label on BUM that entered the segment through it
+          (`mpls_l2_esi_push`), and the receiver pops it into the
+          segment's `es_bits` (`ESI_LABEL`, `mpls_l2_esi_pop`) — the
+          same flood-loop gate the VXLAN local bias and SRv6 outer
+          source already drive
+        * `SLOT_ES` steers the labelled replication slot only toward
+          peers of the segment, while the peer's plain slot skips it;
+          `flood()` picks the copy from the ingress port's `PORT_ES`
+
+    - note: |
+        ### LAG ports
+        * Bond membership is tracked live: the link monitor parses
+          `master` changes and reconciles the `PORT_MASTER` aliases
+          from sysfs, so a member enslaved, released or replaced by a
+          new device after attach is recognised by the XDP stage
+          without a re-`SetPort`
+
+    - note: |
+        ### Control plane and configuration
+        * `SetEthernetSegment.esi_label`; `AddReplSlot {esi, esi_label}`
+          for a per-(peer, segment) slot, keyed apart from the plain
+          slot
+        * Static config `ethernet_segments[].esi_label` and
+          `repl_slots[].esi` / `.esi_label`
+        * `cradle dump l2` prints the `es`, `mpls` and `static` FDB
+          flags — an `FDB_F_ESNHG` entry was indistinguishable from a
+          plain remote
+
+    - note: |
+        ### BDD / test infrastructure
+        * EVPN multihoming over SRv6: `cradle_evpn_mh_srv6` (static)
+          and `cradle_evpn_mh_srv6_zebra` (BGP-driven over IS-IS/SRv6)
+          — split horizon on the End.DT2M outer source, the non-DF
+          filter, aliasing over a {pe2, pe3} End.DT2U group, and DF
+          re-election on withdrawal
+        * EVPN multihoming over MPLS: `cradle_evpn_mh_mpls` (static)
+          and `cradle_evpn_mh_mpls_zebra` (BGP-driven over IS-IS
+          SR-MPLS with a P-transit LSR) — ESI labels allocated and teed
+          by zebra-rs, the DF withholding the non-DF's echo, a segment
+          deleted and re-added through BGP drawing a fresh label
+        * `cradle_evpn_mh_lag` rebuilds a bond member with a new ifindex
+          and proves unicast encapsulation resumes; new steps `I record
+          the cradle stat …` / `… should exceed its recorded value`
+
 - semver: 1.1.0
   date: 2026-08-28T18:00:00+09:00
   distribution: unstable
