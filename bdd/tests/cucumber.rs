@@ -15,6 +15,9 @@ use serde_json::Value;
 pub struct World {
     topology_running: bool,
     feature_tag: String,
+    /// `I record the cradle stat …` snapshots, keyed `"{namespace}/{stat}"`,
+    /// for `… should exceed its recorded value`.
+    recorded_stats: std::collections::HashMap<String, u64>,
 }
 
 impl World {
@@ -875,6 +878,69 @@ async fn cradle_stat_zero(world: &mut World, stat: String, namespace: String, so
         }
     }
     panic!("cradle stat {} not found in {}", stat, scoped);
+}
+
+/// Read one counter from `cradle stats` over gRPC; `None` when the command
+/// fails or the counter is not listed.
+async fn cradle_stat_read(scoped: &str, ep: &str, stat: &str) -> Option<u64> {
+    let cradle = cradle_bin();
+    let out = netns::exec_in_netns(scoped, &cradle, &["stats", "--grpc", ep])
+        .await
+        .ok()?;
+    out.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        (it.next() == Some(stat))
+            .then(|| it.next().and_then(|s| s.parse::<u64>().ok()))
+            .flatten()
+    })
+}
+
+/// Snapshot a counter so a later step can prove it moved — for scenarios
+/// that re-drive a path already exercised earlier in the feature, where
+/// nonzero says nothing.
+#[when(expr = "I record the cradle stat {string} in namespace {string} via gRPC as {string}")]
+async fn cradle_stat_record(world: &mut World, stat: String, namespace: String, sock: String) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let v = cradle_stat_read(&scoped, &ep, &stat)
+        .await
+        .unwrap_or_else(|| panic!("cradle stat {} not found in {}", stat, scoped));
+    println!("✓ recorded cradle stat {} = {} in {}", stat, v, scoped);
+    world.recorded_stats.insert(format!("{scoped}/{stat}"), v);
+}
+
+/// Poll `cradle stats` over gRPC and assert the named counter grew past the
+/// value `I record the cradle stat …` took earlier in the feature.
+#[then(
+    expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should exceed its recorded value"
+)]
+async fn cradle_stat_exceeds_recorded(
+    world: &mut World,
+    stat: String,
+    namespace: String,
+    sock: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let was = *world
+        .recorded_stats
+        .get(&format!("{scoped}/{stat}"))
+        .unwrap_or_else(|| panic!("cradle stat {} in {} was never recorded", stat, scoped));
+    let mut last = was;
+    for _ in 0..15 {
+        if let Some(v) = cradle_stat_read(&scoped, &ep, &stat).await {
+            last = v;
+            if v > was {
+                println!("✓ cradle stat {} = {} (> {}) in {}", stat, v, was, scoped);
+                return;
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    panic!(
+        "cradle stat {} stayed at {} (recorded {}) in {}",
+        stat, last, was, scoped
+    );
 }
 
 /// Poll `cradle stats` over gRPC and assert the named counter reached at

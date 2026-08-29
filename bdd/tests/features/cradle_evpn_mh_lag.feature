@@ -149,6 +149,33 @@ Feature: EVPN multihoming over a LACP LAG — the Ethernet Segment as a bond
     And command "tc -s filter show dev eth0 ingress pref 1" in namespace "ce" should eventually not contain "Sent 0 bytes 0 pkt"
     And command "tc -s filter show dev eth1 ingress pref 1" in namespace "ce" should eventually contain "Sent 0 bytes 0 pkt"
 
+  Scenario: A rebuilt bond member is re-aliased without a SetPort
+    # Tear the pe3 leg down and build it again: deleting the veth drops it
+    # from both bonds, and the rebuilt link gets a NEW ifindex on each end.
+    # Nothing re-applies pe3's port — cradle's link monitor sees the new
+    # member join bond0 and aliases it (PORT_MASTER) by itself.
+    When I record the cradle stat "vxlan_encap" in namespace "pe3" via gRPC as "ctl3"
+    And I execute "ip link del pe3c" in namespace "pe3"
+    And I connect namespace "ce" interface "eth1" to namespace "pe3" interface "pe3c"
+    And I execute "ip link set pe3c down" in namespace "pe3"
+    And I execute "ip link set pe3c master bond0" in namespace "pe3"
+    And I execute "ip link set pe3c up" in namespace "pe3"
+    And I execute "ip link set eth1 down" in namespace "ce"
+    And I execute "ip link set eth1 master bond0" in namespace "ce"
+    And I execute "ip link set eth1 up" in namespace "ce"
+    # Pin the CE's replies to the rebuilt leg (eth0 out of its aggregator)
+    # and c1's frames to pe3 (the group narrowed to it).
+    And I execute "ip link set eth0 down" in namespace "ce"
+    And I apply cradle config "pe1-nhg-pe3.json" to namespace "pe1" via gRPC as "ctl1"
+    Then command "cat /sys/class/net/bond0/bonding/ad_num_ports" in namespace "pe3" should eventually contain "1"
+    And command "cat /sys/class/net/bond0/bonding/ad_num_ports" in namespace "ce" should eventually contain "1"
+    And ping from "c1" to "10.0.0.2" should eventually succeed
+    # The CE's replies now enter pe3 on the new member. Only because the
+    # monitor re-aliased it does the XDP stage recognise the port and
+    # unicast-encapsulate them toward c1 again; with the stale alias of the
+    # deleted ifindex they would fall through to the TC stage and flood.
+    And the cradle stat "vxlan_encap" in namespace "pe3" via gRPC as "ctl3" should exceed its recorded value
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop cradle in namespace "pe1"

@@ -248,14 +248,18 @@ segment — an MC-LAG to the CE — or a static bond). cradle attaches to the
 bond like any port; two things make it work. TC on the bond sees the bond,
 but a native XDP program attached to a bond runs on its **members**, so
 `ingress_ifindex` is the member's: `PORT_MASTER` (member → bond, resolved
-from `/sys/class/net/<bond>/bonding/slaves` at `SetPort`; re-`SetPort`
-after changing membership) is consulted by `xdp_iif()` at every XDP-stage
-port decision, so learning records the bond and every per-port table keys
-on it. Delivery toward the bond is a plain `redirect(bond)`; the bonding
+from `/sys/class/net/<bond>/bonding/slaves` at `SetPort` and kept current
+by the link monitor — the `ip -o monitor link` feed re-reads the list and
+reconciles the aliases whenever a link reports `master <port>`, a link we
+alias leaves or is deleted, or the bond itself changes; no re-`SetPort`) is
+consulted by `xdp_iif()` at every XDP-stage port decision, so learning
+records the bond and every per-port table keys on it. Delivery toward the bond is a plain `redirect(bond)`; the bonding
 driver hashes onto a member. The reserved-MAC punt above keeps LACP alive
 through the datapath. Bond XDP supports the xor, 802.3ad and active-backup
 modes. BDD: `cradle_evpn_mh_lag` (LACP aggregates through cradle; the
-aliasing disabled, the CE's frames stop being unicast-encapsulated). Note
+aliasing disabled, the CE's frames stop being unicast-encapsulated; a leg
+deleted and rebuilt with a new ifindex is re-aliased by the monitor and
+unicast-encapsulates again). Note
 the punt is not what keeps LACP up there: the bonding driver consumes
 LACPDUs on the member before either hook, and with slot-based replication
 the XDP stage passes BUM anyway — the punt matters for the BUM-sentinel

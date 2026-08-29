@@ -285,8 +285,8 @@ struct PortAttachment {
     vrf_id: u32,
     /// The port's LAG members (a kernel bond's slaves), aliased to it in
     /// `PORT_MASTER` so the XDP stage — which runs on the members — sees
-    /// the bond. Resolved at `set_port`; re-`SetPort` after changing the
-    /// bond's membership.
+    /// the bond. Resolved at `set_port` and kept current by the link
+    /// monitor (`reconcile_lag_members`) as members join, leave or vanish.
     lag_members: Vec<u32>,
 }
 
@@ -321,6 +321,72 @@ fn reconcile_derived(
         let _ = dp.nexthop_del(nh);
     }
     att.derived = new_derived;
+}
+
+/// Bring the `PORT_MASTER` aliases of port `ifindex` (a kernel bond, or
+/// anything else — then it has no members) in line with the bond's current
+/// member list from sysfs: alias members that joined, drop those that left
+/// or vanished. Returns `(joined, left)` counts, both 0 when nothing moved.
+/// Shared by `set_port` and the link monitor, so a membership change after
+/// attach needs no re-`SetPort`.
+fn reconcile_lag_members(
+    att: &mut PortAttachment,
+    dp: &mut Dataplane,
+    ifindex: u32,
+) -> Result<(usize, usize)> {
+    let members: Vec<u32> = util::lag_members(&att.name)
+        .iter()
+        .filter_map(|m| util::ifindex_of(m).ok())
+        .collect();
+    let mut left = 0;
+    for old in att.lag_members.iter().filter(|m| !members.contains(m)) {
+        dp.port_master_del(*old);
+        left += 1;
+    }
+    let mut joined = 0;
+    for m in members.iter().filter(|m| !att.lag_members.contains(m)) {
+        dp.port_master_set(*m, ifindex)?;
+        joined += 1;
+    }
+    att.lag_members = members;
+    Ok((joined, left))
+}
+
+/// One `ip -o monitor link` line, reduced to what the link monitor acts on.
+#[derive(Debug, PartialEq, Eq)]
+struct LinkEvent {
+    ifindex: u32,
+    /// Deleted, or reported `state DOWN` / `state LOWERLAYERDOWN`.
+    down: bool,
+    /// Reported `state UP`.
+    up: bool,
+    /// The `master <name>` the link is enslaved to, when it has one.
+    master: Option<String>,
+}
+
+impl LinkEvent {
+    /// Lines start "IDX: name: <FLAGS> ... [master NAME] state STATE ...";
+    /// deleted links are prefixed "Deleted ". Anything else is skipped.
+    fn parse(line: &str) -> Option<Self> {
+        let deleted = line.starts_with("Deleted ");
+        let rest = line.strip_prefix("Deleted ").unwrap_or(line);
+        let (idx_str, _) = rest.split_once(':')?;
+        let ifindex = idx_str.trim().parse::<u32>().ok()?;
+        let mut words = rest.split_whitespace();
+        let mut master = None;
+        while let Some(w) = words.next() {
+            if w == "master" {
+                master = words.next().map(str::to_string);
+                break;
+            }
+        }
+        Some(Self {
+            ifindex,
+            down: deleted || rest.contains("state DOWN") || rest.contains("state LOWERLAYERDOWN"),
+            up: rest.contains("state UP"),
+            master,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -642,26 +708,20 @@ impl Control {
         // Reconcile against what an earlier set_port derived (different VRF,
         // addresses, or an L3→L2 role change): the new set was just
         // (re-)inserted above, so remove only the leftovers.
-        // A LAG (kernel bond) port: alias its members to it for the XDP
-        // stage, which runs on the members. Replace semantics.
-        let members: Vec<u32> = util::lag_members(name)
-            .iter()
-            .filter_map(|m| util::ifindex_of(m).ok())
-            .collect();
         if let Some(att) = attached.get_mut(&ifindex) {
             reconcile_derived(att, &mut dp, new_derived);
             att.l3 = l3;
             att.vrf_id = vrf_id;
-            for old in att.lag_members.drain(..) {
-                dp.port_master_del(old);
+            // A LAG (kernel bond) port: alias its members to it for the XDP
+            // stage, which runs on the members. The link monitor keeps the
+            // set current from here on.
+            reconcile_lag_members(att, &mut dp, ifindex)?;
+            if !att.lag_members.is_empty() {
+                info!(
+                    "port {name}: LAG with {} member(s) aliased",
+                    att.lag_members.len()
+                );
             }
-            for &m in &members {
-                dp.port_master_set(m, ifindex)?;
-            }
-            if !members.is_empty() {
-                info!("port {name}: LAG with {} member(s) aliased", members.len());
-            }
-            att.lag_members = members;
         }
         Ok(())
     }
@@ -1731,9 +1791,13 @@ impl Control {
 
     /// Start the link monitor: an `ip -o monitor link` subprocess feeds
     /// carrier/admin transitions into the `LINK_DOWN` map, arming the
-    /// datapath's protected-nexthop failover within event latency.
+    /// datapath's protected-nexthop failover within event latency, and
+    /// re-aliases a LAG port's members (`PORT_MASTER`) whenever a link
+    /// joins or leaves a bond that is a cradle port, or such a member is
+    /// deleted — so bond membership can change after `SetPort`.
     pub fn start_link_monitor(&self) {
         let dp = self.dp.clone();
+        let attached = self.attached.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let child = tokio::process::Command::new("ip")
@@ -1752,30 +1816,52 @@ impl Control {
             };
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                // `ip -o monitor link` lines start "IDX: name: <FLAGS> ...
-                // state STATE ...". Deleted links report "Deleted IDX: ...".
-                let rest = line.strip_prefix("Deleted ").unwrap_or(&line);
-                let Some((idx_str, _)) = rest.split_once(':') else {
+                let Some(ev) = LinkEvent::parse(&line) else {
                     continue;
                 };
-                let Ok(ifindex) = idx_str.trim().parse::<u32>() else {
-                    continue;
-                };
-                let down = line.starts_with("Deleted ")
-                    || rest.contains("state DOWN")
-                    || rest.contains("state LOWERLAYERDOWN");
-                let up = rest.contains("state UP");
-                if !down && !up {
+                if ev.down || ev.up {
+                    if let Err(e) = dp.lock().await.link_state_set(ev.ifindex, ev.down) {
+                        warn!("link monitor: LINK_DOWN update for {}: {e:#}", ev.ifindex);
+                    } else if ev.down {
+                        info!("link {} down — protected nexthops fail over", ev.ifindex);
+                    }
+                }
+                // LAG membership: the event names a master that is one of
+                // our ports (a member joined it), or concerns a link we
+                // alias to one (it left, or was deleted), or is the bond
+                // itself. Re-read the bond's member list and reconcile.
+                // Lock order: attached → dp (same as set_port/del_port).
+                let mut attached = attached.lock().await;
+                let ports: Vec<u32> = attached
+                    .iter()
+                    .filter(|(ix, att)| {
+                        **ix == ev.ifindex
+                            || ev.master.as_deref() == Some(att.name.as_str())
+                            || att.lag_members.contains(&ev.ifindex)
+                    })
+                    .map(|(ix, _)| *ix)
+                    .collect();
+                if ports.is_empty() {
                     continue;
                 }
-                if let Err(e) = dp.lock().await.link_state_set(ifindex, down) {
-                    warn!("link monitor: LINK_DOWN update for {ifindex}: {e:#}");
-                } else if down {
-                    info!("link {ifindex} down — protected nexthops fail over");
+                let mut dp = dp.lock().await;
+                for port in ports {
+                    let Some(att) = attached.get_mut(&port) else {
+                        continue;
+                    };
+                    match reconcile_lag_members(att, &mut dp, port) {
+                        Ok((0, 0)) => {}
+                        Ok((joined, left)) => info!(
+                            "port {}: LAG membership changed ({joined} joined, {left} left; {} aliased)",
+                            att.name,
+                            att.lag_members.len()
+                        ),
+                        Err(e) => warn!("link monitor: LAG aliases for {}: {e:#}", att.name),
+                    }
                 }
             }
         });
-        info!("link monitor started (protected-nexthop failover)");
+        info!("link monitor started (protected-nexthop failover, LAG membership)");
     }
 
     /// Start the address monitor: an `ip -o monitor address` subprocess
@@ -4207,5 +4293,50 @@ impl Cradle for GrpcService {
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
+    }
+}
+
+#[cfg(test)]
+mod link_event_tests {
+    use super::LinkEvent;
+
+    fn ev(ifindex: u32, down: bool, up: bool, master: Option<&str>) -> LinkEvent {
+        LinkEvent {
+            ifindex,
+            down,
+            up,
+            master: master.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn enslave_names_the_master() {
+        let line = "4: m0@m0p: <NO-CARRIER,BROADCAST,MULTICAST,SLAVE,UP,M-DOWN> mtu 1500 \
+                    qdisc noqueue master bond0 state LOWERLAYERDOWN group default \\    \
+                    link/ether 2a:db:90:a5:b4:71 brd ff:ff:ff:ff:ff:ff";
+        assert_eq!(
+            LinkEvent::parse(line),
+            Some(ev(4, true, false, Some("bond0")))
+        );
+    }
+
+    #[test]
+    fn nomaster_has_no_master() {
+        let line = "4: m0@m0p: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue \
+                    state UP group default \\    link/ether 2a:db:90:a5:b4:71 brd ff:ff:ff:ff:ff:ff";
+        assert_eq!(LinkEvent::parse(line), Some(ev(4, false, true, None)));
+    }
+
+    #[test]
+    fn deleted_is_down() {
+        let line = "Deleted 4: m0@NONE: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN \
+                    group default \\    link/ether 2a:db:90:a5:b4:71 brd ff:ff:ff:ff:ff:ff";
+        assert_eq!(LinkEvent::parse(line), Some(ev(4, true, false, None)));
+    }
+
+    #[test]
+    fn garbage_is_skipped() {
+        assert_eq!(LinkEvent::parse(""), None);
+        assert_eq!(LinkEvent::parse("x: y"), None);
     }
 }
