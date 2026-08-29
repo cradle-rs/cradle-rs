@@ -120,6 +120,11 @@ pub struct EthernetSegmentCfg {
     pub esi: String,
     #[serde(default)]
     pub ports: Vec<String>,
+    /// RFC 7432 §8.3 (EVPN over MPLS): the ESI label this PE advertised for
+    /// the segment. A received BUM copy carrying it under our service label
+    /// came from a peer PE of the segment and is withheld from `ports`.
+    #[serde(default)]
+    pub esi_label: u32,
     #[serde(default)]
     pub roles: Vec<EsRoleCfg>,
     /// The other PEs on the segment (VTEP / overlay source addresses):
@@ -196,6 +201,15 @@ pub struct ReplSlotCfg {
     /// The remote PE's BUM (EVI) service label (EVPN over MPLS).
     #[serde(default)]
     pub label: u32,
+    /// RFC 7432 §8.3 (MPLS only): the Ethernet Segment this slot serves
+    /// exclusively — BUM that entered through it, toward `remote_pe` (a
+    /// peer PE of the segment), each copy carrying `esi_label` (that PE's
+    /// label for the segment) under the service label. The plain slot
+    /// toward the same PE and label stops serving that segment.
+    #[serde(default)]
+    pub esi: Option<String>,
+    #[serde(default)]
+    pub esi_label: u32,
 }
 
 /// An RFC 9524 Replication segment: the local `End.Replicate` SID `sid` (also
@@ -713,7 +727,8 @@ impl Config {
             ctl.set_l2_domain(vlan, &members).await?;
         }
         for es in &self.ethernet_segments {
-            ctl.set_ethernet_segment(&es.esi, &es.ports).await?;
+            ctl.set_ethernet_segment(&es.esi, &es.ports, es.esi_label)
+                .await?;
             for r in &es.roles {
                 ctl.set_es_role(&es.esi, r.bd, r.df, r.single_active)
                     .await?;
@@ -984,8 +999,20 @@ impl Config {
                         "repl slot {}: remote_pe needs a 20-bit service label",
                         r.flood_port
                     );
-                    ctl.add_repl_slot_mpls(&r.flood_port, &r.encap_port, pe, r.label)
-                        .await?;
+                    anyhow::ensure!(
+                        r.esi.is_some() == (r.esi_label != 0),
+                        "repl slot {}: esi and esi_label go together",
+                        r.flood_port
+                    );
+                    ctl.add_repl_slot_mpls(
+                        &r.flood_port,
+                        &r.encap_port,
+                        pe,
+                        r.label,
+                        r.esi.as_deref(),
+                        r.esi_label,
+                    )
+                    .await?;
                 }
                 _ => anyhow::bail!(
                     "repl slot {}: exactly one of remote_sid / remote_vtep / remote_pe",

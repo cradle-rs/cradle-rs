@@ -223,9 +223,24 @@ Type-4 routes) into `VTEP_ES` with a per-segment id (64 max), and
 the PEs' **outer source addresses** (`srv6_source`), not their SIDs — the
 End.DT2U/DT2M decap (`srv6_dt2u`) reads the outer IPv6 source the same
 way the VXLAN decap reads the outer VTEP. MPLS decaps carry no source
-address and get no split horizon (the ESI label is future work). BDD:
-`cradle_evpn_mh_sph` (VXLAN), `cradle_evpn_mh_srv6` (SRv6: split horizon,
-non-DF filter and aliasing in one feature). On the unicast side, an `FDB_F_ESNHG` entry names a
+address, so there the **ESI label** identifies the ingress segment
+(RFC 7432 §8.3): each PE advertises one per segment it is attached to
+(`SetEthernetSegment.esi_label` → `ESI_LABEL`, label → segment id), and a
+peer PE of the segment pushes it under the EVI label on BUM that entered
+the segment through it. `pop_decap_l2` accepts a service label that is not
+bottom of stack exactly when an `ESI_LABEL` row names the label beneath
+(`mpls_l2_esi_pop`; any other stack is dropped) and turns it into the
+segment's `es_bits` bit — the same flood-loop check as the source-address
+match. On the ingress side the label is pushed only toward peers of the
+segment: a replication slot per (peer, segment) carries it
+(`ReplTarget.esi_label`, `mpls_l2_esi_push`), and `SLOT_ES` gives that slot
+`only` = the segment's id + 1 while the peer's plain slot gets the
+segment's bit in `skip` — `flood()` reads the ingress port's `PORT_ES` id
+and routes the copy accordingly. BDD: `cradle_evpn_mh_sph` (VXLAN),
+`cradle_evpn_mh_srv6` (SRv6), `cradle_evpn_mh_mpls` (MPLS: ESI-label
+split horizon, non-DF filter and aliasing in one feature; the negative
+control takes the port off the segment, so its copies carry no label and
+the DF echoes). On the unicast side, an `FDB_F_ESNHG` entry names a
 segment rather than a remote: the XDP encap resolves it through the
 `(segment, domain)` nexthop group (`ES_NHG` count + `ES_NHG_MEMBER`
 slots, `ReplTarget`-shaped members) by inner-flow hash — RFC 7432 §8.4

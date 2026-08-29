@@ -82,7 +82,31 @@ by their VTEP / overlay source address:
 An overlay frame whose source is one of `peers` is then never flooded to
 `ports`, even on the DF (counted as `l2_drop_sph`). Over gRPC this is
 `SetEsPeers` (replace semantics; an empty list clears it). It applies to
-VXLAN and SRv6 overlays — MPLS frames carry no source address.
+VXLAN and SRv6 overlays.
+
+MPLS frames carry no source address, so there the segment travels as a
+label (RFC 7432 §8.3): give the segment the **ESI label** this PE
+advertised for it, and toward each peer PE of the segment add a second
+replication slot that pushes *that* PE's ESI label under its EVI label —
+the segment's BUM uses that slot alone toward the peer, and the peer pops
+the label into the same split-horizon check:
+
+```json
+    { "esi": "00:00:00:00:00:00:00:00:00:01",
+      "ports": ["pe3c"],
+      "roles": [ { "bd": 100, "df": false } ],
+      "esi_label": 3900 }
+    ...
+    "repl_slots": [
+      { "flood_port": "r32a",  "encap_port": "r32b",  "remote_pe": "10.255.0.2", "label": 2200 },
+      { "flood_port": "r32ea", "encap_port": "r32eb", "remote_pe": "10.255.0.2", "label": 2200,
+        "esi": "00:00:00:00:00:00:00:00:00:01", "esi_label": 2900 }
+    ]
+```
+
+`cradle stats` counts the pushes and pops (`mpls_l2_esi_push`,
+`mpls_l2_esi_pop`); a received copy whose label under the EVI label is not
+one of ours is dropped.
 
 The remote side of multihoming is **aliasing**: a MAC learned behind a
 segment may be sent to any PE on it. Give the segment a nexthop group per

@@ -50,6 +50,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     .set_ethernet_segment(pb::EthernetSegment {
                         esi: es.esi.clone(),
                         ports: es.ports.clone(),
+                        esi_label: es.esi_label,
                     })
                     .await?;
                 for r in &es.roles {

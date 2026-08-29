@@ -127,6 +127,8 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "l2_drop_sph",
     "l2_es_nhg",
     "l2_drop_sa",
+    "mpls_l2_esi_push",
+    "mpls_l2_esi_pop",
 ];
 
 /// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
@@ -176,6 +178,10 @@ struct EsState {
     nhg: std::collections::BTreeMap<u16, (bool, Vec<EsMember>)>,
     /// The bridge domains whose `ES_NHG` group this segment currently owns.
     programmed_nhg: Vec<u16>,
+    /// RFC 7432 §8.3 (MPLS): the ESI label this PE advertised for the
+    /// segment (0 = none), and the one currently in `ESI_LABEL`.
+    esi_label: u32,
+    programmed_esi_label: u32,
 }
 
 /// All Ethernet Segments plus the state shared between them: the id
@@ -209,8 +215,33 @@ fn es_entry<'a>(tbl: &'a mut EsTable, esi: &str) -> Result<&'a mut EsState> {
     Ok(tbl.segments.get_mut(esi).expect("just inserted"))
 }
 
-/// A BUM replication slot's veth pair: (A-end name, A ifindex, B ifindex).
-type ReplSlot = (String, u32, u32);
+/// A cradle-owned veth pair: (A-end name, A ifindex, B ifindex) — the RFC
+/// 9524 Bud leaf veths.
+type ReplLeaf = (String, u32, u32);
+
+/// A cradle-owned BUM replication slot: its veth pair (A-end name, A
+/// ifindex, B ifindex) and, for an MPLS slot, the `(PE, label)` group it
+/// belongs to for RFC 7432 §8.3 segment affinity (`slot_es_bind`).
+struct ReplSlot {
+    a: String,
+    a_idx: u32,
+    b_idx: u32,
+    group: Option<(Ipv6Addr, u32)>,
+}
+
+/// A cradle-owned replication slot's registry key: `(bridge domain, remote
+/// target v6-keyed, ESI or empty)` — the ESI keeps an RFC 7432 §8.3
+/// segment slot apart from the plain slot toward the same PE.
+type ReplSlotKey = (u16, Ipv6Addr, String);
+
+/// The replication slots toward one `(PE, BUM label)` — the plain one and,
+/// per Ethernet Segment, the one carrying that PE's ESI label for it
+/// (RFC 7432 §8.3). Values are flood-side ifindexes (`SLOT_ES` keys).
+#[derive(Default)]
+struct SlotGroup {
+    plain: Option<u32>,
+    es: std::collections::BTreeMap<String, u32>,
+}
 
 /// The remote endpoint of a VPWS cross-connect (EVPN E-Line, RFC 8214) —
 /// what AC-ingress frames are encapsulated toward.
@@ -399,7 +430,10 @@ pub struct Control {
     /// Dynamic BUM replication slots (EVPN Type-3 tee): `(bd, remote DT2M
     /// SID)` → the slot's veth (A-end name, A ifindex, B ifindex). cradle
     /// creates/destroys the pair itself.
-    repl_slots: Arc<Mutex<std::collections::HashMap<(u16, Ipv6Addr), ReplSlot>>>,
+    repl_slots: Arc<Mutex<std::collections::HashMap<ReplSlotKey, ReplSlot>>>,
+    /// MPLS replication slots by `(PE, BUM label)`, for RFC 7432 §8.3
+    /// segment affinity. Lock order: `es` → `slot_groups` → `dp`.
+    slot_groups: Arc<Mutex<std::collections::HashMap<(Ipv6Addr, u32), SlotGroup>>>,
     /// Monotonic name counter for slot veth pairs (`crs<N>a`/`crs<N>b`) and
     /// Replication-segment leaf veths (`crl<N>a`/`crl<N>b`).
     repl_next: Arc<std::sync::atomic::AtomicU32>,
@@ -407,7 +441,7 @@ pub struct Control {
     /// leaf veth (A-end name, A ifindex, B ifindex) whose B end `End.DT2M`-
     /// decaps a locally-delivered copy into the bridge domain. cradle
     /// creates/destroys the pair as segments gain/lose a local branch.
-    repl_seg_veths: Arc<Mutex<std::collections::HashMap<Ipv6Addr, ReplSlot>>>,
+    repl_seg_veths: Arc<Mutex<std::collections::HashMap<Ipv6Addr, ReplLeaf>>>,
     /// EVPN multihoming Ethernet Segments by ESI (`SetEthernetSegment` /
     /// `SetEsRole` / `SetEsPeers`), the source of the `ES_DF`, `PORT_ES` and
     /// `VTEP_ES` rows. Lock order: `es` → `dp` (never taken while `dp` is
@@ -457,6 +491,7 @@ impl Control {
             attached: Arc::new(Mutex::new(HashMap::new())),
             routes: Arc::new(Mutex::new(crate::l7::RouteTable::default())),
             repl_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            slot_groups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             repl_seg_veths: Arc::new(Mutex::new(std::collections::HashMap::new())),
             es: Arc::new(Mutex::new(EsTable::default())),
@@ -815,9 +850,16 @@ impl Control {
     /// (EVPN multihoming, RFC 7432 §5). DF roles already set for the segment
     /// are re-rendered onto the new port list; ports must exist (they are
     /// resolved by name, like `set_l2_domain`).
-    pub async fn set_ethernet_segment(&self, esi: &str, ports: &[String]) -> Result<()> {
+    pub async fn set_ethernet_segment(
+        &self,
+        esi: &str,
+        ports: &[String],
+        esi_label: u32,
+    ) -> Result<()> {
         let mut tbl = self.es.lock().await;
-        es_entry(&mut tbl, esi)?.ports = ports.to_vec();
+        let st = es_entry(&mut tbl, esi)?;
+        st.ports = ports.to_vec();
+        st.esi_label = esi_label;
         self.es_render(&mut tbl, esi).await
     }
 
@@ -831,6 +873,7 @@ impl Control {
             st.roles.clear();
             st.peers.clear();
             st.nhg.clear();
+            st.esi_label = 0;
             st.id
         }) else {
             return Ok(());
@@ -1004,11 +1047,13 @@ impl Control {
                 targets.push(match *m {
                     EsMember::Srv6(sid) => ReplTarget {
                         kind: REPL_KIND_SRV6,
+                        esi_label: 0,
                         vni: 0,
                         addr: sid.octets(),
                     },
                     EsMember::Vxlan(vtep) => ReplTarget {
                         kind: REPL_KIND_VXLAN,
+                        esi_label: 0,
                         vni: dp
                             .vni_of(bd)
                             .with_context(|| format!("ES {esi} bd {bd}: no VNI bound (SetVni)"))?,
@@ -1016,6 +1061,7 @@ impl Control {
                     },
                     EsMember::Mpls(pe, label) => ReplTarget {
                         kind: REPL_KIND_MPLS,
+                        esi_label: 0,
                         vni: label,
                         addr: util::ip_to_v6_bytes(pe),
                     },
@@ -1061,6 +1107,83 @@ impl Control {
         st.programmed = rows.iter().map(|&(ifindex, bd, _)| (ifindex, bd)).collect();
         st.programmed_ports = ifindexes;
         st.programmed_peers = st.peers.iter().copied().collect();
+        // RFC 7432 §8.3 (MPLS): our ESI label for this segment, for decap.
+        if st.programmed_esi_label != st.esi_label {
+            if st.programmed_esi_label != 0 {
+                dp.esi_label_del(st.programmed_esi_label);
+            }
+            if st.esi_label != 0 {
+                dp.esi_label_set(st.esi_label, st.id as u32)?;
+            }
+            st.programmed_esi_label = st.esi_label;
+        }
+        Ok(())
+    }
+
+    /// RFC 7432 §8.3 (MPLS): register replication slot `a_idx` (its
+    /// flood-side ifindex) in the `(PE, BUM label)` group `key` — as the
+    /// plain slot, or as the one serving Ethernet Segment `esi` exclusively
+    /// — and re-render the group's `SLOT_ES` rows: the segment slot gets
+    /// `only` = its segment's id + 1, the plain slot `skip` = the bitmap of
+    /// the segments the group has dedicated slots for. Lock order: `es` →
+    /// `slot_groups` → `dp`.
+    async fn slot_es_bind(
+        &self,
+        key: (Ipv6Addr, u32),
+        a_idx: u32,
+        esi: Option<&str>,
+    ) -> Result<()> {
+        let mut tbl = self.es.lock().await;
+        let mut groups = self.slot_groups.lock().await;
+        let g = groups.entry(key).or_default();
+        match esi {
+            Some(esi) => {
+                g.es.insert(esi.to_string(), a_idx);
+            }
+            None => g.plain = Some(a_idx),
+        }
+        let mut rows: Vec<(u32, u32, u64)> = Vec::with_capacity(g.es.len() + 1);
+        let mut skip = 0u64;
+        for (esi, &oif) in &g.es {
+            let id = es_entry(&mut tbl, esi)?.id as u32;
+            rows.push((oif, id + 1, 0));
+            skip |= 1u64 << (id & 63);
+        }
+        if let Some(plain) = g.plain {
+            rows.push((plain, 0, skip));
+        }
+        let mut dp = self.dp.lock().await;
+        for (oif, only, skip) in rows {
+            dp.slot_es_set(oif, only, skip)?;
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`Self::slot_es_bind`]: slot `a_idx` leaves group `key`
+    /// (its row goes, the plain slot's `skip` shrinks).
+    async fn slot_es_unbind(&self, key: (Ipv6Addr, u32), a_idx: u32) -> Result<()> {
+        let mut tbl = self.es.lock().await;
+        let mut groups = self.slot_groups.lock().await;
+        let Some(g) = groups.get_mut(&key) else {
+            return Ok(());
+        };
+        if g.plain == Some(a_idx) {
+            g.plain = None;
+        }
+        g.es.retain(|_, oif| *oif != a_idx);
+        let mut skip = 0u64;
+        for esi in g.es.keys() {
+            skip |= 1u64 << (es_entry(&mut tbl, esi)?.id & 63);
+        }
+        let plain = g.plain;
+        if g.plain.is_none() && g.es.is_empty() {
+            groups.remove(&key);
+        }
+        let mut dp = self.dp.lock().await;
+        dp.slot_es_set(a_idx, 0, 0)?;
+        if let Some(plain) = plain {
+            dp.slot_es_set(plain, 0, skip)?;
+        }
         Ok(())
     }
 
@@ -1227,16 +1350,19 @@ impl Control {
         let target = match remote {
             XconnectRemote::Srv6(sid) => ReplTarget {
                 kind: REPL_KIND_SRV6,
+                esi_label: 0,
                 vni: 0,
                 addr: sid.octets(),
             },
             XconnectRemote::Vxlan { vtep, vni } => ReplTarget {
                 kind: REPL_KIND_VXLAN,
+                esi_label: 0,
                 vni,
                 addr: util::ip_to_v6_bytes(vtep),
             },
             XconnectRemote::Mpls { pe, label } => ReplTarget {
                 kind: REPL_KIND_MPLS,
+                esi_label: 0,
                 vni: label,
                 addr: util::ip_to_v6_bytes(pe),
             },
@@ -1356,20 +1482,26 @@ impl Control {
     /// MPLS-encapsulated toward PE `pe` with its EVI service `label` (static
     /// config carries the label explicitly — no bridge domain is in scope
     /// here to resolve it from).
+    ///
+    /// With `esi` (RFC 7432 §8.3) the slot serves that Ethernet Segment
+    /// exclusively, each copy carrying `esi_label` under the service label;
+    /// see [`Self::slot_es_bind`].
     pub async fn add_repl_slot_mpls(
         &self,
         flood_port: &str,
         encap_port: &str,
         pe: IpAddr,
         label: u32,
+        esi: Option<&str>,
+        esi_label: u32,
     ) -> Result<()> {
         let flood = util::ifindex_of(flood_port)?;
         let encap = util::ifindex_of(encap_port)?;
         self.dp
             .lock()
             .await
-            .repl_slot_add_mpls(flood, encap, pe, label)?;
-        Ok(())
+            .repl_slot_add_mpls(flood, encap, pe, label, esi_label)?;
+        self.slot_es_bind((v6_key(pe), label), flood, esi).await
     }
 
     /// Create a BUM replication slot for `(bd, remote_sid)` with cradle-owned
@@ -1377,7 +1509,7 @@ impl Control {
     /// the A end joined to `bd`'s flood list, the B end XDP-attached, and
     /// `REPL_SID` keyed by both ends. Idempotent per `(bd, remote_sid)`.
     pub async fn add_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
-        self.add_repl_slot_auto_keyed(bd, remote_sid, |dp, a_idx, b_idx| {
+        self.add_repl_slot_auto_keyed(bd, remote_sid, "", None, |dp, a_idx, b_idx| {
             dp.repl_slot_add(a_idx, b_idx, remote_sid)
         })
         .await
@@ -1393,7 +1525,7 @@ impl Control {
             self.dp.lock().await.vni_of(bd).with_context(|| {
                 format!("bd {bd} has no VNI binding (SetVni before AddReplSlot)")
             })?;
-        self.add_repl_slot_auto_keyed(bd, v6_key(vtep), |dp, a_idx, b_idx| {
+        self.add_repl_slot_auto_keyed(bd, v6_key(vtep), "", None, |dp, a_idx, b_idx| {
             dp.repl_slot_add_vxlan(a_idx, b_idx, vtep, vni)
         })
         .await
@@ -1404,10 +1536,26 @@ impl Control {
     /// that PE's EVI service `label`. Keyed by the PE address (v4-mapped for
     /// IPv4) so one slot registry and [`Self::del_repl_slot_auto`] serve every
     /// overlay.
-    pub async fn add_repl_slot_auto_mpls(&self, bd: u16, pe: IpAddr, label: u32) -> Result<()> {
-        self.add_repl_slot_auto_keyed(bd, v6_key(pe), |dp, a_idx, b_idx| {
-            dp.repl_slot_add_mpls(a_idx, b_idx, pe, label)
-        })
+    ///
+    /// With `esi` (RFC 7432 §8.3) the slot serves that Ethernet Segment
+    /// exclusively, each copy carrying `esi_label` — the PE's label for the
+    /// segment — under the service label, and is keyed apart from the plain
+    /// slot toward the same PE; see [`Self::slot_es_bind`].
+    pub async fn add_repl_slot_auto_mpls(
+        &self,
+        bd: u16,
+        pe: IpAddr,
+        label: u32,
+        esi: Option<&str>,
+        esi_label: u32,
+    ) -> Result<()> {
+        self.add_repl_slot_auto_keyed(
+            bd,
+            v6_key(pe),
+            esi.unwrap_or(""),
+            Some((v6_key(pe), label)),
+            |dp, a_idx, b_idx| dp.repl_slot_add_mpls(a_idx, b_idx, pe, label, esi_label),
+        )
         .await
     }
 
@@ -1417,10 +1565,12 @@ impl Control {
         &self,
         bd: u16,
         key: Ipv6Addr,
+        esi: &str,
+        group: Option<(Ipv6Addr, u32)>,
         program: impl FnOnce(&mut Dataplane, u32, u32) -> Result<()>,
     ) -> Result<()> {
         let mut slots = self.repl_slots.lock().await;
-        if slots.contains_key(&(bd, key)) {
+        if slots.contains_key(&(bd, key, esi.to_string())) {
             return Ok(());
         }
         let n = self
@@ -1438,17 +1588,46 @@ impl Control {
             program(&mut dp, a_idx, b_idx)?;
             dp.l2_member_add(bd, a_idx)?;
         }
-        info!("repl slot {a}/{b}: bd {bd} -> {key}");
-        slots.insert((bd, key), (a, a_idx, b_idx));
+        if let Some(group) = group {
+            self.slot_es_bind(group, a_idx, (!esi.is_empty()).then_some(esi))
+                .await?;
+        }
+        if esi.is_empty() {
+            info!("repl slot {a}/{b}: bd {bd} -> {key}");
+        } else {
+            info!("repl slot {a}/{b}: bd {bd} -> {key} for ES {esi} (ESI label)");
+        }
+        slots.insert(
+            (bd, key, esi.to_string()),
+            ReplSlot {
+                a,
+                a_idx,
+                b_idx,
+                group,
+            },
+        );
         Ok(())
     }
 
     /// Tear down a `(bd, remote_sid)` replication slot: flood membership,
     /// SID bindings, and the veth pair. No-op if absent.
-    pub async fn del_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
-        let Some((a, a_idx, b_idx)) = self.repl_slots.lock().await.remove(&(bd, remote_sid)) else {
+    pub async fn del_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr, esi: &str) -> Result<()> {
+        let Some(ReplSlot {
+            a,
+            a_idx,
+            b_idx,
+            group,
+        }) = self
+            .repl_slots
+            .lock()
+            .await
+            .remove(&(bd, remote_sid, esi.to_string()))
+        else {
             return Ok(());
         };
+        if let Some(group) = group {
+            self.slot_es_unbind(group, a_idx).await?;
+        }
         {
             let mut dp = self.dp.lock().await;
             dp.l2_member_remove(bd, a_idx)?;
@@ -2936,7 +3115,7 @@ impl Cradle for GrpcService {
     ) -> Result<Response<pb::Empty>, Status> {
         let e = req.into_inner();
         self.control
-            .set_ethernet_segment(&e.esi, &e.ports)
+            .set_ethernet_segment(&e.esi, &e.ports, e.esi_label)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -3544,8 +3723,17 @@ impl Cradle for GrpcService {
                     r.remote_label
                 )));
             }
+            if r.esi.is_empty() != (r.esi_label == 0) {
+                return Err(Status::invalid_argument("esi and esi_label go together"));
+            }
             self.control
-                .add_repl_slot_auto_mpls(r.bd as u16, pe, r.remote_label)
+                .add_repl_slot_auto_mpls(
+                    r.bd as u16,
+                    pe,
+                    r.remote_label,
+                    (!r.esi.is_empty()).then_some(r.esi.as_str()),
+                    r.esi_label,
+                )
                 .await
                 .map_err(st)?;
         }
@@ -3568,7 +3756,7 @@ impl Cradle for GrpcService {
             v6_key(r.remote_pe.parse::<IpAddr>().map_err(st)?)
         };
         self.control
-            .del_repl_slot_auto(r.bd as u16, key)
+            .del_repl_slot_auto(r.bd as u16, key, &r.esi)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
