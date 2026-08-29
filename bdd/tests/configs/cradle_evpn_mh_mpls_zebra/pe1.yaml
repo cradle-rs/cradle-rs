@@ -1,0 +1,70 @@
+system:
+  cradle:
+    enabled: true
+# pe1 — EVPN-over-MPLS PE. IS-IS L2 with SR-MPLS supplies the transport
+# LSPs between the PE loopbacks; iBGP L2VPN-EVPN (`encapsulation mpls`)
+# advertises the per-EVI service label (Type-3) and, for a multihomed
+# segment, the per-ES ESI label (RFC 7432 §8.3, per-ES A-D). cradle is the
+# L2 data plane.
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: pe1u2
+  ipv4:
+    address: 10.0.12.1/24
+- if-name: pe1u3
+  ipv4:
+    address: 10.0.13.1/24
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1
+    - if-name: pe1u2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: pe1u3
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: mpls
+      evi:
+      - id: 100
+        bridge: br100
+    neighbor:
+    - remote-address: 2.2.2.2
+      remote-as: 65000
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 3.3.3.3
+      remote-as: 65000
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
