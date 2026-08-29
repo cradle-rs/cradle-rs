@@ -219,9 +219,13 @@ skips a member whose `PORT_ES` segment id is set in it (`l2_drop_sph`) —
 that peer already delivered the frame to the CE, or the CE sent it. The
 control plane renders `SetEsPeers` (the segment's other PEs, from the
 Type-4 routes) into `VTEP_ES` with a per-segment id (64 max), and
-`SetEthernetSegment` into `PORT_ES`. MPLS decaps carry no source address
-and get no split horizon (the ESI label is future work). BDD:
-`cradle_evpn_mh_sph`. On the unicast side, an `FDB_F_ESNHG` entry names a
+`SetEthernetSegment` into `PORT_ES`. Under SRv6 the peers are therefore
+the PEs' **outer source addresses** (`srv6_source`), not their SIDs — the
+End.DT2U/DT2M decap (`srv6_dt2u`) reads the outer IPv6 source the same
+way the VXLAN decap reads the outer VTEP. MPLS decaps carry no source
+address and get no split horizon (the ESI label is future work). BDD:
+`cradle_evpn_mh_sph` (VXLAN), `cradle_evpn_mh_srv6` (SRv6: split horizon,
+non-DF filter and aliasing in one feature). On the unicast side, an `FDB_F_ESNHG` entry names a
 segment rather than a remote: the XDP encap resolves it through the
 `(segment, domain)` nexthop group (`ES_NHG` count + `ES_NHG_MEMBER`
 slots, `ReplTarget`-shaped members) by inner-flow hash — RFC 7432 §8.4
@@ -234,7 +238,8 @@ re-ordering the group when the DF's per-ES A-D is withdrawn (BDD:
 `cradle_evpn_mh_sa_zebra`, the DF's port failing) — and an
 `FDB_F_STATIC` entry is a control-plane local entry (a peer's MAC on a
 segment we share, reached over our own port), exempt from aging and
-`WatchFdb`. BDD: `cradle_evpn_mh_nhg`. Frames destined to the reserved
+`WatchFdb`. BDD: `cradle_evpn_mh_nhg` (VXLAN members), `cradle_evpn_mh_srv6`
+(End.DT2U members). Frames destined to the reserved
 `01-80-C2-00-00-0x` block (STP, LACP, LLDP) are **not** learned, tunneled
 or flooded — the XDP stage passes them and `l2_switch` returns `TC_ACT_OK`,
 handing them to the host, matching bridge behavior. That is what lets a

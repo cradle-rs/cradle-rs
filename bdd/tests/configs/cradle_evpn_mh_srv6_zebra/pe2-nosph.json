@@ -1,0 +1,10 @@
+{
+  "ethernet_segments": [
+    {
+      "esi": "00:00:00:00:00:00:00:00:00:01",
+      "ports": [ "pe2c" ],
+      "roles": [ { "bd": 100, "df": true } ],
+      "peers": []
+    }
+  ]
+}
