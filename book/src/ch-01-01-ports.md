@@ -85,6 +85,8 @@ ip link set eth1 master bond0
 Under the hood cradle aliases the bond's members to it for the XDP stage
 (which runs on the members) and hands link-local control frames —
 `01:80:c2:00:00:0x`, so LACPDUs, STP, LLDP — to the host rather than the
-bridge domain, which is what keeps the aggregation up. Re-apply the port
-(`SetPort`) after changing the bond's membership. Supported bond modes are
-those the kernel supports XDP on: balance-xor, 802.3ad and active-backup.
+bridge domain, which is what keeps the aggregation up. Membership is
+tracked live: enslave or release a link (or replace a member with a new
+device) after the port is attached and cradle re-aliases it on its own —
+no `SetPort` needed. Supported bond modes are those the kernel supports XDP
+on: balance-xor, 802.3ad and active-backup.
