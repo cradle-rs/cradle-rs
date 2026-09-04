@@ -71,7 +71,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
@@ -169,7 +169,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update -y
-          apt-get install -y protobuf-compiler
+          apt-get install -y protobuf-compiler libprotobuf-dev
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
