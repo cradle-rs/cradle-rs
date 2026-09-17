@@ -45,10 +45,15 @@ Source: `crates/xdp-bfd-echo-ebpf/src/main.rs` (the XDP program) +
   embedded `bpf_timer` — proven by the standalone crate. Kernel ≥ 5.15 for
   `bpf_timer`.
 - **Coupling (accepted):** the absorbed reflector only runs where `cradle_xdp` is
-  attached, so BFD echo now requires the interface to be a cradle port
-  (`system ebpf enabled` + `interface <if> ebpf enabled`, which zebra turns into
-  a `SetPort`). `cradle_xdp` `XDP_PASS`es everything it doesn't own, so a
-  BFD-only port is a normal l3-passthrough `SetPort`.
+  attached, so BFD echo now requires the session's egress interface to be a
+  cradle port. An explicit `interface <if> ebpf enabled` is *not* required:
+  zebra's per-ifindex reflector refcount doubles as an auto-attach signal — the
+  0→1 edge sends `PortRequest::Acquire`, the last release sends `Release`, and
+  the cradle port supervisor unions those ifindexes with the config leaves
+  (zebra-rs `f56e02bc`, 2026-07-13). The datapath stays keyed by discriminator,
+  not interface; the signal only governs *where `cradle_xdp` is attached*.
+  `cradle_xdp` `XDP_PASS`es everything it doesn't own, so a BFD-only port is a
+  normal l3-passthrough `SetPort`.
 - **veth `XDP_TX` caveat (`CRADLE_XDP_MODE`):** native `XDP_TX` on a veth only
   delivers to the *peer's* XDP RX path. Reflecting a peer's Echo off a veth
   whose peer has no XDP — e.g. a bridge-enslaved veth in the BDD LAN topology —
@@ -101,6 +106,22 @@ Source: `crates/xdp-bfd-echo-ebpf/src/main.rs` (the XDP program) +
   writes `down=1` into `ECHO_TIMERS` (race-free) so `watch_bfd` reports it
   uniformly. **The cradle-side BFD datapath is now complete** (responder +
   control watchdog + Echo originator). build/clippy/fmt clean.
-- Next: Slice 3 (zebra `bfd/reflector.rs` child-spawn → gRPC arm/disarm +
-  WatchBfd consumer; readiness gate via engine reachability), Slice 4 (BDD
-  engine-mode + retire the standalone `xdp-bfd-echo{,-ebpf}` crates).
+- 2026-07-12: **Slice 3 DONE** (zebra-rs `1d0bef90`): `bfd/reflector.rs`'s
+  child-spawn replaced by a cradle gRPC driver — per-session arm/disarm, a
+  `WatchBfd` consumer feeding `Message::EchoDown`/`DetectDown`, `HelperGone` on
+  a lost stream, and an `is_ready` gate on engine reachability instead of "child
+  alive". zebra's `offload/` eBPF trees removed in `61113332`.
+- 2026-07-12: **Slice 4 DONE** — cradle side (PR #128, commit `fdb5e90`):
+  `crates/xdp-bfd-echo{,-ebpf}` deleted and their Phase-0a wiring reverted,
+  `CRADLE_XDP_MODE` + `cap_net_raw` added; zebra side (`279d5192`): the BFD
+  echo/detect-offload BDDs drive the absorbed datapath over the cradle engine,
+  retiring the `xdp-bfd-echo` helper mode.
+- 2026-07-13: **Follow-on, beyond the slice plan** (zebra-rs `f56e02bc`):
+  auto-attach `cradle_xdp` on Echo/detect-offload interfaces via
+  `PortRequest::Acquire`/`Release` — this is what removed the explicit
+  `interface <if> ebpf enabled` requirement noted under Coupling above.
+- **Absorption complete.** No standalone helper remains in either tree; the Echo
+  responder, the control-packet watchdog and the Echo originator all live in
+  cradle, driven over gRPC from zebra.
+- 2026-09-17: status reconciled against both trees (cradle-rs `main`, zebra-rs
+  `main`) — the entries above were verified from the commits, not from the plan.
