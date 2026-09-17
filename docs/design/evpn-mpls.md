@@ -16,7 +16,10 @@ multi-PE ingress replication (`REPL_KIND_MPLS` slots), proven by
 `cradle_evpn_mpls_bum` and `cradle_evpn_mpls_multi`. Slice 3: the zebra-rs
 BGP EVPN control-plane tee — `router bgp afi-safi evpn encapsulation mpls`
 with a declared `evi`, whose Type-2/Type-3 routes drive the FDB entries,
-replication slots and decap ILM end to end (`cradle_evpn_mpls_zebra`). It
+replication slots and decap ILM end to end (`cradle_evpn_mpls_zebra`). Landed
+since: E-Line/VPWS (RFC 8214, below), IPv6-numbered PEs
+(`cradle_evpn_mpls6*`) and multihoming with the ESI-label split horizon
+(`cradle_evpn_mh_mpls*`); symmetric IRB is designed below. It
 builds on the MPLS
 phases ([mpls.md](mpls.md)) and reuses the L2 switching, FDB, flood and
 bridge-domain machinery the SRv6 and VXLAN overlays already established
@@ -60,10 +63,12 @@ A frame on a `PORT_F_L2` port whose destination MAC hits an `FDB_F_MPLS |
 FDB_F_REMOTE` entry:
 
 1. Resolve the underlay adjacency — the entry's explicit `nexthop_id`, or a
-   `FIB4` lookup on the remote PE address (`FdbEntry::remote_sid`, v4-mapped).
-   That route's nexthop carries the transport LSP stack, so the control plane
-   never has to pre-resolve one: it advertises *the PE*, and the IGP's own
-   labelled route supplies the tunnel. IPv6 underlays punt (see *Limits*).
+   `FIB4` lookup on the remote PE address (`FdbEntry::remote_sid`, v4-mapped;
+   an IPv6-numbered PE sits natively in the 16-byte slot and resolves by a
+   `FIB6` /128 lookup instead — `cradle_evpn_mpls6*`). That route's nexthop
+   carries the transport LSP stack, so the control plane never has to
+   pre-resolve one: it advertises *the PE*, and the IGP's own labelled route
+   supplies the tunnel.
 2. `xdp_resolve_l2` for the outer MACs from `NEIGH4/6` + `PORTS` — MPLS egress
    can never use `bpf_redirect_neigh` (there is no MPLS `nh_family`; see
    [mpls.md](mpls.md) §"Why not `bpf_redirect_neigh` for MPLS").
@@ -228,15 +233,103 @@ underlay, asymmetric service labels per direction,
 `mpls_l2_decap`/`mpls_l2_bum`/`vxlan_encap` asserted zero (the E-Line
 never touches the bridging, flooding or other-overlay paths).
 
+## Symmetric IRB over MPLS (RFC 9135) — design
+
+> Inter-subnet routing between EVPN tenants across the MPLS fabric: both the
+> ingress and the egress PE route the packet in the tenant IP-VRF (the
+> symmetric model). Not yet a slice — but unlike every other gap this file
+> has closed, almost nothing is missing: over MPLS, symmetric IRB is
+> wire-identical to the L3VPN path cradle already forwards.
+
+Status: **design / unproven.** No IRB BDD exists on the MPLS side and
+zebra-rs models no Label2, but both datapath halves and the Type-5 route
+machinery are already implemented. The work is proof and the Type-2 host
+routes, not forwarding.
+
+### Why MPLS IRB is nearly free
+
+An NVO tunnel must deliver a valid Ethernet frame, so VXLAN IRB was real
+datapath work: a fresh inner header addressed to the egress PE's router MAC,
+the Router's MAC extended community to learn that MAC, `vxlan_l3_encap` to
+build it, and an `NH_F_VXLAN` nexthop shape to carry `{vtep, l3vni, rmac}`
+([evpn-vxlan.md](evpn-vxlan.md)'s IRB section). MPLS needs none of it: a
+label needs no addressing, so RFC 9135 carries inter-subnet traffic as
+**bare routed IP under an IP-VRF label** — Label2 of the Type-2 MAC/IP
+route (RFC 7432 §7.2) or the label of a Type-5 — with no inner Ethernet and
+no RMAC. On the wire that is indistinguishable from VPNv4/VPNv6; the only
+difference is which BGP routes supply the label and the prefixes.
+
+Both forwarding halves therefore already exist, proven end to end by
+`cradle_l3vpn` / `cradle_l3vpn_zebra`:
+
+| Direction | Existing mechanism |
+|---|---|
+| Imposition (ingress PE) | route in the per-VRF FIB (`fib4_vrf_hit`) whose nexthop pushes `[transport…, ip-vrf label]` (`mpls_push`) — the VPNv4 shape |
+| Disposition (egress PE) | `MPLS_OP_POP_L3` + `Ilm.vrf_table_id`: pop, hand the VRF to TC as `XDP_META_MAGIC` metadata, and `l3_forward` routes in the tenant FIB — the same seam the VXLAN L3VNI decap and `End.DT46` use |
+
+No new map, no new encap body (so no new stack-budget exposure), and no
+gRPC change: `Route`, `Nexthop` and `Ilm` as they stand carry everything.
+
+More of the control plane exists than the VXLAN history would suggest, too:
+zebra-rs already **originates** Type-5 with an MPLS service label — the VRF
+Export handler that emits VPNv4/VPNv6 also calls `evpn_originate_type5`,
+whose MPLS mode carries the same per-VRF label on the NLRI — and already
+**imports** a received Type-5 exactly like a VPNv4 route
+(`vpn_import_transport` → the VRF import dispatch → the same labeled-route
+tee `cradle_l3vpn_zebra` proves into cradle). None of that has ever been run
+against cradle as an EVPN service; that proof is the point of the slices
+below.
+
+### What is actually missing
+
+1. **Proof of composition.** IRB is not "L3VPN again": it is one PE running
+   an EVI (service label → BD, `POP_L2`) *and* the routed path (IP-VRF
+   label → `POP_L3`) side by side, with disjoint labels — intra-subnet
+   traffic bridged, inter-subnet traffic routed. Nothing exercises that
+   today.
+2. **Type-2 Label2.** zebra-rs models no Label2 anywhere (`EvpnMac` carries
+   a single service field), so the routed path has Type-5 subnets only — no
+   /32 / /128 host routes. Label2 is what buys host granularity and MAC
+   mobility for routed flows.
+3. **The bridged-gateway caveat — shared with VXLAN, not an MPLS gap.** The
+   implemented IRB shape is routed CE ports (VRF-bound L3 ports). A true
+   SVI — an anycast gateway MAC on a bridge-domain member port, recognized
+   in the L2 stage and handed to the VRF — exists for *no* overlay; if
+   wanted, that is one encap-agnostic slice serving all three.
+
+### Slices
+
+- **Slice 1 — static-config BDD, `cradle_evpn_mpls_irb`** (expect zero
+  datapath code). The `cradle_evpn_vxlan_irb` topology with an MPLS wire:
+  two PEs, CE ports VRF-bound in different subnets, per-VRF routes with
+  `[transport, ip-vrf label]` stacks, `pop-l3` ILMs — and beside it a
+  same-subnet CE pair bridged through an EVI on the same PEs. Assert
+  `fib4_vrf_hit` + `mpls_push` / `mpls_pop` on the routed pair,
+  `mpls_l2_encap` / `mpls_l2_decap` on the bridged pair, and that neither
+  path's counters move for the other's traffic.
+- **Slice 2 — BGP-driven BDD, `cradle_evpn_mpls_irb_zebra`.** IS-IS SR-MPLS
+  underlay; a tenant VRF exporting VPN routes with the EVPN AFI negotiated
+  so the Type-5 rides; the teed labeled VRF routes forward inter-subnet
+  traffic in eBPF, with a withdrawal negative control. Whatever this
+  flushes out (e.g. config gating of the Type-5 MPLS mode without a
+  parallel VPNv4 session) is zebra-rs work.
+- **Slice 3 — Type-2 Label2 (zebra-rs).** Encode/parse Label2 in the MAC/IP
+  NLRI, originate it for local (MAC, IP) entries in IRB EVIs — RFC 9135
+  permits Label2 = the IP-VRF's VPN label, so the allocator already
+  exists — and import remote Label2 as host routes through the same VPN
+  import dispatch. Extend the zebra BDD with a host-route assertion;
+  mobility on the routed path rides the existing Type-2 sequence-number
+  machinery.
+- **Slice 4 — the capability table.** Flip the EVPN-dataplane deck's
+  MPLS × IRB cell and the status summary in this file.
+
 ## Limits / next slices
 
-- **IPv4 underlay only.** An IPv6-underlay PE would need a second 16-byte-key
-  trie lookup inlined into `cradle_xdp`, which the stack budget above does not
-  have room for today; MPLS cores are IPv4 in practice, and such an entry punts
-  to the host stack rather than misforwarding.
-- **Multihoming** — Type-1/Type-4 and the ESI label's split-horizon check,
-  which needs a second label inspection below the service label.
-- Out of scope for now: multihoming (Type-1/Type-4 and the ESI label's
-  split-horizon check, which needs a *second* label inspection below the
-  service label), the control word, and symmetric IRB. EVPN-VPWS over
-  MPLS is implemented (see the E-Line section above).
+- **Control word** — RFC 7432 leaves it optional and both ends must agree,
+  so it stays a later negotiated knob (see *Packet format*).
+- **Symmetric IRB** — designed above: the forwarding exists (it is the
+  L3VPN path), the proof BDDs and Type-2 Label2 do not.
+- Formerly listed here, since implemented: EVPN-VPWS (the E-Line section
+  above), multihoming with the ESI-label split horizon (`ESI_LABEL`,
+  `mpls_l2_esi_{push,pop}`, `cradle_evpn_mh_mpls*`), and IPv6-numbered PEs
+  (`cradle_evpn_mpls6*`).
