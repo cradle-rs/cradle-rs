@@ -11,6 +11,77 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.2
+  date: 2026-10-07T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Packaging and CI
+        * The nightly Ubuntu 26.04 (resolute) .deb legs had failed since
+          2026-08-31 with no repo change behind it: the build script's
+          protoc run could not resolve the
+          `google/protobuf/{any,wrappers,timestamp,field_mask}.proto`
+          imports the Hubble protos pull in. `protobuf-compiler` only
+          *Recommends* `libprotobuf-dev`, which is what ships those
+          files under `/usr/include`; jammy and noble install the
+          recommends, while resolute's apt 3.0 solver lists it and
+          silently declines
+        * `libprotobuf-dev` is now named explicitly beside
+          `protobuf-compiler` in all four install steps — the build-debs
+          host and container jobs, and the CI build and test jobs — a
+          no-op wherever the recommends already landed
+
+    - note: |
+        ### BDD / test infrastructure
+        * `cradle_evpn_mh_sa_role_zebra` proves the datapath half of the
+          single-active role signal: the role is advertised in the
+          Layer-2 Attributes extended community of the per-EVI Ethernet
+          A-D (draft-ietf-bess-rfc7432bis §7.11.1), and a remote PE
+          forwards to the PE that claims it. The existing
+          `cradle_evpn_mh_sa_zebra` moves traffic by failing the DF's
+          access port, so the mass withdraw (RFC 7432 §8.2) does the
+          work; here nothing goes down and nothing is withdrawn — pe3 is
+          simply given the better preference and the two PEs
+          re-advertise their roles
+        * The discriminator is asserted explicitly: pe2's Type-2 for the
+          CE's MAC is still in pe1's table after the segment's nexthop
+          group re-points, so the signal is the only thing that can have
+          moved the frames. `l2_drop_sa` on the new standby and
+          `l2_es_nhg` on the remote each exceed their recorded value
+        * The topology is sliced out of `cradle_evpn_mh_sa_zebra`
+          programmatically rather than retyped, so the parts that are
+          not the point here cannot drift from it; the two pe3 configs
+          differ by exactly one line, the preference
+
+    - note: |
+        ### Design notes
+        * `evpn-mpls.md` gains a symmetric IRB (RFC 9135) section: why
+          IRB over MPLS is nearly free next to the VXLAN equivalent — a
+          label needs no addressing, so inter-subnet traffic is bare
+          routed IP under an IP-VRF label and both forwarding halves are
+          the existing L3VPN path — what is actually missing (proof of
+          composition, Type-2 Label2, and the bridged-gateway/SVI caveat
+          that is shared with VXLAN rather than an MPLS gap), and four
+          slices to close it. The limits list retires EVPN-VPWS,
+          multihoming with the ESI-label split horizon, and
+          IPv6-numbered PEs, leaving the control word as the only open
+          knob besides IRB
+        * `stamp-offload.md` records whether zebra-rs's STAMP
+          measurement (RFC 8762/8972, feeding the IS-IS/OSPF TE
+          sub-TLVs) should move into `cradle_xdp` the way the BFD Echo
+          reflector and watchdog did. Position: not for the ms-class WAN
+          TE case, where `SO_TIMESTAMPING` already bought the cheap
+          accuracy — offload is justified by µs-class fabrics, immunity
+          to host load, and line-rate reflection for external
+          controllers
+        * `bfd-echo-absorption.md` is reconciled with what actually
+          shipped in both trees: Slices 3 and 4 are done, and BFD Echo
+          no longer needs an explicit `interface <if> ebpf enabled` line
+          because zebra's per-ifindex reflector refcount doubles as the
+          attach signal
+
 - semver: 1.1.1
   date: 2026-08-28T18:00:00+09:00
   distribution: unstable
