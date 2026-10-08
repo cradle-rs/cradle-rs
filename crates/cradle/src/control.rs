@@ -383,6 +383,49 @@ fn reconcile_lag_members(
     Ok((joined, left))
 }
 
+/// Spawn `ip -o monitor <object>` with its stdout piped, tied to this
+/// process's lifetime.
+///
+/// `ip monitor` only notices that its reader is gone when it next writes
+/// (SIGPIPE). Left alone it outlives cradle, and in a network namespace that
+/// has since been deleted no event ever arrives, so it blocks forever and
+/// keeps that namespace alive. [`spawn_tied`] closes both exits.
+///
+/// The parent-death signal follows the *thread* that forked the child, not
+/// the process, so call this from the thread that lives as long as cradle
+/// (`main`), not from inside a spawned task.
+fn spawn_monitor(object: &str) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = tokio::process::Command::new("ip");
+    cmd.args(["-o", "monitor", object])
+        .stdout(std::process::Stdio::piped());
+    spawn_tied(&mut cmd)
+}
+
+/// Spawn `cmd` so that it dies with this process:
+/// - `kill_on_drop`: SIGKILL when the `Child` is dropped, which a graceful
+///   exit does as the runtime drops the task holding it;
+/// - `PR_SET_PDEATHSIG`: the kernel sends SIGKILL when the forking thread
+///   dies without running destructors (SIGKILL, abort).
+fn spawn_tied(cmd: &mut tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    let parent = std::process::id();
+    cmd.kill_on_drop(true);
+    // SAFETY: the closure runs between fork and exec and only calls the
+    // async-signal-safe `prctl` and `getppid`.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The parent may have died before the prctl took effect.
+            if libc::getppid() as u32 != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn()
+}
+
 /// One `ip -o monitor link` line, reduced to what the link monitor acts on.
 #[derive(Debug, PartialEq, Eq)]
 struct LinkEvent {
@@ -1974,25 +2017,28 @@ impl Control {
     /// re-aliases a LAG port's members (`PORT_MASTER`) whenever a link
     /// joins or leaves a bond that is a cradle port, or such a member is
     /// deleted — so bond membership can change after `SetPort`.
+    ///
+    /// Call it on the main thread: the `ip` child is tied to the thread
+    /// that forks it (`spawn_monitor`).
     pub fn start_link_monitor(&self) {
+        // Forked here, on the caller's thread, not inside the task: see
+        // `spawn_monitor`.
+        let mut child = match spawn_monitor("link") {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("link monitor disabled: spawning `ip monitor link`: {e}");
+                return;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            return;
+        };
         let dp = self.dp.clone();
         let attached = self.attached.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
-            let child = tokio::process::Command::new("ip")
-                .args(["-o", "monitor", "link"])
-                .stdout(std::process::Stdio::piped())
-                .spawn();
-            let mut child = match child {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("link monitor disabled: spawning `ip monitor link`: {e}");
-                    return;
-                }
-            };
-            let Some(stdout) = child.stdout.take() else {
-                return;
-            };
+            // Held for the task's lifetime; dropping it kills `ip`.
+            let _child = child;
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let Some(ev) = LinkEvent::parse(&line) else {
@@ -2049,25 +2095,27 @@ impl Control {
     /// control plane (zebra-rs) assigns their addresses — the attach-time
     /// derivation then found nothing, and without this the port's VRF table
     /// never learns its connected subnets.
+    ///
+    /// Call it on the main thread, as `start_link_monitor`.
     pub fn start_addr_monitor(&self) {
+        // Forked here, on the caller's thread, not inside the task: see
+        // `spawn_monitor`.
+        let mut child = match spawn_monitor("address") {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("address monitor disabled: spawning `ip monitor address`: {e}");
+                return;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            return;
+        };
         let dp = self.dp.clone();
         let attached = self.attached.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
-            let child = tokio::process::Command::new("ip")
-                .args(["-o", "monitor", "address"])
-                .stdout(std::process::Stdio::piped())
-                .spawn();
-            let mut child = match child {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("address monitor disabled: spawning `ip monitor address`: {e}");
-                    return;
-                }
-            };
-            let Some(stdout) = child.stdout.take() else {
-                return;
-            };
+            // Held for the task's lifetime; dropping it kills `ip`.
+            let _child = child;
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 // `ip -o monitor address` lines start "IDX: name inet …";
@@ -4526,5 +4574,78 @@ mod link_event_tests {
     fn garbage_is_skipped() {
         assert_eq!(LinkEvent::parse(""), None);
         assert_eq!(LinkEvent::parse("x: y"), None);
+    }
+}
+
+#[cfg(test)]
+mod spawn_tied_tests {
+    use super::spawn_tied;
+    use std::time::{Duration, Instant};
+
+    /// The process is gone, or a zombie: killed and not yet reaped.
+    fn dead(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => {
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    == Some("Z")
+            }
+        }
+    }
+
+    fn wait_dead(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if dead(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn sleeper() -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("60");
+        cmd
+    }
+
+    #[tokio::test]
+    async fn dropping_the_child_kills_it() {
+        let child = spawn_tied(&mut sleeper()).expect("spawn sleep");
+        let pid = child.id().expect("pid");
+        drop(child);
+        assert!(wait_dead(pid), "sleep {pid} outlived its dropped Child");
+    }
+
+    #[test]
+    fn the_child_dies_with_the_thread_that_forked_it() {
+        // Stands in for cradle dying without running destructors: the Child
+        // is leaked, so kill_on_drop never fires, and only the parent-death
+        // signal can stop the sleep once its forking thread exits.
+        let pid = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let _guard = rt.enter();
+            let child = spawn_tied(&mut sleeper()).expect("spawn sleep");
+            let pid = child.id().expect("pid");
+            std::mem::forget(child);
+            pid
+        })
+        .join()
+        .expect("forking thread");
+        let died = wait_dead(pid);
+        // SAFETY: plain syscalls on a child pid this test owns. Kill it if it
+        // survived, then reap it, so the test leaves nothing behind.
+        unsafe {
+            if !died {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+        }
+        assert!(died, "sleep {pid} outlived the thread that forked it");
     }
 }
