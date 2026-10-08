@@ -11,6 +11,28 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.3
+  date: 2026-10-09T00:00:39+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Control plane
+        * The link and address monitors' `ip -o monitor link` and
+          `ip -o monitor address` children no longer outlive cradle.
+          Nothing killed them, so both a SIGKILL and a graceful SIGTERM
+          (how zebra-rs's supervisor stops cradle) left them running.
+          `ip monitor` only notices a dead reader when it next writes,
+          and a network namespace that has since been deleted produces
+          no events, so they blocked forever and kept that namespace
+          alive. A host running the zebra-rs BDD suite had accumulated
+          153 of them, pinning 93 deleted namespaces
+        * Both children are now spawned with kill-on-drop and
+          `PR_SET_PDEATHSIG(SIGKILL)`, and are forked on the main
+          thread, because the parent-death signal follows the thread
+          that forked the child rather than the process
+
 - semver: 1.1.2
   date: 2026-10-07T18:00:00+09:00
   distribution: unstable
