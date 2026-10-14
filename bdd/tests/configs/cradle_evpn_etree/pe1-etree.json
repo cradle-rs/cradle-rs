@@ -1,0 +1,10 @@
+{
+  "ports": [
+    { "name": "pe1l1", "vlan": 100, "etree_leaf": true },
+    { "name": "pe1lb", "vlan": 100, "etree_leaf": true },
+    { "name": "pe1r1", "vlan": 100 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:e2:01", "bd": 100, "remote_vtep": "10.100.0.2", "nexthop": 1, "etree_leaf": true }
+  ]
+}
