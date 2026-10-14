@@ -74,6 +74,9 @@ use cradle_common::{
     XDP_META_MAGIC_DX, XDP_META_MAGIC_DX2, XDP_META_MAGIC_GTP, XDP_META_MAGIC_L2,
     XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
+use cradle_common::{
+    ETREE_F_LEAF, FDB_F_ETREE_LEAF, STAT_L2_DROP_ETREE_LOCAL, STAT_L2_DROP_ETREE_UC,
+};
 use cradle_common::{STAT_MPLS_L2_ESI_POP, STAT_MPLS_L2_ESI_PUSH, SlotEs};
 use network_types::eth::EthHdr;
 
@@ -282,6 +285,12 @@ static ESI_LABEL: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 static ES_NHG: HashMap<EsNhgKey, u32> = HashMap::with_max_entries(1024, 0);
 #[map]
 static ES_NHG_MEMBER: HashMap<EsNhgMemberKey, ReplTarget> = HashMap::with_max_entries(4096, 0);
+/// EVPN E-Tree (RFC 8317): local port ifindex → `ETREE_F_*`. A row with
+/// `ETREE_F_LEAF` makes the port a leaf AC; no row = root. Written from
+/// `SetEtreeRole`, which may precede the port, so a leaf never forwards to
+/// another leaf for want of its role.
+#[map]
+static PORT_ETREE: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 
 // --- L4 ---
 #[map]
@@ -890,6 +899,11 @@ fn l2_switch(
             let oif = unsafe { (*e).oif };
             if oif == iif {
                 Ok(TC_ACT_SHOT as i32) // hairpin to the same port
+            } else if !from_overlay && etree_leaf(iif) && etree_leaf(oif) {
+                // E-Tree (RFC 8317 §4.2): a leaf never reaches another leaf,
+                // on this PE either.
+                stat_inc(STAT_L2_DROP_ETREE_LOCAL);
+                Ok(TC_ACT_SHOT as i32)
             } else if es_blocked(oif, vlan) {
                 // Single-active: known unicast toward a standby segment port
                 // is dropped too (the DF on another PE delivers it).
@@ -984,6 +998,16 @@ fn es_peer_port(oif: u32, es_bits: u64) -> bool {
     }
 }
 
+/// EVPN E-Tree (RFC 8317): is local port `ifindex` a leaf AC? Ports with no
+/// `PORT_ETREE` row are roots, so a domain without E-Tree costs one miss.
+#[inline(always)]
+fn etree_leaf(ifindex: u32) -> bool {
+    match PORT_ETREE.get_ptr(&ifindex) {
+        Some(f) => (unsafe { *f }) & ETREE_F_LEAF != 0,
+        None => false,
+    }
+}
+
 /// Clone the frame to every member of `vlan` except the ingress port.
 /// `local_only` additionally skips BUM replication slots (members present in
 /// `REPL_SID`) — EVPN split horizon: a frame that already crossed the overlay
@@ -993,7 +1017,9 @@ fn es_peer_port(oif: u32, es_bits: u64) -> bool {
 /// filter that stops the CE seeing one BUM frame per PE it is attached to —
 /// and only when the overlay source is not itself a peer on that segment
 /// (`es_bits`, from `VTEP_ES` at decap) — the local-bias split horizon that
-/// stops a CE's own frame coming back to it via the other PE.
+/// stops a CE's own frame coming back to it via the other PE. A frame from a
+/// local E-Tree leaf port is withheld from the other local leaf ports
+/// (RFC 8317 §4.2); its copies toward the overlay still go.
 #[inline(always)]
 fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -> i32 {
     stat_inc(STAT_L2_FLOOD);
@@ -1009,6 +1035,8 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
         Some(id) => (unsafe { *id }) + 1,
         None => 0,
     };
+    // An overlay frame's `iif` is the underlay port, never a leaf AC.
+    let from_leaf = !local_only && etree_leaf(iif);
     let mut slot: u16 = 0;
     while slot < MAX_L2_MEMBERS {
         if slot as u32 >= count {
@@ -1030,6 +1058,8 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
             if affinity_ok && oif != iif && !(local_only && REPL_SID.get_ptr(&oif).is_some()) {
                 if es_non_df(oif, vlan) {
                     stat_inc(STAT_L2_DROP_NONDF);
+                } else if from_leaf && etree_leaf(oif) {
+                    stat_inc(STAT_L2_DROP_ETREE_LOCAL);
                 } else if es_bits != 0 && es_peer_port(oif, es_bits) {
                     stat_inc(STAT_L2_DROP_SPH);
                 } else {
@@ -3385,6 +3415,14 @@ fn l2_evpn_xdp(ctx: &XdpContext, bd: u16) -> Result<u32, ()> {
                 let ent = unsafe { &*e };
                 if ent.flags & FDB_F_REMOTE == 0 {
                     return Ok(xdp_action::XDP_PASS); // local → TC forward
+                }
+                // E-Tree (RFC 8317 §4.1): known unicast from a leaf to a
+                // remote leaf is dropped here, at the ingress PE, so it
+                // never crosses the core. The flag is on the MAC, so this
+                // also covers an `FDB_F_ESNHG` entry.
+                if ent.flags & FDB_F_ETREE_LEAF != 0 && etree_leaf(iif) {
+                    stat_inc(STAT_L2_DROP_ETREE_UC);
+                    return Ok(xdp_action::XDP_DROP);
                 }
                 (ent, false)
             }

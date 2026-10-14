@@ -5,9 +5,9 @@
 use anyhow::{Context as _, Result};
 
 use cradle_common::{
-    FDB_F_ESNHG, FDB_F_LOCAL, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_STATIC, FDB_F_VXLAN, FIB_F_BLACKHOLE,
-    FIB_F_CONNECTED, FIB_F_ECMP, FIB_F_LOCAL, NH_F_GTP, NH_F_MPLS, NH_F_ONLINK, NH_F_SRV6, NH_F_V6,
-    NH_F_VXLAN,
+    FDB_F_ESNHG, FDB_F_ETREE_LEAF, FDB_F_LOCAL, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_STATIC,
+    FDB_F_VXLAN, FIB_F_BLACKHOLE, FIB_F_CONNECTED, FIB_F_ECMP, FIB_F_LOCAL, NH_F_GTP, NH_F_MPLS,
+    NH_F_ONLINK, NH_F_SRV6, NH_F_V6, NH_F_VXLAN,
 };
 
 use crate::{
@@ -27,6 +27,15 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
             let cfg = Config::load(&config)?;
 
             for p in &cfg.ports {
+                // The role first: a leaf must not forward as a root in between.
+                if let Some(leaf) = p.etree_leaf {
+                    client
+                        .set_etree_role(pb::EtreeRole {
+                            port: p.name.clone(),
+                            leaf,
+                        })
+                        .await?;
+                }
                 client
                     .set_port(pb::Port {
                         name: p.name.clone(),
@@ -103,6 +112,7 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     remote_pe: f.remote_pe.clone().unwrap_or_default(),
                     remote_label: f.label,
                     esi: f.esi.clone().unwrap_or_default(),
+                    etree_leaf: f.etree_leaf,
                 };
                 if let Some(port) = &f.port {
                     client
@@ -714,6 +724,9 @@ fn fdb_flags(flags: u32) -> String {
     }
     if flags & FDB_F_STATIC != 0 {
         v.push("static");
+    }
+    if flags & FDB_F_ETREE_LEAF != 0 {
+        v.push("etree-leaf");
     }
     if v.is_empty() {
         "learned".to_string()

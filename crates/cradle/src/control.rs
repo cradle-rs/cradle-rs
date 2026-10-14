@@ -129,6 +129,8 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "l2_drop_sa",
     "mpls_l2_esi_push",
     "mpls_l2_esi_pop",
+    "l2_drop_etree_local",
+    "l2_drop_etree_uc",
 ];
 
 /// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
@@ -195,6 +197,19 @@ struct EsTable {
     /// Peer PE → the bitmap of segments it shares with us (what `VTEP_ES`
     /// holds); an entry with no bits left is removed from both.
     vtep_bits: HashMap<IpAddr, u64>,
+}
+
+/// EVPN E-Tree port roles (`SetEtreeRole`, RFC 8317): the ports named leaf
+/// ACs, by name so a role can arrive before its port, and the `PORT_ETREE`
+/// row each one has now. A row follows the role, not the port's attachment:
+/// `del_port` leaves it (see there). Lock order: `etree` → `dp`.
+#[derive(Default)]
+struct EtreeTable {
+    /// Ports configured as leaves. Any other port is a root.
+    leaves: std::collections::BTreeSet<String>,
+    /// Port name → the ifindex its `PORT_ETREE` row is under, so a port
+    /// that comes back with a new ifindex does not leave a stale row.
+    programmed: std::collections::BTreeMap<String, u32>,
 }
 
 /// The segment named `esi`, created with a fresh id if unknown.
@@ -490,6 +505,9 @@ pub struct Control {
     /// `VTEP_ES` rows. Lock order: `es` → `dp` (never taken while `dp` is
     /// held).
     es: Arc<Mutex<EsTable>>,
+    /// EVPN E-Tree port roles (`SetEtreeRole`), the source of the
+    /// `PORT_ETREE` rows. Lock order: `etree` → `dp`.
+    etree: Arc<Mutex<EtreeTable>>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
     /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
@@ -538,6 +556,7 @@ impl Control {
             repl_next: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             repl_seg_veths: Arc::new(Mutex::new(std::collections::HashMap::new())),
             es: Arc::new(Mutex::new(EsTable::default())),
+            etree: Arc::new(Mutex::new(EtreeTable::default())),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
@@ -770,6 +789,10 @@ impl Control {
         };
         let flags = if l3 { PORT_F_L3 } else { PORT_F_L2 };
         self.attach(name, ifindex, l3).await?;
+        // A leaf's role is in place before the port joins its bridge domain
+        // (`PORTS` below), so it never forwards as a root in between.
+        self.etree_render(&mut *self.etree.lock().await, name)
+            .await?;
         // Lock order (attach releases its locks first): attached → dp, the
         // same order `del_port` uses.
         let mut attached = self.attached.lock().await;
@@ -810,6 +833,13 @@ impl Control {
     /// back to the attach-time name when the device is already gone.
     /// Idempotent: unknown ports are a logged no-op. L2 domain membership is
     /// the caller's to update (`set_l2_domain` replaces the full list).
+    ///
+    /// The port's E-Tree leaf row (`PORT_ETREE`) is left in place, as its
+    /// Ethernet Segment rows are: until the caller takes the port out of its
+    /// bridge domain, `flood()` still sends to it, and dropping the row
+    /// would let other leaves flood to a leaf. A row under an ifindex whose
+    /// device is gone matches nothing, and the next render for the name
+    /// moves it (`etree_render`).
     pub async fn del_port(&self, name: &str) -> Result<()> {
         let mut attached = self.attached.lock().await;
         let key = match util::ifindex_of(name) {
@@ -947,6 +977,46 @@ impl Control {
         self.es_render(&mut tbl, esi).await
     }
 
+    /// Make local port `port` an E-Tree leaf AC (`leaf`) or a root again
+    /// (RFC 8317): a leaf never reaches another local leaf, nor a remote MAC
+    /// flagged leaf (`FDB_F_ETREE_LEAF`). The role is kept by name and may
+    /// precede the port; it is applied when the port appears (`set_port`).
+    pub async fn set_etree_role(&self, port: &str, leaf: bool) -> Result<()> {
+        let mut tbl = self.etree.lock().await;
+        if leaf {
+            tbl.leaves.insert(port.to_string());
+        } else {
+            tbl.leaves.remove(port);
+        }
+        self.etree_render(&mut tbl, port).await
+    }
+
+    /// Re-derive port `port`'s `PORT_ETREE` row from its role and current
+    /// ifindex: a leaf whose device exists has a row under that ifindex, and
+    /// any other row it had goes. A role for a device that does not exist
+    /// yet waits for `set_port`.
+    async fn etree_render(&self, tbl: &mut EtreeTable, port: &str) -> Result<()> {
+        let want = if tbl.leaves.contains(port) {
+            util::ifindex_of(port).ok()
+        } else {
+            None
+        };
+        let have = tbl.programmed.get(port).copied();
+        if want == have {
+            return Ok(());
+        }
+        let mut dp = self.dp.lock().await;
+        if let Some(old) = have {
+            dp.port_etree_del(old);
+            tbl.programmed.remove(port);
+        }
+        if let Some(ifindex) = want {
+            dp.port_etree_set(ifindex)?;
+            tbl.programmed.insert(port.to_string(), ifindex);
+        }
+        Ok(())
+    }
+
     /// Record the other PEs attached to segment `esi` (their VTEP / overlay
     /// source addresses; replace semantics). Overlay BUM arriving from one
     /// of them is withheld from the segment's ports — the split horizon /
@@ -1037,12 +1107,22 @@ impl Control {
     /// nexthop group (`FdbRemote.esi`): the encap target is picked per
     /// flow from the group `set_es_nhg` maintains for `(esi, bd)`. Same
     /// MAC-move-away hint semantics as [`Self::add_fdb_remote`].
-    pub async fn add_fdb_remote_es(&self, mac: [u8; 6], bd: u16, esi: &str) -> Result<()> {
+    pub async fn add_fdb_remote_es(
+        &self,
+        mac: [u8; 6],
+        bd: u16,
+        esi: &str,
+        etree_leaf: bool,
+    ) -> Result<()> {
         let es_id = {
             let mut tbl = self.es.lock().await;
             es_entry(&mut tbl, esi)?.id as u32
         };
-        let displaced_local = self.dp.lock().await.fdb_es_add(mac, bd, es_id)?;
+        let displaced_local = self
+            .dp
+            .lock()
+            .await
+            .fdb_es_add(mac, bd, es_id, etree_leaf)?;
         if displaced_local {
             let _ = self.fdb_hint_tx.send((mac, bd));
         }
@@ -1233,19 +1313,22 @@ impl Control {
     /// Program an overlay FDB entry: `mac` in bridge domain `bd` is behind
     /// the remote `End.DT2U`/`DT2M` `remote_sid`, reached via underlay
     /// `nexthop_id` — 0 = the datapath resolves it with a FIB6 lookup on the
-    /// SID (EVPN over SRv6).
+    /// SID (EVPN over SRv6). `etree_leaf`, in every flavor: the MAC is
+    /// behind a leaf AC on its PE (RFC 8317 §4.1), so a local leaf port
+    /// does not reach it.
     pub async fn add_fdb_remote(
         &self,
         mac: [u8; 6],
         bd: u16,
         remote_sid: Ipv6Addr,
         nexthop_id: u32,
+        etree_leaf: bool,
     ) -> Result<()> {
         let displaced_local = self
             .dp
             .lock()
             .await
-            .fdb_remote_add(mac, bd, remote_sid, nexthop_id)?;
+            .fdb_remote_add(mac, bd, remote_sid, nexthop_id, etree_leaf)?;
         // A remote install over a locally-learned MAC = the station moved away.
         // Signal WatchFdb so it ages the MAC out immediately (RFC 7432 §7.7),
         // rather than relying on the next poll catching the racy flip.
@@ -1264,12 +1347,13 @@ impl Control {
         bd: u16,
         vtep: IpAddr,
         nexthop_id: u32,
+        etree_leaf: bool,
     ) -> Result<()> {
         let displaced_local = self
             .dp
             .lock()
             .await
-            .fdb_remote_add_vxlan(mac, bd, vtep, nexthop_id)?;
+            .fdb_remote_add_vxlan(mac, bd, vtep, nexthop_id, etree_leaf)?;
         if displaced_local {
             let _ = self.fdb_hint_tx.send((mac, bd));
         }
@@ -1287,12 +1371,13 @@ impl Control {
         pe: IpAddr,
         label: u32,
         nexthop_id: u32,
+        etree_leaf: bool,
     ) -> Result<()> {
         let displaced_local = self
             .dp
             .lock()
             .await
-            .fdb_remote_add_mpls(mac, bd, pe, label, nexthop_id)?;
+            .fdb_remote_add_mpls(mac, bd, pe, label, nexthop_id, etree_leaf)?;
         if displaced_local {
             let _ = self.fdb_hint_tx.send((mac, bd));
         }
@@ -3190,6 +3275,18 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn set_etree_role(
+        &self,
+        req: Request<pb::EtreeRole>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        self.control
+            .set_etree_role(&r.port, r.leaf)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn set_es_peers(&self, req: Request<pb::EsPeers>) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
         self.control
@@ -3580,7 +3677,7 @@ impl Cradle for GrpcService {
         if !f.esi.is_empty() {
             // Behind a multihomed segment: the group picks the remote.
             self.control
-                .add_fdb_remote_es(mac, f.bd as u16, &f.esi)
+                .add_fdb_remote_es(mac, f.bd as u16, &f.esi, f.etree_leaf)
                 .await
                 .map_err(st)?;
             return Ok(Response::new(pb::Empty {}));
@@ -3598,13 +3695,13 @@ impl Cradle for GrpcService {
         if !f.remote_sid.is_empty() {
             let remote_sid: Ipv6Addr = f.remote_sid.parse().map_err(st)?;
             self.control
-                .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id)
+                .add_fdb_remote(mac, f.bd as u16, remote_sid, f.nexthop_id, f.etree_leaf)
                 .await
                 .map_err(st)?;
         } else if !f.remote_vtep.is_empty() {
             let vtep: IpAddr = f.remote_vtep.parse().map_err(st)?;
             self.control
-                .add_fdb_remote_vxlan(mac, f.bd as u16, vtep, f.nexthop_id)
+                .add_fdb_remote_vxlan(mac, f.bd as u16, vtep, f.nexthop_id, f.etree_leaf)
                 .await
                 .map_err(st)?;
         } else {
@@ -3616,7 +3713,14 @@ impl Cradle for GrpcService {
                 )));
             }
             self.control
-                .add_fdb_remote_mpls(mac, f.bd as u16, pe, f.remote_label, f.nexthop_id)
+                .add_fdb_remote_mpls(
+                    mac,
+                    f.bd as u16,
+                    pe,
+                    f.remote_label,
+                    f.nexthop_id,
+                    f.etree_leaf,
+                )
                 .await
                 .map_err(st)?;
         }

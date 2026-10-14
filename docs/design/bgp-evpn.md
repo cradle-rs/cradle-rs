@@ -327,6 +327,57 @@ all-active on the same port lets it through) and `cradle_evpn_mh_sa_zebra`
 (BGP-driven: the group's primary/backup, and the failover on the DF's port
 loss with the stale route still installed).
 
+## E-Tree
+
+RFC 8317 makes an E-LAN rooted-multipoint: every attachment circuit is a
+root or a leaf, and a leaf never reaches another leaf. The plan, the wire
+format and the phasing are zebra-rs `docs/design/bgp-evpn-e-tree-plan.md`.
+Like multihoming, it is cradle-only: the kernel bridge cannot drop by a
+destination MAC's colour, nor carry a leaf mark across the core.
+
+Delivered so far (plan phase 2a), all encapsulation-neutral:
+
+- **Port role.** `SetEtreeRole {port, leaf}` keeps the role by port name
+  and renders it into `PORT_ETREE` (ifindex → `ETREE_F_LEAF`; no row =
+  root). The map has its own owner and is not a bit in `PortConfig.flags`,
+  which `SetPort` rewrites whole. A role may arrive before its port.
+  `set_port` re-renders it, and writes the row before the port joins its
+  bridge domain (`PORTS`), so a leaf never forwards as a root in between.
+  A port that comes back under a new ifindex moves its row with it.
+  `DelPort` leaves the row, as it leaves a segment port's `ES_DF` and
+  `PORT_ES` rows. The port stays in its bridge domain's flood list until
+  the caller sends `SetL2Domain` without it, and dropping the row first
+  would let another leaf's flood reach it. A row under a dead ifindex
+  matches nothing.
+- **Between local leaves** (RFC 8317 §4.2): `l2_switch` does not redirect
+  known unicast from one leaf port to another, and `flood()` skips the leaf
+  members of a flood from a leaf (`l2_drop_etree_local`). The flood's
+  copies to roots and to the replication slots still go.
+- **Known unicast across the core** (§4.1, ingress filtering): a remote MAC
+  behind a leaf AC carries `FDB_F_ETREE_LEAF` (`FdbRemote.etree_leaf`, from
+  the E-Tree EC on its selected Type-2). In `l2_evpn_xdp`, between the FDB
+  lookup and the single `l2_overlay_encap` call, a frame from a leaf port
+  to such a MAC is dropped (`l2_drop_etree_uc`). The flag is on the MAC, so
+  an `FDB_F_ESNHG` entry is covered without touching the group, and the
+  encap call stays single (the verifier budget).
+
+Not yet: BUM between leaves on different PEs. Over MPLS that needs the
+per-PE leaf label (phase 3), over VXLAN the IMET colouring (phase 4), and
+over SRv6 an Arg.FE2-capable `End.DT2M` (phase 5). Until then a leaf's
+broadcast still reaches a remote leaf, so known unicast is the only
+cross-core guarantee.
+
+Static config: `ports[].etree_leaf` (`true`/`false`; omitted leaves the role
+as it is), `fdb[].etree_leaf`. `cradle dump l2` shows the flag as
+`etree-leaf`. BDD `cradle_evpn_etree` covers several cases, each against a
+control in which no roles are set and every path works with both counters
+at zero:
+- local unicast and flood between leaves;
+- leaf → remote leaf in both directions, one role from the startup config
+  and one applied over gRPC;
+- root → leaf and leaf → root paths still working;
+- the role following a port re-created under a new ifindex.
+
 ## Configuration walkthrough
 
 The operator surface, all existing zebra YANG (`zebra-bgp-evpn.yang`):
