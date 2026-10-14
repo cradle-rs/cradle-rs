@@ -1554,6 +1554,33 @@ async fn start_zebra_cfg(world: &mut World, namespace: String, config: String) {
     expr = "I start zebra-rs in namespace {string} with config {string} teeing to cradle as {string}"
 )]
 async fn start_zebra_tee(world: &mut World, namespace: String, config: String, sock: String) {
+    start_zebra_tee_with(world, namespace, config, sock, &[]).await;
+}
+
+/// As `start_zebra_tee`, with `--feature <name>`: the zebra-rs schema nodes
+/// gated on that optional feature (its `zebra-features.yang`) exist only
+/// for this daemon — e.g. `etree` for `router bgp afi-safi evpn etree`.
+#[when(
+    expr = "I start zebra-rs in namespace {string} with config {string} teeing to cradle as {string} with feature {string}"
+)]
+async fn start_zebra_tee_feature(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    sock: String,
+    feature: String,
+) {
+    let flag = format!("--feature={feature}");
+    start_zebra_tee_with(world, namespace, config, sock, &[flag.as_str()]).await;
+}
+
+async fn start_zebra_tee_with(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    sock: String,
+    extra: &[&str],
+) {
     let scoped = world.ns(&namespace);
     let pid = format!("/tmp/{}_zebra.pid", scoped);
     let log = format!("logs/{}.zebra.log", scoped);
@@ -1577,7 +1604,10 @@ async fn start_zebra_tee(world: &mut World, namespace: String, config: String, s
             &format!("--log-file={}", log),
             "--pid-file",
             &pid,
-        ],
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .collect::<Vec<&str>>(),
     )
     .await
     .expect("Failed to start zebra-rs (tee)");
