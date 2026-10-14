@@ -1,6 +1,6 @@
 # Headend PE (iBGP AS 65000), teeing its FIB into cradle. Consumes the SR
 # Policy (route-target == our router-id 10.0.0.1), so it owns the Binding SID
-# ILM (16100 -> {16002}); with `steering-mode binding-sid` a colored service
+# ILM (15100 -> {16002}); with `steering-mode binding-sid` a colored service
 # route is steered by pushing only the BSID label. The COLOR100 route-map is
 # attached inbound from startup, so 10.99.0.0/24 arrives already coloured. The
 # service route can arrive before its SAFI-73 policy — when the Binding SID

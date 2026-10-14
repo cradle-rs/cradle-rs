@@ -13,10 +13,16 @@ Feature: BGP color steering to a BSID programs the cradle eBPF data plane
   ```
    ctrl[zebra]  ── 192.168.12.0/24 ──  h[zebra + cradle]
    originates SR Policy DETOUR             consumes it (RT=10.0.0.1), owns the
-   (color 100, endpoint 192.168.12.2,      BSID ILM 16100->{16002}, and steers
-   binding-sid 16100, seg {16002})         the colored 10.99.0.0/24 onto it
+   (color 100, endpoint 192.168.12.2,      BSID ILM 15100->{16002}, and steers
+   binding-sid 15100, seg {16002})         the colored 10.99.0.0/24 onto it
    + originates 10.99.0.0/24
   ```
+
+  The headend claims the Binding SID in its SRLB (the default block's
+  15000-15999) before installing its ILM (zebra-rs
+  docs/design/mpls-label-allocation.md §5.1, RFC 9256 §6.2). One outside
+  it is not available: no ILM, and the route steers onto the inline segment
+  list (label 16002) instead.
 
   Scenario: A colored route is steered onto its Binding SID in the eBPF FIB
     Given a clean test environment
@@ -31,22 +37,22 @@ Feature: BGP color steering to a BSID programs the cradle eBPF data plane
     And I start zebra-rs in namespace "ctrl" with config "ctrl.yaml"
     # The policy must arrive over SAFI 73 and be selected in binding-sid mode.
     Then show command "show bgp sr-policy" in namespace "h" should eventually contain "endpoint 192.168.12.2"
-    And show command "show bgp sr-policy" in namespace "h" should contain "binding-sid: MPLS 16100"
+    And show command "show bgp sr-policy" in namespace "h" should contain "binding-sid: MPLS 15100"
     # COLOR100 is attached inbound from startup, so 10.99.0.0/24 arrives
     # already coloured. If it arrived before the SAFI-73 policy it installed
     # plain; when the Binding SID activates the headend re-installs the
-    # colour-matched winner, steering it onto the BSID label 16100 in
+    # colour-matched winner, steering it onto the BSID label 15100 in
     # binding-sid mode (RFC 9256 §8.5) — no manual re-evaluation needed.
-    Then show command "show ip route 10.99.0.0/24" in namespace "h" should eventually contain "label 16100"
+    Then show command "show ip route 10.99.0.0/24" in namespace "h" should eventually contain "label 15100"
     # Datapath proof: the steered service route's nexthop imposes the BSID label
-    # 16100 in cradle's eBPF FIB. `[16100]` on a nexthop appears only when a
+    # 15100 in cradle's eBPF FIB. `[15100]` on a nexthop appears only when a
     # route is steered onto the BSID — the BSID's own ILM nexthop imposes its
-    # swap target [16002], not [16100]. This is the color-steer reaching the
+    # swap target [16002], not [15100]. This is the color-steer reaching the
     # data plane, not just zebra's RIB.
-    And the cradle dump "nexthop" in namespace "h" via gRPC as "ctl1" should contain "[16100]"
+    And the cradle dump "nexthop" in namespace "h" via gRPC as "ctl1" should contain "[15100]"
     And the cradle dump "ipv4" in namespace "h" via gRPC as "ctl1" should contain "10.99.0.0/24"
-    # The BSID's own ILM (16100 -> swap {16002}) is teed into cradle's eBPF LFIB.
-    And the cradle dump "mpls" in namespace "h" via gRPC as "ctl1" should contain "16100"
+    # The BSID's own ILM (15100 -> swap {16002}) is teed into cradle's eBPF LFIB.
+    And the cradle dump "mpls" in namespace "h" via gRPC as "ctl1" should contain "15100"
 
   Scenario: Teardown topology
     Given the test topology exists
