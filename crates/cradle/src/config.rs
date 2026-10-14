@@ -273,6 +273,10 @@ pub struct FdbCfg {
     /// multihoming's "a peer's MAC on my own segment" (RFC 7432 §8.4).
     #[serde(default)]
     pub port: Option<String>,
+    /// EVPN E-Tree (RFC 8317 §4.1): the remote MAC is behind a leaf AC, so a
+    /// local leaf port (`ports[].etree_leaf`) does not reach it.
+    #[serde(default)]
+    pub etree_leaf: bool,
 }
 
 /// An EVPN/VXLAN VNI binding. An **L2VNI** (default): frames in bridge domain
@@ -420,6 +424,12 @@ pub struct Port {
     /// VRF table an L3 port belongs to (0 = global).
     #[serde(default)]
     pub vrf: u32,
+    /// EVPN E-Tree (RFC 8317): `true` makes this L2 port a leaf AC, which
+    /// never reaches another leaf; `false` makes it a root. Omitted leaves
+    /// the role as it is: root for a new port, and whatever an earlier
+    /// apply set for one being re-applied.
+    #[serde(default)]
+    pub etree_leaf: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -721,6 +731,10 @@ impl Config {
     /// Apply this configuration in-process via the control plane.
     pub async fn apply_control(&self, ctl: &Control) -> Result<()> {
         for p in &self.ports {
+            // The role first: a leaf must not forward as a root in between.
+            if let Some(leaf) = p.etree_leaf {
+                ctl.set_etree_role(&p.name, leaf).await?;
+            }
             ctl.set_port(&p.name, None, p.l3, p.vlan, p.vrf).await?;
         }
         for (vlan, members) in l2_domains(&self.ports) {
@@ -937,7 +951,7 @@ impl Config {
                 continue;
             }
             if let Some(esi) = &f.esi {
-                ctl.add_fdb_remote_es(mac, f.bd, esi).await?;
+                ctl.add_fdb_remote_es(mac, f.bd, esi, f.etree_leaf).await?;
                 continue;
             }
             match (&f.remote_sid, &f.remote_vtep, &f.remote_pe) {
@@ -945,13 +959,15 @@ impl Config {
                     let remote_sid = sid
                         .parse()
                         .with_context(|| format!("bad remote SID {sid:?}"))?;
-                    ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop).await?;
+                    ctl.add_fdb_remote(mac, f.bd, remote_sid, f.nexthop, f.etree_leaf)
+                        .await?;
                 }
                 (None, Some(vtep), None) => {
                     let vtep = vtep
                         .parse()
                         .with_context(|| format!("bad remote VTEP {vtep:?}"))?;
-                    ctl.add_fdb_remote_vxlan(mac, f.bd, vtep, f.nexthop).await?;
+                    ctl.add_fdb_remote_vxlan(mac, f.bd, vtep, f.nexthop, f.etree_leaf)
+                        .await?;
                 }
                 (None, None, Some(pe)) => {
                     let pe = pe
@@ -962,7 +978,7 @@ impl Config {
                         "fdb entry {}: remote_pe needs a 20-bit service label",
                         f.mac
                     );
-                    ctl.add_fdb_remote_mpls(mac, f.bd, pe, f.label, f.nexthop)
+                    ctl.add_fdb_remote_mpls(mac, f.bd, pe, f.label, f.nexthop, f.etree_leaf)
                         .await?;
                 }
                 _ => anyhow::bail!(

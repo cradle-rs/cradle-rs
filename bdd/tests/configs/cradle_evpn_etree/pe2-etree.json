@@ -1,0 +1,5 @@
+{
+  "fdb": [
+    { "mac": "02:00:00:00:e1:01", "bd": 100, "remote_vtep": "10.100.0.1", "nexthop": 1, "etree_leaf": true }
+  ]
+}

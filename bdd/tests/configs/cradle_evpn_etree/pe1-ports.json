@@ -1,0 +1,7 @@
+{
+  "ports": [
+    { "name": "pe1l1", "vlan": 100 },
+    { "name": "pe1lb", "vlan": 100 },
+    { "name": "pe1r1", "vlan": 100 }
+  ]
+}

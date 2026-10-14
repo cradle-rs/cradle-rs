@@ -260,6 +260,16 @@ or flooded — the XDP stage passes them and `l2_switch` returns `TC_ACT_OK`,
 handing them to the host, matching bridge behavior. That is what lets a
 kernel bond be a cradle port: LACPDUs reach the bonding driver.
 
+One more per-member exclusion is the **E-Tree** leaf group (RFC 8317 §4.2).
+A flood from a port with a `PORT_ETREE` leaf row skips every member that
+has one too, and `l2_switch` refuses a known-unicast redirect between two
+leaf ports. Both count `l2_drop_etree_local`. Overlay frames are exempt,
+because their `iif` is the underlay port. In the XDP stage, a frame from a
+leaf port to a remote MAC flagged `FDB_F_ETREE_LEAF` is dropped before the
+encap (`l2_drop_etree_uc`, §4.1). The roles come from `SetEtreeRole`, kept
+by port name. BDD: `cradle_evpn_etree`; the design is in
+`bgp-evpn.md` §E-Tree.
+
 ### LAG ports
 
 An Ethernet Segment is a LAG, so the CE-facing port of a multihomed PE is

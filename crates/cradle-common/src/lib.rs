@@ -804,6 +804,12 @@ pub const FDB_F_ESNHG: u32 = 1 << 4;
 /// segment port, not the overlay). A datapath learn on that port replaces
 /// it with a dynamic entry.
 pub const FDB_F_STATIC: u32 = 1 << 5;
+/// EVPN E-Tree (RFC 8317 §4.1): this remote MAC sits behind a **leaf** AC
+/// on its PE, as the E-Tree EC on its selected Type-2 route said (set
+/// together with `FDB_F_REMOTE`). A frame from a local leaf port is not
+/// encapsulated toward it — known unicast is filtered at the ingress PE.
+/// The flag is on the MAC, so an `FDB_F_ESNHG` entry carries it too.
+pub const FDB_F_ETREE_LEAF: u32 = 1 << 6;
 
 /// EVPN multihoming aliasing: the `(segment id, bridge domain)` nexthop
 /// group — its member count (`ES_NHG`), and each member (`ES_NHG_MEMBER`,
@@ -868,6 +874,12 @@ pub const ES_DF_F_NON_DF: u32 = 1 << 0;
 /// frame in both directions (known unicast toward the CE, and anything the
 /// CE sends into it), not only BUM. Set together with `ES_DF_F_NON_DF`.
 pub const ES_DF_F_BLOCK: u32 = 1 << 1;
+
+/// EVPN E-Tree (RFC 8317) port role, the `PORT_ETREE` value: the port is a
+/// **leaf** AC. No row = root, the role every port has without E-Tree. Kept
+/// out of `PortConfig.flags`, which `SetPort` rewrites whole: the role has
+/// its own message (`SetEtreeRole`) and may arrive before the port.
+pub const ETREE_F_LEAF: u32 = 1 << 0;
 
 /// Per-port configuration (keyed by ifindex), shared by the L2 and L3 stages.
 #[repr(C)]
@@ -1249,8 +1261,16 @@ pub const STAT_MPLS_L2_ESI_PUSH: u32 = 55;
 /// EVPN multihoming over MPLS (RFC 7432 §8.3): a received BUM copy whose
 /// ESI label named one of this PE's segments, popped into `es_bits`.
 pub const STAT_MPLS_L2_ESI_POP: u32 = 56;
+/// EVPN E-Tree (RFC 8317 §4.2): a frame from a local leaf port withheld
+/// from another local leaf port — a known-unicast redirect, or one copy of
+/// a flood.
+pub const STAT_L2_DROP_ETREE_LOCAL: u32 = 57;
+/// EVPN E-Tree (RFC 8317 §4.1): a known-unicast frame from a local leaf
+/// port toward a remote MAC flagged `FDB_F_ETREE_LEAF`, dropped at ingress
+/// instead of being encapsulated.
+pub const STAT_L2_DROP_ETREE_UC: u32 = 58;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 57;
+pub const STAT_MAX: u32 = 59;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 

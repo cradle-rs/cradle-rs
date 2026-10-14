@@ -151,6 +151,42 @@ member takes over every MAC in that one update:
                           { "remote_vtep": "192.0.2.3" } ] } ] }
 ```
 
+## EVPN E-Tree: leaves reach roots only
+
+An E-Tree (RFC 8317) is a bridge domain in which every port is a **root**
+or a **leaf**, and a leaf never reaches another leaf. Mark the leaf ports,
+and flag a remote MAC that sits behind a leaf on its PE:
+
+```json
+{
+  "ports": [
+    { "name": "pe1l1", "vlan": 100, "etree_leaf": true },
+    { "name": "pe1l2", "vlan": 100, "etree_leaf": true },
+    { "name": "pe1r1", "vlan": 100 }
+  ],
+  "fdb": [
+    { "mac": "02:00:00:00:e2:01", "bd": 100, "remote_vtep": "192.0.2.2",
+      "etree_leaf": true }
+  ]
+}
+```
+
+A frame from `pe1l1` is then never switched to `pe1l2`, whether it is
+known unicast or a flood copy (`l2_drop_etree_local`). It is also not
+encapsulated toward `02:00:00:00:e2:01` (`l2_drop_etree_uc`): known unicast
+between leaves is dropped at the ingress PE and never crosses the core.
+`pe1r1` and every remote MAC without the flag stay reachable, and roots
+reach everyone.
+
+A port without `etree_leaf` keeps whatever role it had, so a new port is a
+root; `"etree_leaf": false` makes a leaf a root again. Over gRPC the role
+is `SetEtreeRole`. It may be sent before the port, and it stays with the
+port's name if the device is re-created. The remote MAC's flag is
+`FdbRemote.etree_leaf`. `cradle dump l2` marks flagged MACs `etree-leaf`.
+
+Broadcast, multicast and unknown unicast from a leaf are not yet kept from
+leaves on *other* PEs; only the local copies are withheld.
+
 ## Mixing L2 and L3
 
 A single cradle instance can carry both routed and bridged ports at once: mark

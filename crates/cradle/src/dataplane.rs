@@ -21,17 +21,17 @@ use aya::{
 use cradle_common::SlotEs;
 use cradle_common::{
     Backend, Backend6, BackendKey, CtKey, CtKey6, DIR24_TBL8_GROUPS, DPC_FIB4_DIR24, Dx2vKey,
-    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, EsDfKey, EsNhgKey, EsNhgMemberKey,
-    FDB_F_ESNHG, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_STATIC, FDB_F_VXLAN, FIB_F_ECMP, FdbEntry, FdbKey,
-    FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap, GtpPdr, GtpPdrKey, L2MemberKey,
-    LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES, MPLS_OP_POP, MPLS_OP_SWAP,
-    MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP, NH_F_GTP6, NH_F_MPLS,
-    NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key, NeighEntry, NextHop,
-    NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS, POLICY_DIR_INGRESS, POLICY_KEY_GEN,
-    PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6, REPL_KIND_VXLAN, REPL_ROLE_LEAF,
-    ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX, SVC_F_AFFINITY, ServiceInfo,
-    ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN, VNI_F_L2, VNI_F_L3, VniInfo,
-    Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    EP_F_AUDIT, EP_F_EGRESS, EP_F_GEN, EP_F_INGRESS, ETREE_F_LEAF, EsDfKey, EsNhgKey,
+    EsNhgMemberKey, FDB_F_ESNHG, FDB_F_ETREE_LEAF, FDB_F_MPLS, FDB_F_REMOTE, FDB_F_STATIC,
+    FDB_F_VXLAN, FIB_F_ECMP, FdbEntry, FdbKey, FibEntry, FibWord, Gtp6Encap, Gtp6PdrKey, GtpEncap,
+    GtpPdr, GtpPdrKey, L2MemberKey, LB_ALGO_RANDOM, LocalSid, MAX_LABELS, MAX_REPL_BRANCHES,
+    MPLS_OP_POP, MPLS_OP_SWAP, MirrorEntry, MirrorKey, MplsEntry, NEIGH_STATE_REACHABLE, NH_F_GTP,
+    NH_F_GTP6, NH_F_MPLS, NH_F_MPLS_PIPE, NH_F_SRV6, NH_F_V6, NH_F_VXLAN, Neigh4Key, Neigh6Key,
+    NeighEntry, NextHop, NhGroupKey, POLICY_ALLOW, POLICY_DENY, POLICY_DIR_EGRESS,
+    POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6,
+    REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
+    SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
+    VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
 };
 
 use crate::{
@@ -161,6 +161,11 @@ fn monotonic_ns() -> Result<u64> {
     Ok(now.tv_sec() as u64 * 1_000_000_000 + now.tv_nsec() as u64)
 }
 
+/// `FDB_F_ETREE_LEAF` when a remote MAC is behind a leaf AC.
+fn etree_flag(leaf: bool) -> u32 {
+    if leaf { FDB_F_ETREE_LEAF } else { 0 }
+}
+
 pub struct Dataplane {
     fib4: LpmTrie<MapData, [u8; 4], FibEntry>,
     fib6: LpmTrie<MapData, [u8; 16], FibEntry>,
@@ -200,6 +205,8 @@ pub struct Dataplane {
     /// with us (`flood()` drops an overlay copy toward a port whose
     /// segment bit is set for the frame's source).
     port_es: HashMap<MapData, u32, u32>,
+    /// EVPN E-Tree: local port → `ETREE_F_*` (a row = a leaf AC).
+    port_etree: HashMap<MapData, u32, u32>,
     slot_es: HashMap<MapData, u32, SlotEs>,
     esi_label: HashMap<MapData, u32, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
@@ -335,6 +342,10 @@ impl Dataplane {
             l2_count: HashMap::try_from(bpf.take_map("L2_COUNT").context("map L2_COUNT missing")?)?,
             es_df: HashMap::try_from(bpf.take_map("ES_DF").context("map ES_DF missing")?)?,
             port_es: HashMap::try_from(bpf.take_map("PORT_ES").context("map PORT_ES missing")?)?,
+            port_etree: HashMap::try_from(
+                bpf.take_map("PORT_ETREE")
+                    .context("map PORT_ETREE missing")?,
+            )?,
             slot_es: HashMap::try_from(bpf.take_map("SLOT_ES").context("map SLOT_ES missing")?)?,
             esi_label: HashMap::try_from(
                 bpf.take_map("ESI_LABEL").context("map ESI_LABEL missing")?,
@@ -959,6 +970,17 @@ impl Dataplane {
         let _ = self.port_es.remove(&ifindex);
     }
 
+    /// EVPN E-Tree (RFC 8317): make local port `ifindex` a leaf AC.
+    pub fn port_etree_set(&mut self, ifindex: u32) -> Result<()> {
+        self.port_etree.insert(ifindex, ETREE_F_LEAF, 0)?;
+        Ok(())
+    }
+
+    /// The port is a root again (or gone).
+    pub fn port_etree_del(&mut self, ifindex: u32) {
+        let _ = self.port_etree.remove(&ifindex);
+    }
+
     /// RFC 7432 §8.3 (MPLS): replication slot `flood_ifindex`'s Ethernet
     /// Segment affinity — `only` = segment id + 1 for a slot carrying a
     /// peer's ESI label for that segment, or 0 with `skip` = the bitmap of
@@ -1057,8 +1079,21 @@ impl Dataplane {
     /// nexthop group (`FDB_F_ESNHG`): the encap target is picked per flow
     /// from the `(es_id, bd)` group. Same displaced-local MAC-move semantics
     /// as [`Self::fdb_remote_add`].
-    pub fn fdb_es_add(&mut self, mac: [u8; 6], bd: u16, es_id: u32) -> Result<bool> {
-        self.fdb_overlay_add(mac, bd, [0; 16], FDB_F_REMOTE | FDB_F_ESNHG, es_id, 0)
+    pub fn fdb_es_add(
+        &mut self,
+        mac: [u8; 6],
+        bd: u16,
+        es_id: u32,
+        etree_leaf: bool,
+    ) -> Result<bool> {
+        self.fdb_overlay_add(
+            mac,
+            bd,
+            [0; 16],
+            FDB_F_REMOTE | FDB_F_ESNHG | etree_flag(etree_leaf),
+            es_id,
+            0,
+        )
     }
 
     /// Set peer PE `addr`'s segment bitmap (`bits == 0` removes the row):
@@ -1082,14 +1117,26 @@ impl Dataplane {
     /// Returns `true` when this call *displaced a local entry* (the MAC was
     /// learned on a local port and is now remote) — a MAC-move-away that the
     /// `WatchFdb` stream must surface immediately (see `Control::add_fdb_remote`).
+    ///
+    /// `etree_leaf` (every flavor): the MAC is behind a leaf AC on its PE
+    /// (`FDB_F_ETREE_LEAF`, RFC 8317 §4.1). It is part of the one insert, so
+    /// a Type-2 that changes the role replaces the entry atomically.
     pub fn fdb_remote_add(
         &mut self,
         mac: [u8; 6],
         bd: u16,
         remote_sid: Ipv6Addr,
         nexthop_id: u32,
+        etree_leaf: bool,
     ) -> Result<bool> {
-        self.fdb_overlay_add(mac, bd, remote_sid.octets(), FDB_F_REMOTE, nexthop_id, 0)
+        self.fdb_overlay_add(
+            mac,
+            bd,
+            remote_sid.octets(),
+            FDB_F_REMOTE | etree_flag(etree_leaf),
+            nexthop_id,
+            0,
+        )
     }
 
     /// The VXLAN flavor of [`Self::fdb_remote_add`]: the MAC sits behind the
@@ -1101,12 +1148,13 @@ impl Dataplane {
         bd: u16,
         vtep: IpAddr,
         nexthop_id: u32,
+        etree_leaf: bool,
     ) -> Result<bool> {
         self.fdb_overlay_add(
             mac,
             bd,
             ip_to_v6_bytes(vtep),
-            FDB_F_REMOTE | FDB_F_VXLAN,
+            FDB_F_REMOTE | FDB_F_VXLAN | etree_flag(etree_leaf),
             nexthop_id,
             0,
         )
@@ -1124,12 +1172,13 @@ impl Dataplane {
         pe: IpAddr,
         label: u32,
         nexthop_id: u32,
+        etree_leaf: bool,
     ) -> Result<bool> {
         self.fdb_overlay_add(
             mac,
             bd,
             ip_to_v6_bytes(pe),
-            FDB_F_REMOTE | FDB_F_MPLS,
+            FDB_F_REMOTE | FDB_F_MPLS | etree_flag(etree_leaf),
             nexthop_id,
             label,
         )
