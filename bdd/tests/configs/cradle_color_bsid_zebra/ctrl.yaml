@@ -1,7 +1,10 @@
 # Controller + service-route origin (iBGP AS 65000). Originates the service
 # route 10.99.0.0/24 and the SR Policy <color 100, endpoint 192.168.12.2>
-# with SR-MPLS Binding SID 16100 and segment {16002}, route-target 10.0.0.1
-# (== headend h's router-id, so h consumes it, RFC 9830 §4.2).
+# with SR-MPLS Binding SID 15100 and segment {16002}, route-target 10.0.0.1
+# (== headend h's router-id, so h consumes it, RFC 9830 §4.2). 15100 is in
+# h's SRLB (the default block's 15000-15999), where a zebra-rs headend
+# claims a received Binding SID before installing its ILM; one outside it
+# is not available, and the route falls back to the segment list.
 interface:
 - {if-name: cb, ipv4: {address: 192.168.12.2/24}}
 router:
@@ -17,7 +20,7 @@ router:
       - name: DETOUR
         color: 100
         endpoint: 192.168.12.2
-        binding-sid-label: 16100
+        binding-sid-label: 15100
         route-target: 10.0.0.1
         segment:
         - {index: 1, mpls-label: 16002}
