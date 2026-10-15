@@ -943,6 +943,35 @@ async fn cradle_stat_exceeds_recorded(
     );
 }
 
+/// The negative twin of [`cradle_stat_exceeds_recorded`]: the counter has
+/// not moved since `I record the cradle stat …`. For a path that must not
+/// be taken by the traffic driven since — put it after a step that proves
+/// that traffic ran, so the check is not vacuous.
+#[then(
+    expr = "the cradle stat {string} in namespace {string} via gRPC as {string} should still equal its recorded value"
+)]
+async fn cradle_stat_still_recorded(
+    world: &mut World,
+    stat: String,
+    namespace: String,
+    sock: String,
+) {
+    let scoped = world.ns(&namespace);
+    let ep = grpc_sock(world, &sock);
+    let was = *world
+        .recorded_stats
+        .get(&format!("{scoped}/{stat}"))
+        .unwrap_or_else(|| panic!("cradle stat {} in {} was never recorded", stat, scoped));
+    let now = cradle_stat_read(&scoped, &ep, &stat)
+        .await
+        .unwrap_or_else(|| panic!("cradle stat {} not found in {}", stat, scoped));
+    assert_eq!(
+        now, was,
+        "cradle stat {stat} moved from {was} to {now} in {scoped}"
+    );
+    println!("✓ cradle stat {} still {} in {}", stat, now, scoped);
+}
+
 /// Poll `cradle stats` over gRPC and assert the named counter reached at
 /// least `want` — for scenarios that drive the same counter more than once
 /// and must prove each event landed (a plain nonzero can't tell one
