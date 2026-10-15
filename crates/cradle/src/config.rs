@@ -66,6 +66,11 @@ pub struct Config {
     /// BUM ingress-replication slots (EVPN over SRv6, multi-PE).
     #[serde(default)]
     pub repl_slots: Vec<ReplSlotCfg>,
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf label this PE
+    /// advertised, for decap (`SetEtreeLeafLabel`). Omitted leaves it as it
+    /// is; 0 removes it.
+    #[serde(default)]
+    pub etree_leaf_label: Option<u32>,
     /// RFC 9524 Replication segments (`End.Replicate` SR-P2MP tree nodes).
     #[serde(default)]
     pub repl_segs: Vec<ReplSegCfg>,
@@ -210,6 +215,12 @@ pub struct ReplSlotCfg {
     pub esi: Option<String>,
     #[serde(default)]
     pub esi_label: u32,
+    /// EVPN E-Tree (RFC 8317 §4.2, MPLS only): `remote_pe`'s leaf label —
+    /// the slot carries BUM from local leaf ports only, each copy with this
+    /// label under the service label, and every other slot toward the PE
+    /// serves roots only. Exclusive with `esi`/`esi_label`.
+    #[serde(default)]
+    pub etree_leaf_label: u32,
 }
 
 /// An RFC 9524 Replication segment: the local `End.Replicate` SID `sid` (also
@@ -740,6 +751,9 @@ impl Config {
         for (vlan, members) in l2_domains(&self.ports) {
             ctl.set_l2_domain(vlan, &members).await?;
         }
+        if let Some(label) = self.etree_leaf_label {
+            ctl.set_etree_leaf_label(label).await?;
+        }
         for es in &self.ethernet_segments {
             ctl.set_ethernet_segment(&es.esi, &es.ports, es.esi_label)
                 .await?;
@@ -1020,6 +1034,8 @@ impl Config {
                         "repl slot {}: esi and esi_label go together",
                         r.flood_port
                     );
+                    crate::control::check_extra_labels(r.esi_label, r.etree_leaf_label)
+                        .map_err(|e| anyhow::anyhow!("repl slot {}: {e}", r.flood_port))?;
                     ctl.add_repl_slot_mpls(
                         &r.flood_port,
                         &r.encap_port,
@@ -1027,6 +1043,7 @@ impl Config {
                         r.label,
                         r.esi.as_deref(),
                         r.esi_label,
+                        r.etree_leaf_label,
                     )
                     .await?;
                 }

@@ -209,6 +209,8 @@ pub struct Dataplane {
     port_etree: HashMap<MapData, u32, u32>,
     slot_es: HashMap<MapData, u32, SlotEs>,
     esi_label: HashMap<MapData, u32, u32>,
+    /// EVPN E-Tree over MPLS: the leaf label this PE advertised (decap).
+    leaf_label: HashMap<MapData, u32, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
     /// LAG member ifindex → its bond (the cradle port), for the XDP stage.
     port_master: HashMap<MapData, u32, u32>,
@@ -349,6 +351,10 @@ impl Dataplane {
             slot_es: HashMap::try_from(bpf.take_map("SLOT_ES").context("map SLOT_ES missing")?)?,
             esi_label: HashMap::try_from(
                 bpf.take_map("ESI_LABEL").context("map ESI_LABEL missing")?,
+            )?,
+            leaf_label: HashMap::try_from(
+                bpf.take_map("LEAF_LABEL")
+                    .context("map LEAF_LABEL missing")?,
             )?,
             vtep_es: HashMap::try_from(bpf.take_map("VTEP_ES").context("map VTEP_ES missing")?)?,
             port_master: HashMap::try_from(
@@ -985,20 +991,21 @@ impl Dataplane {
     /// Segment affinity — `only` = segment id + 1 for a slot carrying a
     /// peer's ESI label for that segment, or 0 with `skip` = the bitmap of
     /// segments a plain slot must not serve (their BUM goes through the
-    /// ESI-label slots instead). Both zero removes the row.
-    pub fn slot_es_set(&mut self, flood_ifindex: u32, only: u32, skip: u64) -> Result<()> {
-        if only == 0 && skip == 0 {
+    /// ESI-label slots instead). `etree` (`SLOT_ETREE_*`, RFC 8317 §4.2):
+    /// a leaf-label slot, or a slot toward a PE that has one. All zero
+    /// removes the row.
+    pub fn slot_es_set(
+        &mut self,
+        flood_ifindex: u32,
+        only: u32,
+        skip: u64,
+        etree: u32,
+    ) -> Result<()> {
+        if only == 0 && skip == 0 && etree == 0 {
             let _ = self.slot_es.remove(&flood_ifindex);
         } else {
-            self.slot_es.insert(
-                flood_ifindex,
-                SlotEs {
-                    only,
-                    _pad: 0,
-                    skip,
-                },
-                0,
-            )?;
+            self.slot_es
+                .insert(flood_ifindex, SlotEs { only, etree, skip }, 0)?;
         }
         Ok(())
     }
@@ -1014,6 +1021,19 @@ impl Dataplane {
     /// The ESI label is no longer ours.
     pub fn esi_label_del(&mut self, label: u32) {
         let _ = self.esi_label.remove(&label);
+    }
+
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): `label` is the leaf label
+    /// this PE advertised — a received BUM copy carrying it under our
+    /// service label came from a leaf AC and is kept off our leaf ports.
+    pub fn leaf_label_set(&mut self, label: u32) -> Result<()> {
+        self.leaf_label.insert(label, 1, 0)?;
+        Ok(())
+    }
+
+    /// The leaf label is no longer ours.
+    pub fn leaf_label_del(&mut self, label: u32) {
+        let _ = self.leaf_label.remove(&label);
     }
 
     /// Alias LAG member `member` to its bond `port` for the XDP stage (a

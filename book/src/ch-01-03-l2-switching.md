@@ -184,8 +184,32 @@ is `SetEtreeRole`. It may be sent before the port, and it stays with the
 port's name if the device is re-created. The remote MAC's flag is
 `FdbRemote.etree_leaf`. `cradle dump l2` marks flagged MACs `etree-leaf`.
 
-Broadcast, multicast and unknown unicast from a leaf are not yet kept from
-leaves on *other* PEs; only the local copies are withheld.
+Broadcast, multicast and unknown unicast from a leaf cannot be dropped at
+the ingress PE, because one copy serves the remote roots and leaves alike.
+Over MPLS each PE has a **leaf label**: give this PE's, and toward each
+remote PE that has one, add a leaf slot carrying it:
+
+```json
+{
+  "etree_leaf_label": 1800,
+  "repl_slots": [
+    { "flood_port": "r12a",  "encap_port": "r12b",  "remote_pe": "10.255.0.2", "label": 2200 },
+    { "flood_port": "r12la", "encap_port": "r12lb", "remote_pe": "10.255.0.2", "label": 2200,
+      "etree_leaf_label": 2800 }
+  ]
+}
+```
+
+A leaf's flood then reaches that PE through the leaf slot alone, with the
+PE's leaf label under the EVI label (`mpls_l2_leaf_push`), and roots keep
+using the other slots. The receiving PE pops its leaf label
+(`mpls_l2_leaf_pop`) and keeps the copy off its leaf ports
+(`l2_drop_etree_bum`), including an unknown-unicast copy for a MAC it
+knows. On a multihomed leaf the leaf label takes the ESI label's place.
+Over gRPC these are `SetEtreeLeafLabel` and `AddReplSlot.etree_leaf_label`.
+
+Over VXLAN and SRv6 a leaf's BUM is not yet kept from leaves on *other*
+PEs; only the local copies are withheld.
 
 ## Mixing L2 and L3
 

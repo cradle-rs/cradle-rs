@@ -361,11 +361,34 @@ Delivered so far (plan phase 2a), all encapsulation-neutral:
   an `FDB_F_ESNHG` entry is covered without touching the group, and the
   encap call stays single (the verifier budget).
 
-Not yet: BUM between leaves on different PEs. Over MPLS that needs the
-per-PE leaf label (phase 3), over VXLAN the IMET colouring (phase 4), and
-over SRv6 an Arg.FE2-capable `End.DT2M` (phase 5). Until then a leaf's
-broadcast still reaches a remote leaf, so known unicast is the only
-cross-core guarantee.
+**BUM across the core over MPLS** (plan phase 3a, RFC 8317 §4.2, egress
+filtering). One BUM copy serves roots and leaves alike, so the ingress PE
+cannot filter it. It marks a leaf's copy instead, and the egress PE filters
+it:
+- **Leaf label, receive.** Each PE advertises one leaf label (zebra-rs's
+  ESI-0 Ethernet A-D route) and holds it in `LEAF_LABEL`
+  (`SetEtreeLeafLabel`). `pop_decap_l2` accepts it as the one label under
+  the service label, as it does an ESI label, and sets
+  `ES_BITS_ETREE_LEAF` (bit 63 of `es_bits`; segment ids stop at 62,
+  `MAX_ES_ID`) (`mpls_l2_leaf_pop`). `flood()` then skips the leaf ports,
+  and so does `l2_switch` when the copy is an unknown-unicast flood that
+  meets a MAC known here (`l2_drop_etree_bum`).
+- **Leaf slot, transmit.** Toward a PE that advertised a leaf label there
+  is one more replication slot (`AddReplSlot.etree_leaf_label`), whose
+  copies carry that label where an ESI label would go. The target's
+  `esi_label` holds it, marked `REPL_EXTRA_ETREE_LEAF` above the 20 label
+  bits so `l2_mpls_encap` counts `mpls_l2_leaf_push`. The encap path keeps
+  its signature, for the `cradle_xdp` stack budget. `SlotEs.etree` makes
+  `flood()` send a leaf port's BUM through the leaf slot only, and every
+  other slot toward that PE (plain or ESI) serve roots only
+  (`slot_group_rows`). So the leaf label **replaces** the ESI label on a
+  multihomed leaf's copy (§4.2.3), and a PE with no leaf label gets the
+  usual slots.
+
+Not yet: BUM between leaves on different PEs over VXLAN (the IMET
+colouring, phase 4) and SRv6 (an Arg.FE2-capable `End.DT2M`, phase 5).
+There a leaf's broadcast still reaches a remote leaf, so known unicast is
+the only cross-core guarantee.
 
 Static config: `ports[].etree_leaf` (`true`/`false`; omitted leaves the role
 as it is), `fdb[].etree_leaf`. `cradle dump l2` shows the flag as
@@ -391,6 +414,22 @@ zebra-rs-driven VXLAN fabric:
 - each leaf still reaching the root on the other PE;
 - a host moving from a leaf AC to a root AC on its PE becoming reachable
   from the leaves, once zebra-rs re-advertises its MAC without the flag.
+
+Static config for MPLS BUM: top-level `etree_leaf_label` (this PE's; omitted
+leaves it as it is, 0 removes it) and `repl_slots[].etree_leaf_label` (a
+leaf slot; exclusive with `esi`/`esi_label`). BDD `cradle_evpn_etree_mpls`
+runs two PEs back to back over MPLS, each with a leaf and a root host; the
+leaf on pe1 is also on a segment, whose ESI-label slot it would otherwise
+use:
+- control, no roles: the leaf's broadcast goes through the ESI-label slot
+  and reaches the remote leaf;
+- with roles: it goes through the leaf slot instead (`mpls_l2_leaf_push`
+  moves, `mpls_l2_esi_push` does not), pe2 pops the leaf label, and the
+  remote root receives it while the remote leaf does not
+  (`l2_drop_etree_bum`);
+- a root's broadcast still reaches the remote leaf;
+- a leaf's unknown unicast toward the remote leaf, which pe2 knows, is
+  dropped at pe2 (`l2_switch`).
 
 ## Configuration walkthrough
 

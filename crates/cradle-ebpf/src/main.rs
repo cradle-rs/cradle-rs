@@ -75,6 +75,10 @@ use cradle_common::{
     XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use cradle_common::{
+    ES_BITS_ETREE_LEAF, MPLS_LABEL_MASK, REPL_EXTRA_ETREE_LEAF, SLOT_ETREE_LEAF, SLOT_ETREE_ROOT,
+    STAT_L2_DROP_ETREE_BUM, STAT_MPLS_L2_LEAF_POP, STAT_MPLS_L2_LEAF_PUSH,
+};
+use cradle_common::{
     ETREE_F_LEAF, FDB_F_ETREE_LEAF, STAT_L2_DROP_ETREE_LOCAL, STAT_L2_DROP_ETREE_UC,
 };
 use cradle_common::{STAT_MPLS_L2_ESI_POP, STAT_MPLS_L2_ESI_PUSH, SlotEs};
@@ -291,6 +295,13 @@ static ES_NHG_MEMBER: HashMap<EsNhgMemberKey, ReplTarget> = HashMap::with_max_en
 /// another leaf for want of its role.
 #[map]
 static PORT_ETREE: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
+/// EVPN E-Tree over MPLS (RFC 8317 §4.2), egress side: the leaf label this
+/// PE advertised (its ESI-0 Ethernet A-D route) → unused. A peer pushes it
+/// under our EVI label on BUM from one of its leaf ACs; `pop_decap_l2` pops
+/// it into `ES_BITS_ETREE_LEAF`, and the TC stage keeps the copy off our
+/// leaf ports. One label per PE, so one row in practice.
+#[map]
+static LEAF_LABEL: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
 
 // --- L4 ---
 #[map]
@@ -904,6 +915,13 @@ fn l2_switch(
                 // on this PE either.
                 stat_inc(STAT_L2_DROP_ETREE_LOCAL);
                 Ok(TC_ACT_SHOT as i32)
+            } else if from_overlay && es_bits & ES_BITS_ETREE_LEAF != 0 && etree_leaf(oif) {
+                // E-Tree egress filtering (§4.2): a remote leaf's unknown
+                // unicast arrives as a flooded copy, and may hit a MAC
+                // known here. It must not reach a leaf through this path
+                // either.
+                stat_inc(STAT_L2_DROP_ETREE_BUM);
+                Ok(TC_ACT_SHOT as i32)
             } else if es_blocked(oif, vlan) {
                 // Single-active: known unicast toward a standby segment port
                 // is dropped too (the DF on another PE delivers it).
@@ -1019,7 +1037,10 @@ fn etree_leaf(ifindex: u32) -> bool {
 /// (`es_bits`, from `VTEP_ES` at decap) — the local-bias split horizon that
 /// stops a CE's own frame coming back to it via the other PE. A frame from a
 /// local E-Tree leaf port is withheld from the other local leaf ports
-/// (RFC 8317 §4.2); its copies toward the overlay still go.
+/// (RFC 8317 §4.2). Its copies toward the overlay still go, through a PE's
+/// leaf-label slot where it has one (`SLOT_ES` `etree`); a copy that came
+/// from a remote leaf (`ES_BITS_ETREE_LEAF`) is withheld from local leaf
+/// ports instead (egress filtering).
 #[inline(always)]
 fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -> i32 {
     stat_inc(STAT_L2_FLOOD);
@@ -1035,8 +1056,10 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
         Some(id) => (unsafe { *id }) + 1,
         None => 0,
     };
-    // An overlay frame's `iif` is the underlay port, never a leaf AC.
+    // An overlay frame's `iif` is the underlay port, never a leaf AC; a
+    // copy from a remote leaf AC is marked in `es_bits` instead.
     let from_leaf = !local_only && etree_leaf(iif);
+    let from_remote_leaf = local_only && es_bits & ES_BITS_ETREE_LEAF != 0;
     let mut slot: u16 = 0;
     while slot < MAX_L2_MEMBERS {
         if slot as u32 >= count {
@@ -1047,7 +1070,15 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
             let affinity_ok = match SLOT_ES.get_ptr(&oif) {
                 Some(r) => {
                     let r = unsafe { &*r };
-                    if r.only != 0 {
+                    if r.etree & SLOT_ETREE_LEAF != 0 {
+                        // E-Tree (RFC 8317 §4.2): the leaf-label slot
+                        // carries a leaf's BUM, and only a leaf's.
+                        from_leaf
+                    } else if from_leaf && r.etree & SLOT_ETREE_ROOT != 0 {
+                        // That PE has a leaf slot: a leaf's copy goes there,
+                        // with the leaf label instead of an ESI label.
+                        false
+                    } else if r.only != 0 {
                         r.only == in_es
                     } else {
                         in_es == 0 || r.skip & (1u64 << ((in_es - 1) & 63)) == 0
@@ -1060,6 +1091,8 @@ fn flood(ctx: &TcContext, iif: u32, vlan: u16, local_only: bool, es_bits: u64) -
                     stat_inc(STAT_L2_DROP_NONDF);
                 } else if from_leaf && etree_leaf(oif) {
                     stat_inc(STAT_L2_DROP_ETREE_LOCAL);
+                } else if from_remote_leaf && etree_leaf(oif) {
+                    stat_inc(STAT_L2_DROP_ETREE_BUM);
                 } else if es_bits != 0 && es_peer_port(oif, es_bits) {
                     stat_inc(STAT_L2_DROP_SPH);
                 } else {
@@ -3888,7 +3921,11 @@ fn l2_mpls_encap(
     }
     // RFC 7432 §8.3: a BUM copy toward a peer PE of the segment the frame
     // entered through carries that PE's ESI label under the service label
-    // (which is then no longer bottom of stack).
+    // (which is then no longer bottom of stack). A leaf's copy carries the
+    // PE's E-Tree leaf label there instead (RFC 8317 §4.2), marked by
+    // `REPL_EXTRA_ETREE_LEAF` above the 20 label bits.
+    let leaf = esi_label & REPL_EXTRA_ETREE_LEAF != 0;
+    let esi_label = esi_label & MPLS_LABEL_MASK;
     let esi = esi_label != 0;
     let grow = (EthHdr::LEN + 4 * (n + 1) + if esi { 4 } else { 0 }) as i32;
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, -grow) } != 0 {
@@ -3926,7 +3963,11 @@ fn l2_mpls_encap(
             2 => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 12)? = lse },
             _ => unsafe { *xdp_ptr::<u32>(ctx, MPLS_LSE_OFF + 16)? = lse },
         }
-        stat_inc(STAT_MPLS_L2_ESI_PUSH);
+        stat_inc(if leaf {
+            STAT_MPLS_L2_LEAF_PUSH
+        } else {
+            STAT_MPLS_L2_ESI_PUSH
+        });
     }
     stat_inc(stat);
     Ok(unsafe { bpf_redirect(nh.oif, 0) } as u32)
@@ -5380,8 +5421,11 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
 /// that entered the segment through it. It resolves (`ESI_LABEL`) to the
 /// segment's bit in `es_bits`, and the flood loop withholds the copy from
 /// the segment's ports — the MPLS split horizon, where no source address
-/// identifies the ingress PE. Anything else under the service label is
-/// malformed — not an Ethernet frame — and dropped rather than misparsed.
+/// identifies the ingress PE. Or it is the E-Tree leaf label this PE
+/// advertised (RFC 8317 §4.2, `LEAF_LABEL`): the copy came from a leaf AC,
+/// and `ES_BITS_ETREE_LEAF` keeps it off our leaf ports. Anything else
+/// under the service label is malformed — not an Ethernet frame — and
+/// dropped rather than misparsed.
 #[inline(always)]
 fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
     let (strip, es_bits) = if s == 1 {
@@ -5397,6 +5441,12 @@ fn pop_decap_l2(ctx: &XdpContext, s: u8, bd: u32) -> Result<u32, ()> {
             Some(id) => {
                 stat_inc(STAT_MPLS_L2_ESI_POP);
                 ((EthHdr::LEN + 8) as i32, 1u64 << (unsafe { *id } & 63))
+            }
+            // E-Tree (RFC 8317 §4.2): our leaf label instead — the copy came
+            // from a leaf AC on the ingress PE.
+            None if LEAF_LABEL.get_ptr(&esi_label).is_some() => {
+                stat_inc(STAT_MPLS_L2_LEAF_POP);
+                ((EthHdr::LEN + 8) as i32, ES_BITS_ETREE_LEAF)
             }
             None => {
                 stat_inc(STAT_DROP);
