@@ -594,6 +594,10 @@ pub struct Control {
     etree: Arc<Mutex<EtreeTable>>,
     /// EVPN E-Tree over MPLS: our leaf label in `LEAF_LABEL` (0 = none).
     etree_leaf_label: Arc<Mutex<u32>>,
+    /// EVPN E-Tree over VXLAN (V1+): the leaf-only remote PEs, as `(bd,
+    /// VTEP key)` — `SetEtreeRemote`. Rendered into `VTEP_ETREE` and onto
+    /// the PE's auto VXLAN slot, now or when the slot appears.
+    etree_remotes: Arc<Mutex<std::collections::BTreeSet<(u16, Ipv6Addr)>>>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
     /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
@@ -644,6 +648,7 @@ impl Control {
             es: Arc::new(Mutex::new(EsTable::default())),
             etree: Arc::new(Mutex::new(EtreeTable::default())),
             etree_leaf_label: Arc::new(Mutex::new(0)),
+            etree_remotes: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
@@ -1386,6 +1391,60 @@ impl Control {
         Ok(())
     }
 
+    /// EVPN E-Tree over VXLAN (RFC 8317; the V1+ scheme of zebra-rs's
+    /// E-Tree plan §8.5): the PE at `remote` (its VTEP) has only leaf ACs
+    /// in bridge domain `bd` (`leaf_only`), as its IMET's E-Tree EC said.
+    /// Two consequences, both undone by `leaf_only = false`:
+    /// - egress: its VXLAN BUM is leaf-originated, so decap marks it and the
+    ///   TC stage keeps it off local leaf ports (`VTEP_ETREE`);
+    /// - ingress: a local leaf's BUM is not sent to it, which has no root
+    ///   to deliver it to — its auto slot serves roots only
+    ///   (`SLOT_ETREE_ROOT`).
+    ///
+    /// Kept by `(bd, remote)`, so it may precede the slot.
+    pub async fn set_etree_remote(&self, bd: u16, remote: IpAddr, leaf_only: bool) -> Result<()> {
+        let key = v6_key(remote);
+        {
+            let mut remotes = self.etree_remotes.lock().await;
+            let changed = if leaf_only {
+                remotes.insert((bd, key))
+            } else {
+                remotes.remove(&(bd, key))
+            };
+            if !changed {
+                return Ok(());
+            }
+        }
+        let slot = self
+            .repl_slots
+            .lock()
+            .await
+            .get(&(bd, key, String::new()))
+            .filter(|s| s.group.is_none())
+            .map(|s| s.a_idx);
+        let mut dp = self.dp.lock().await;
+        if leaf_only {
+            dp.vtep_etree_set(remote, bd)?;
+        } else {
+            dp.vtep_etree_del(remote, bd);
+        }
+        if let Some(a_idx) = slot {
+            dp.slot_es_set(a_idx, 0, 0, if leaf_only { SLOT_ETREE_ROOT } else { 0 })?;
+        }
+        Ok(())
+    }
+
+    /// EVPN E-Tree over VXLAN (V1+), static config: replication slot
+    /// `flood_port` (explicit plumbing, not an auto slot) leads to a
+    /// leaf-only PE, so it serves roots only (`SLOT_ETREE_ROOT`).
+    pub async fn set_slot_etree_root_only(&self, flood_port: &str) -> Result<()> {
+        let flood = util::ifindex_of(flood_port)?;
+        self.dp
+            .lock()
+            .await
+            .slot_es_set(flood, 0, 0, SLOT_ETREE_ROOT)
+    }
+
     /// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf label this PE
     /// advertises (its ESI-0 Ethernet A-D route), for decap; 0 = none. A
     /// peer pushes it under our service label on BUM from its leaf ACs,
@@ -1834,6 +1893,12 @@ impl Control {
         }
         if let Some((group, role)) = group {
             self.slot_es_bind(group, a_idx, role).await?;
+        } else if esi.is_empty() && self.etree_remotes.lock().await.contains(&(bd, key)) {
+            // E-Tree (V1+): a slot toward a leaf-only PE serves roots only.
+            self.dp
+                .lock()
+                .await
+                .slot_es_set(a_idx, 0, 0, SLOT_ETREE_ROOT)?;
         }
         match group.map(|(_, role)| role) {
             Some(SlotRole::Es(esi)) => {
@@ -1877,6 +1942,10 @@ impl Control {
         }
         {
             let mut dp = self.dp.lock().await;
+            if group.is_none() {
+                // An E-Tree root-only mark, if any: the ifindex may be reused.
+                dp.slot_es_set(a_idx, 0, 0, 0)?;
+            }
             dp.l2_member_remove(bd, a_idx)?;
             let _ = dp.repl_sid_del(a_idx);
             let _ = dp.repl_sid_del(b_idx);
@@ -3401,6 +3470,21 @@ impl Cradle for GrpcService {
         let r = req.into_inner();
         self.control
             .set_etree_role(&r.port, r.leaf)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_etree_remote(
+        &self,
+        req: Request<pb::EtreeRemote>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let remote: IpAddr = r.remote.parse().map_err(st)?;
+        let bd = u16::try_from(r.bd)
+            .map_err(|_| Status::invalid_argument(format!("bd {} out of range", r.bd)))?;
+        self.control
+            .set_etree_remote(bd, remote, r.leaf_only)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))

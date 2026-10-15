@@ -81,7 +81,7 @@ use cradle_common::{
 use cradle_common::{
     ETREE_F_LEAF, FDB_F_ETREE_LEAF, STAT_L2_DROP_ETREE_LOCAL, STAT_L2_DROP_ETREE_UC,
 };
-use cradle_common::{STAT_MPLS_L2_ESI_POP, STAT_MPLS_L2_ESI_PUSH, SlotEs};
+use cradle_common::{STAT_MPLS_L2_ESI_POP, STAT_MPLS_L2_ESI_PUSH, SlotEs, VtepBdKey};
 use network_types::eth::EthHdr;
 
 // --- shared ---
@@ -259,6 +259,13 @@ static PORT_ES: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 /// port whose `PORT_ES` id is set in it (RFC 8365 §8.3.1 local bias).
 #[map]
 static VTEP_ES: HashMap<[u8; 16], u64> = HashMap::with_max_entries(1024, 0);
+/// EVPN E-Tree over VXLAN (RFC 8317; V1+, zebra-rs's E-Tree plan §8.5):
+/// a remote PE whose ACs in a bridge domain are all leaves (its IMET
+/// carries the E-Tree EC), keyed `(VTEP, bd)` → unused. BUM from it is
+/// leaf-originated, so VXLAN decap sets `ES_BITS_ETREE_LEAF` and the TC
+/// stage keeps it off local leaf ports (egress filtering).
+#[map]
+static VTEP_ETREE: HashMap<VtepBdKey, u32> = HashMap::with_max_entries(1024, 0);
 /// EVPN multihoming aliasing (RFC 7432 §8.4): per `(segment id, bridge
 /// domain)`, the number of PEs a MAC behind that segment can be sent to,
 /// and the members themselves (`slot` in `0..count`, each a [`ReplTarget`]).
@@ -939,7 +946,9 @@ fn l2_switch(
 /// EVPN multihoming split horizon: the `VTEP_ES` bitmap of an overlay
 /// source VTEP `s` (outer IPv4 source, v4-mapped for the lookup). Zero when
 /// the source shares no Ethernet Segment with this node, so the common
-/// single-homed case costs one map miss.
+/// single-homed case costs one map miss. Plus `ES_BITS_ETREE_LEAF` when `s`
+/// is a leaf-only E-Tree PE in bridge domain `bd` (`VTEP_ETREE`, a second
+/// miss in the common case).
 ///
 /// Deliberately NOT inlined: the 16-byte key lives in this subprogram's
 /// frame, not `cradle_xdp`'s flattened one (see `overlay_fib_nexthop_id`).
@@ -950,13 +959,42 @@ fn l2_switch(
 /// a `[0u8; 16]` piecemeal (out-of-line memset, then register reuse) —
 /// hence the single array literal.
 #[inline(never)]
-fn vtep4_es_bits(s: [u8; 4]) -> u64 {
-    let key: [u8; 16] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, s[0], s[1], s[2], s[3],
-    ];
-    match VTEP_ES.get_ptr(&key) {
+fn vtep4_es_bits(s: [u8; 4], bd: u32) -> u64 {
+    let key = VtepBdKey {
+        addr: [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, s[0], s[1], s[2], s[3],
+        ],
+        bd,
+    };
+    vtep_bd_bits(&key)
+}
+
+/// The IPv6-VTEP twin of [`vtep4_es_bits`] for VXLAN decap: segment bits
+/// and the E-Tree leaf mark, from the outer IPv6 source `p` (bounds-checked
+/// by the caller) in bridge domain `bd`.
+#[inline(never)]
+fn vtep6_vxlan_bits(p: *const [u8; 16], bd: u32) -> u64 {
+    let key = VtepBdKey {
+        addr: unsafe { *p },
+        bd,
+    };
+    vtep_bd_bits(&key)
+}
+
+/// `VTEP_ES` for the VTEP, plus `ES_BITS_ETREE_LEAF` when the VTEP is a
+/// leaf-only E-Tree PE in the domain (`VTEP_ETREE`, RFC 8317 V1+): its BUM
+/// came from leaf ACs, so local leaf ports must not get it. Inlined into
+/// the two non-inlined callers above, so the key stays in their frame.
+#[inline(always)]
+fn vtep_bd_bits(key: &VtepBdKey) -> u64 {
+    let es = match VTEP_ES.get_ptr(&key.addr) {
         Some(b) => unsafe { *b },
         None => 0,
+    };
+    if VTEP_ETREE.get_ptr(key).is_some() {
+        es | ES_BITS_ETREE_LEAF
+    } else {
+        es
     }
 }
 
@@ -4399,9 +4437,10 @@ fn try_vxlan_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
     // Multihoming split horizon: which Ethernet Segments the source VTEP
-    // shares with us — read now, the outer header is about to go.
+    // shares with us, and whether it is a leaf-only E-Tree PE in this
+    // domain — read now, the outer header is about to go.
     let es_bits = if magic == XDP_META_MAGIC_L2 {
-        vtep4_es_bits(unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_SRC_OFF)? })
+        vtep4_es_bits(unsafe { *xdp_ptr::<[u8; 4]>(ctx, IP_SRC_OFF)? }, vrf)
     } else {
         0
     };
@@ -4483,7 +4522,7 @@ fn try_vxlan6_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
     // Drop the outer headers: the inner Ethernet frame moves to the front.
     let es_bits = if magic == XDP_META_MAGIC_L2 {
-        vtep6_es_bits(xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)?)
+        vtep6_vxlan_bits(xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)?, vrf)
     } else {
         0
     };

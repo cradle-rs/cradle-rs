@@ -71,6 +71,10 @@ pub struct Config {
     /// is; 0 removes it.
     #[serde(default)]
     pub etree_leaf_label: Option<u32>,
+    /// EVPN E-Tree over VXLAN (V1+): remote PEs whose ACs in a bridge
+    /// domain are all leaves (`SetEtreeRemote`).
+    #[serde(default)]
+    pub etree_remotes: Vec<EtreeRemoteCfg>,
     /// RFC 9524 Replication segments (`End.Replicate` SR-P2MP tree nodes).
     #[serde(default)]
     pub repl_segs: Vec<ReplSegCfg>,
@@ -221,6 +225,21 @@ pub struct ReplSlotCfg {
     /// serves roots only. Exclusive with `esi`/`esi_label`.
     #[serde(default)]
     pub etree_leaf_label: u32,
+    /// EVPN E-Tree over VXLAN (V1+): this slot leads to a leaf-only PE, so
+    /// it serves roots only — a leaf's BUM is not sent there. For a slot
+    /// with explicit plumbing; an auto slot takes it from `etree_remotes`.
+    #[serde(default)]
+    pub etree_root_only: bool,
+}
+
+/// EVPN E-Tree over VXLAN (V1+): the PE at `remote_vtep` is leaf-only in
+/// bridge domain `bd` — or, with `leaf_only: false`, no longer.
+#[derive(Debug, Deserialize)]
+pub struct EtreeRemoteCfg {
+    pub bd: u16,
+    pub remote_vtep: String,
+    #[serde(default = "default_true")]
+    pub leaf_only: bool,
 }
 
 /// An RFC 9524 Replication segment: the local `End.Replicate` SID `sid` (also
@@ -754,6 +773,13 @@ impl Config {
         if let Some(label) = self.etree_leaf_label {
             ctl.set_etree_leaf_label(label).await?;
         }
+        for r in &self.etree_remotes {
+            let vtep = r
+                .remote_vtep
+                .parse()
+                .with_context(|| format!("bad E-Tree remote VTEP {:?}", r.remote_vtep))?;
+            ctl.set_etree_remote(r.bd, vtep, r.leaf_only).await?;
+        }
         for es in &self.ethernet_segments {
             ctl.set_ethernet_segment(&es.esi, &es.ports, es.esi_label)
                 .await?;
@@ -1019,6 +1045,9 @@ impl Config {
                     })?;
                     ctl.add_repl_slot_vxlan(&r.flood_port, &r.encap_port, vtep, vni)
                         .await?;
+                    if r.etree_root_only {
+                        ctl.set_slot_etree_root_only(&r.flood_port).await?;
+                    }
                 }
                 (None, None, Some(pe)) => {
                     let pe = pe

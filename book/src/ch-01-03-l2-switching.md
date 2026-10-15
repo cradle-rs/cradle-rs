@@ -208,8 +208,27 @@ using the other slots. The receiving PE pops its leaf label
 knows. On a multihomed leaf the leaf label takes the ESI label's place.
 Over gRPC these are `SetEtreeLeafLabel` and `AddReplSlot.etree_leaf_label`.
 
-Over VXLAN and SRv6 a leaf's BUM is not yet kept from leaves on *other*
-PEs; only the local copies are withheld.
+VXLAN has no label for the mark. A PE whose ACs in a domain are all
+leaves is **leaf-only** there, and says so on its IMET; name such PEs:
+
+```json
+{
+  "etree_remotes": [ { "bd": 100, "remote_vtep": "192.0.2.1" } ],
+  "repl_slots": [
+    { "flood_port": "r21a", "encap_port": "r21b", "remote_vtep": "192.0.2.1",
+      "vni": 10100, "etree_root_only": true }
+  ]
+}
+```
+
+BUM arriving from a leaf-only PE is kept off the local leaf ports
+(`l2_drop_etree_bum`), and a local leaf's BUM is not sent to it — it has no
+root to deliver it to. Over gRPC this is `SetEtreeRemote`, which also marks
+the PE's slot. Two PEs that both have roots and leaves still exchange
+their leaves' BUM: VXLAN cannot tell it from a root's.
+
+Over SRv6 a leaf's BUM is not yet kept from leaves on *other* PEs; only
+the local copies are withheld.
 
 ## Mixing L2 and L3
 

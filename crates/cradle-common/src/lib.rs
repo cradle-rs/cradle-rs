@@ -889,6 +889,17 @@ pub struct L2MemberKey {
     pub slot: u16,
 }
 
+/// EVPN E-Tree over VXLAN (RFC 8317, the V1+ scheme of zebra-rs's E-Tree
+/// plan §8.5): a remote PE, by its VTEP (`VTEP_ES`'s v4-mapped / IPv6 key
+/// form), in one bridge domain — the `VTEP_ETREE` key. A PE can be
+/// leaf-only in one domain and mixed in another, so the mark is per domain.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VtepBdKey {
+    pub addr: [u8; 16],
+    pub bd: u32,
+}
+
 /// EVPN multihoming (RFC 7432 §8.5) per-`(port, bridge domain)` Ethernet
 /// Segment forwarding role, keyed by the flood-list member's ifindex. Only
 /// ports that belong to a multihomed segment have rows; absence = forward.
@@ -1391,6 +1402,7 @@ mod user {
         NeighEntry,
         NhGroupKey,
         EsDfKey,
+        VtepBdKey,
         EsNhgKey,
         EsNhgMemberKey,
         SlotEs,
