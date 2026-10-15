@@ -1,0 +1,63 @@
+# PE1 — EVPN-over-MPLS PE with an E-Tree leaf AC (pe1l) and a root
+# AC (pe1r), both in br100 (EVI 100): that membership is how zebra-rs
+# knows the leaf AC's EVI. With a leaf AC under MPLS, zebra-rs draws a leaf
+# label, advertises it in a per-ES A-D route with ESI 0 (RFC 8317 §4.2.1),
+# tees it to cradle for decap, and builds a leaf slot toward the other PE
+# from that PE's leaf label. `etree` needs zebra-rs's `--feature etree`.
+system:
+  cradle:
+    enabled: true
+# PE1 — EVPN-over-MPLS provider edge. IS-IS L2 with SR-MPLS supplies the
+# transport LSP to PE2's loopback; iBGP L2VPN-EVPN (`encapsulation mpls`)
+# advertises this PE's per-EVI service label. cradle is the L2 data plane —
+# the kernel has no action that pops a label into a bridge.
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.1/32
+- if-name: p
+  ipv4:
+    address: 10.250.0.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1
+    - if-name: p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: mpls
+      evi:
+      - id: 100
+        bridge: br100
+      etree:
+        leaf-interface:
+        - name: pe1l
+    neighbor:
+    - remote-address: 2.2.2.2
+      remote-as: 65000
+      update-source: 1.1.1.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

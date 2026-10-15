@@ -431,6 +431,16 @@ use:
 - a leaf's unknown unicast toward the remote leaf, which pe2 knows, is
   dropped at pe2 (`l2_switch`).
 
+Under zebra-rs (plan phase 3b), the leaf labels and slots come from BGP:
+with a leaf AC under `encapsulation mpls`, zebra-rs draws a leaf label,
+tees it (`SetEtreeLeafLabel`), advertises it in a per-ES A-D route with ESI
+0, and turns each peer's leaf label and BUM label into a leaf slot
+(`AddReplSlot.etree_leaf_label`). BDD `cradle_evpn_etree_mpls_zebra` runs
+it over IS-IS SR-MPLS across a P router: the labels cross in BGP, a leaf's
+broadcast reaches the remote root but not the remote leaf
+(`l2_drop_etree_bum`), a root's reaches both, and a leaf's known unicast
+to the remote leaf is dropped at its own PE (`l2_drop_etree_uc`).
+
 ## Configuration walkthrough
 
 The operator surface, all existing zebra YANG (`zebra-bgp-evpn.yang`):
