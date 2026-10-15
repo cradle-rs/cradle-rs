@@ -11,6 +11,61 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.4
+  date: 2026-10-15T13:16:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN E-Tree (RFC 8317)
+        * Leaf isolation, the half that needs no BUM signalling: every
+          attachment circuit of a bridge domain is a root or a leaf,
+          and a leaf never reaches another leaf
+        * Between local leaves (§4.2): known unicast from one leaf port
+          to another is not switched, and a leaf's flood skips the
+          other leaf members (`l2_drop_etree_local`). Overlay frames
+          are exempt, since their ingress is the underlay port
+        * Known unicast across the core (§4.1): a frame from a leaf
+          port to a remote MAC flagged as behind a leaf
+          (`FDB_F_ETREE_LEAF`) is dropped in XDP before it is
+          encapsulated (`l2_drop_etree_uc`). The flag is on the MAC, so
+          it holds for VXLAN, MPLS and SRv6 alike, and for a MAC behind
+          a multihomed segment's nexthop group
+        * BUM from a leaf still reaches leaves on other PEs; that needs
+          the leaf label (MPLS), IMET colouring (VXLAN) or Arg.FE2
+          (SRv6), and comes later
+
+    - note: |
+        ### Control plane and configuration
+        * `SetEtreeRole {port, leaf}` keeps a port's role by name in the
+          new `PORT_ETREE` map (ifindex -> leaf; no row is a root). The
+          role may be sent before its port, and follows the port to a
+          re-created device's new ifindex. `DelPort` keeps the row, as
+          it keeps a segment port's `ES_DF` / `PORT_ES` rows, so a port
+          still in its flood list stays isolated until the caller's
+          `SetL2Domain`
+        * `FdbRemote.etree_leaf`, set atomically with the MAC install
+        * Static config `ports[].etree_leaf` (omitted leaves the role
+          as it is; `false` makes a leaf a root again) and
+          `fdb[].etree_leaf`
+        * `cradle dump l2` marks flagged MACs `etree-leaf`
+
+    - note: |
+        ### BDD / test infrastructure
+        * `cradle_evpn_etree`: two PEs over VXLAN, two leaves and a root
+          on one, a leaf and a root on the other — a leaf's broadcast
+          reaching the root only, local and cross-core leaf-to-leaf
+          unicast dropped with each PE's counter asserted, a re-created
+          leaf port keeping its role through `SetPort` alone, and a
+          `DelPort`'d leaf staying isolated while still in the flood
+          list
+        * `cradle_color_bsid_zebra` uses Binding SID 15100. Since
+          zebra-rs #2505 a headend claims a received Binding SID only
+          inside its SRLB (default 15000-15999); the former 16100 sat
+          in the SRGB, so the route steered onto the segment list and
+          the feature failed against a current zebra-rs
+
 - semver: 1.1.3
   date: 2026-10-09T00:00:39+09:00
   distribution: unstable
