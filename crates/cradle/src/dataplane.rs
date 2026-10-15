@@ -211,6 +211,8 @@ pub struct Dataplane {
     esi_label: HashMap<MapData, u32, u32>,
     /// EVPN E-Tree over MPLS: the leaf label this PE advertised (decap).
     leaf_label: HashMap<MapData, u32, u32>,
+    /// EVPN E-Tree over SRv6: the leaf argument this PE advertised (decap).
+    leaf_arg: HashMap<MapData, u32, u32>,
     /// EVPN E-Tree over VXLAN: `(VTEP, bd)` of the leaf-only remote PEs.
     vtep_etree: HashMap<MapData, VtepBdKey, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
@@ -358,6 +360,7 @@ impl Dataplane {
                 bpf.take_map("LEAF_LABEL")
                     .context("map LEAF_LABEL missing")?,
             )?,
+            leaf_arg: HashMap::try_from(bpf.take_map("LEAF_ARG").context("map LEAF_ARG missing")?)?,
             vtep_etree: HashMap::try_from(
                 bpf.take_map("VTEP_ETREE")
                     .context("map VTEP_ETREE missing")?,
@@ -1040,6 +1043,19 @@ impl Dataplane {
     /// The leaf label is no longer ours.
     pub fn leaf_label_del(&mut self, label: u32) {
         let _ = self.leaf_label.remove(&label);
+    }
+
+    /// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): `arg` is the leaf
+    /// argument this PE advertised — a received End.DT2M copy carrying it
+    /// came from a leaf AC and is kept off our leaf ports.
+    pub fn leaf_arg_set(&mut self, arg: u32) -> Result<()> {
+        self.leaf_arg.insert(arg, 1, 0)?;
+        Ok(())
+    }
+
+    /// The leaf argument is no longer ours.
+    pub fn leaf_arg_del(&mut self, arg: u32) {
+        let _ = self.leaf_arg.remove(&arg);
     }
 
     /// EVPN E-Tree over VXLAN (RFC 8317, V1+): the PE at `vtep` has only
@@ -2524,6 +2540,7 @@ impl Dataplane {
         block_bits: u8,
         node_bits: u8,
         fun_bits: u8,
+        arg_bits: u8,
         flavors: u8,
     ) -> Result<()> {
         let key = Key::new(prefix_len as u32, sid.octets());
@@ -2538,7 +2555,7 @@ impl Dataplane {
                 block_bits,
                 node_bits,
                 fun_bits,
-                _pad2: [0; 1],
+                arg_bits,
             },
             0,
         )?;

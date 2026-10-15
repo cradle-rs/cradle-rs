@@ -159,6 +159,8 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "mpls_l2_leaf_push",
     "mpls_l2_leaf_pop",
     "l2_drop_etree_bum",
+    "srv6_l2_leaf_decap",
+    "srv6_drop_arg",
 ];
 
 /// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
@@ -328,6 +330,33 @@ fn set_member<K: Ord>(set: &mut std::collections::BTreeSet<K>, key: K, on: bool)
     } else {
         set.remove(&key)
     }
+}
+
+/// An SRv6 slot's role and the SID its copies go to: the plain slot toward
+/// the End.DT2M SID `remote_sid`, or, with `etree_leaf_sid`, that PE's
+/// E-Tree leaf slot toward the SID with its leaf argument placed. Both join
+/// the group `(remote_sid, 0)`; an MPLS group's label is never 0.
+fn srv6_slot_role(
+    remote_sid: Ipv6Addr,
+    etree_leaf_sid: Option<Ipv6Addr>,
+) -> (SlotRole<'static>, Ipv6Addr) {
+    match etree_leaf_sid {
+        Some(leaf) => (SlotRole::Leaf, leaf),
+        None => (SlotRole::Plain, remote_sid),
+    }
+}
+
+/// The argument length a local SID keeps: an End.DT2M's Arg.FE2 (RFC 8986
+/// §4.12), 0, 8 or 16 bits (`sid_arg`). Any other behavior keeps none.
+fn srv6_dt2m_arg_bits(behavior: u8, arg_bits: u8) -> Result<u8> {
+    if behavior != SRV6_BH_END_DT2M {
+        return Ok(0);
+    }
+    anyhow::ensure!(
+        matches!(arg_bits, 0 | 8 | 16),
+        "End.DT2M argument length {arg_bits} is not 0, 8 or 16"
+    );
+    Ok(arg_bits)
 }
 
 /// The `SLOT_ES` rows of group `g`: `(flood ifindex, only, skip, etree)`.
@@ -604,6 +633,8 @@ pub struct Control {
     etree: Arc<Mutex<EtreeTable>>,
     /// EVPN E-Tree over MPLS: our leaf label in `LEAF_LABEL` (0 = none).
     etree_leaf_label: Arc<Mutex<u32>>,
+    /// EVPN E-Tree over SRv6: this PE's leaf argument (0 = none).
+    etree_leaf_arg: Arc<Mutex<u32>>,
     /// EVPN E-Tree over VXLAN (V1+): the leaf-only remote PEs, as `(bd,
     /// VTEP key)` — `SetEtreeRemote`. Rendered into `VTEP_ETREE` and onto
     /// the PE's auto VXLAN slot, now or when the slot appears.
@@ -658,6 +689,7 @@ impl Control {
             es: Arc::new(Mutex::new(EsTable::default())),
             etree: Arc::new(Mutex::new(EtreeTable::default())),
             etree_leaf_label: Arc::new(Mutex::new(0)),
+            etree_leaf_arg: Arc::new(Mutex::new(0)),
             etree_remotes: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
@@ -1499,6 +1531,28 @@ impl Control {
         Ok(())
     }
 
+    /// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): the Arg.FE2 value
+    /// this PE advertises as its leaf argument (its ESI-0 Ethernet A-D
+    /// route), for decap; 0 = none. A peer places it in our End.DT2M SID on
+    /// BUM from its leaf ACs, and the copy is then kept off our leaf ports.
+    /// Replaces the previous argument. At most 16 bits (`LocalSid.arg_bits`).
+    pub async fn set_etree_leaf_arg(&self, arg: u32) -> Result<()> {
+        anyhow::ensure!(arg < 1 << 16, "leaf argument {arg} is wider than 16 bits");
+        let mut cur = self.etree_leaf_arg.lock().await;
+        if *cur == arg {
+            return Ok(());
+        }
+        let mut dp = self.dp.lock().await;
+        if *cur != 0 {
+            dp.leaf_arg_del(*cur);
+        }
+        if arg != 0 {
+            dp.leaf_arg_set(arg)?;
+        }
+        *cur = arg;
+        Ok(())
+    }
+
     /// Program an overlay FDB entry: `mac` in bridge domain `bd` is behind
     /// the remote `End.DT2U`/`DT2M` `remote_sid`, reached via underlay
     /// `nexthop_id` — 0 = the datapath resolves it with a FIB6 lookup on the
@@ -1689,7 +1743,7 @@ impl Control {
             dp.xconnect_add(ifindex, target)?;
             match local {
                 XconnectLocal::Srv6(sid) => {
-                    dp.localsid_add(sid, 128, SRV6_BH_END_DX2, ifindex, 0, 0, 0, 0, 0)?;
+                    dp.localsid_add(sid, 128, SRV6_BH_END_DX2, ifindex, 0, 0, 0, 0, 0, 0)?;
                 }
                 XconnectLocal::Vxlan(vni) => dp.vni_set_eline(vni, ifindex)?,
                 XconnectLocal::Mpls(label) => dp.ilm_add(label, 0, MPLS_OP_POP_XC, ifindex, 0)?,
@@ -1699,7 +1753,7 @@ impl Control {
             dp.xconnect_vlan_add(ifindex, vid, target)?;
             match local {
                 XconnectLocal::Srv6(sid) => {
-                    dp.localsid_add(sid, 128, SRV6_BH_END_DX2V, table, 0, 0, 0, 0, 0)?;
+                    dp.localsid_add(sid, 128, SRV6_BH_END_DX2V, table, 0, 0, 0, 0, 0, 0)?;
                     dp.dx2v_add(table, vid, ifindex)?;
                 }
                 XconnectLocal::Vxlan(vni) => {
@@ -1761,19 +1815,25 @@ impl Control {
 
     /// Register a BUM replication slot by interface names (see
     /// `Dataplane::repl_slot_add`).
+    ///
+    /// With `etree_leaf_sid` (RFC 8317, SRv6) the slot is the E-Tree leaf
+    /// slot toward the PE whose End.DT2M SID is `remote_sid`: it carries
+    /// BUM from local leaf ports only, to `etree_leaf_sid` (that SID with
+    /// the PE's leaf argument placed), and the PE's plain slot then serves
+    /// roots only. Both are grouped under `(remote_sid, 0)`
+    /// ([`Self::slot_es_bind`]).
     pub async fn add_repl_slot(
         &self,
         flood_port: &str,
         encap_port: &str,
         remote_sid: Ipv6Addr,
+        etree_leaf_sid: Option<Ipv6Addr>,
     ) -> Result<()> {
         let flood = util::ifindex_of(flood_port)?;
         let encap = util::ifindex_of(encap_port)?;
-        self.dp
-            .lock()
-            .await
-            .repl_slot_add(flood, encap, remote_sid)?;
-        Ok(())
+        let (role, sid) = srv6_slot_role(remote_sid, etree_leaf_sid);
+        self.dp.lock().await.repl_slot_add(flood, encap, sid)?;
+        self.slot_es_bind((remote_sid, 0), flood, role).await
     }
 
     /// The VXLAN flavor of [`Self::add_repl_slot`]: flooded copies are
@@ -1830,10 +1890,27 @@ impl Control {
     /// plumbing (the EVPN Type-3 tee): a fresh veth pair `crs<N>a`/`crs<N>b`,
     /// the A end joined to `bd`'s flood list, the B end XDP-attached, and
     /// `REPL_SID` keyed by both ends. Idempotent per `(bd, remote_sid)`.
-    pub async fn add_repl_slot_auto(&self, bd: u16, remote_sid: Ipv6Addr) -> Result<()> {
-        self.add_repl_slot_auto_keyed(bd, remote_sid, "", None, |dp, a_idx, b_idx| {
-            dp.repl_slot_add(a_idx, b_idx, remote_sid)
-        })
+    ///
+    /// With `etree_leaf_sid` it is the PE's E-Tree leaf slot, keyed apart
+    /// ([`ETREE_SLOT_KEY`]); see [`Self::add_repl_slot`].
+    pub async fn add_repl_slot_auto(
+        &self,
+        bd: u16,
+        remote_sid: Ipv6Addr,
+        etree_leaf_sid: Option<Ipv6Addr>,
+    ) -> Result<()> {
+        let (role, sid) = srv6_slot_role(remote_sid, etree_leaf_sid);
+        let slot_key = match role {
+            SlotRole::Leaf => ETREE_SLOT_KEY,
+            _ => "",
+        };
+        self.add_repl_slot_auto_keyed(
+            bd,
+            remote_sid,
+            slot_key,
+            Some(((remote_sid, 0), role)),
+            |dp, a_idx, b_idx| dp.repl_slot_add(a_idx, b_idx, sid),
+        )
         .await
     }
 
@@ -1935,7 +2012,7 @@ impl Control {
                 info!("repl slot {a}/{b}: bd {bd} -> {key} for ES {esi} (ESI label)");
             }
             Some(SlotRole::Leaf) => {
-                info!("repl slot {a}/{b}: bd {bd} -> {key} for E-Tree leaves (leaf label)");
+                info!("repl slot {a}/{b}: bd {bd} -> {key} for E-Tree leaves");
             }
             _ => info!("repl slot {a}/{b}: bd {bd} -> {key}"),
         }
@@ -2498,10 +2575,14 @@ impl Control {
         block_bits: u8,
         node_bits: u8,
         fun_bits: u8,
+        arg_bits: u8,
         flavors: u8,
     ) -> Result<()> {
+        // Only an End.DT2M reads an argument (Arg.FE2, RFC 8986 §4.12).
+        let arg_bits = srv6_dt2m_arg_bits(behavior, arg_bits)?;
         self.dp.lock().await.localsid_add(
-            sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits, fun_bits, flavors,
+            sid, prefix_len, behavior, vrf, nexthop_id, block_bits, node_bits, fun_bits, arg_bits,
+            flavors,
         )?;
         Ok(())
     }
@@ -3536,6 +3617,15 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn set_etree_leaf_arg(
+        &self,
+        req: Request<pb::EtreeLeafArg>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let arg = req.into_inner().arg;
+        self.control.set_etree_leaf_arg(arg).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn set_es_peers(&self, req: Request<pb::EsPeers>) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
         self.control
@@ -3826,6 +3916,7 @@ impl Cradle for GrpcService {
                 s.lb_bits as u8,
                 s.ln_bits as u8,
                 s.fun_bits as u8,
+                s.arg_bits as u8,
                 s.flavors as u8,
             )
             .await
@@ -4104,10 +4195,20 @@ impl Cradle for GrpcService {
                 "exactly one of remote_sid / remote_vtep / remote_pe",
             ));
         }
+        if !r.etree_leaf_sid.is_empty() && r.remote_sid.is_empty() {
+            return Err(Status::invalid_argument(
+                "etree_leaf_sid is an SRv6 leaf slot: it needs remote_sid",
+            ));
+        }
         if !r.remote_sid.is_empty() {
             let sid: Ipv6Addr = r.remote_sid.parse().map_err(st)?;
+            let leaf = if r.etree_leaf_sid.is_empty() {
+                None
+            } else {
+                Some(r.etree_leaf_sid.parse::<Ipv6Addr>().map_err(st)?)
+            };
             self.control
-                .add_repl_slot_auto(r.bd as u16, sid)
+                .add_repl_slot_auto(r.bd as u16, sid, leaf)
                 .await
                 .map_err(st)?;
         } else if !r.remote_vtep.is_empty() {
@@ -4161,7 +4262,7 @@ impl Cradle for GrpcService {
         };
         // A leaf-label slot is keyed apart from the plain one, as a segment
         // slot is by its ESI.
-        let slot_key = if r.etree_leaf_label != 0 {
+        let slot_key = if r.etree_leaf_label != 0 || !r.etree_leaf_sid.is_empty() {
             ETREE_SLOT_KEY
         } else {
             r.esi.as_str()
@@ -5100,6 +5201,34 @@ mod etree_slot_tests {
         assert!(set_member(&mut marks, key, false));
         assert!(set_member(&mut marks, key, true));
         assert!(marks.contains(&key));
+    }
+
+    /// An SRv6 leaf slot (RFC 8317) goes to the PE's End.DT2M SID with its
+    /// leaf argument placed, and joins the plain slot's group as `Leaf`.
+    #[test]
+    fn srv6_slot_roles() {
+        let plain: Ipv6Addr = "fd00:2:0:200::".parse().unwrap();
+        let leaf: Ipv6Addr = "fd00:2:0:200:1::".parse().unwrap();
+        let (role, sid) = srv6_slot_role(plain, None);
+        assert!(matches!(role, SlotRole::Plain));
+        assert_eq!(sid, plain);
+        let (role, sid) = srv6_slot_role(plain, Some(leaf));
+        assert!(matches!(role, SlotRole::Leaf));
+        assert_eq!(sid, leaf);
+    }
+
+    /// Only an End.DT2M keeps an argument length, and only one `sid_arg`
+    /// reads (RFC 9819 §3.1: a byte multiple; at most 16 here).
+    #[test]
+    fn only_an_end_dt2m_keeps_an_argument() {
+        assert_eq!(srv6_dt2m_arg_bits(SRV6_BH_END_DT2M, 16).unwrap(), 16);
+        assert_eq!(srv6_dt2m_arg_bits(SRV6_BH_END_DT2M, 8).unwrap(), 8);
+        assert_eq!(srv6_dt2m_arg_bits(SRV6_BH_END_DT2M, 0).unwrap(), 0);
+        assert!(srv6_dt2m_arg_bits(SRV6_BH_END_DT2M, 12).is_err());
+        assert!(srv6_dt2m_arg_bits(SRV6_BH_END_DT2M, 32).is_err());
+        // A REPLACE-C-SID locator carries arg_bits for its own reasons.
+        assert_eq!(srv6_dt2m_arg_bits(SRV6_BH_END_DT2U, 64).unwrap(), 0);
+        assert_eq!(srv6_dt2m_arg_bits(SRV6_BH_END, 16).unwrap(), 0);
     }
 
     /// Bit 63 of the segment bitmaps is the E-Tree leaf mark: no segment
