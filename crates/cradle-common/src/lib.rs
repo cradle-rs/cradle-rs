@@ -350,10 +350,33 @@ pub struct LocalSid {
     /// uSID locator-block / node bit lengths (NEXT-C-SID shift; later phase).
     pub block_bits: u8,
     pub node_bits: u8,
-    /// Function bit length. Only REPLACE-C-SID reads it: the replaced C-SID
-    /// is `node_bits + fun_bits` wide (RFC 9800 LNFL, 16 or 32).
+    /// Function bit length. REPLACE-C-SID reads it: the replaced C-SID is
+    /// `node_bits + fun_bits` wide (RFC 9800 LNFL, 16 or 32). So does an
+    /// End.DT2M with an argument, which sits right after the function.
     pub fun_bits: u8,
-    pub _pad2: [u8; 1],
+    /// End.DT2M only: the Arg.FE2 argument length (RFC 8986 §4.12), 0, 8 or
+    /// 16 bits at offset `block_bits + node_bits + fun_bits` (RFC 9819
+    /// §3.3). The SID is installed at that offset's prefix length, so any
+    /// argument matches it; decap reads the argument with [`sid_arg`].
+    pub arg_bits: u8,
+}
+
+/// The `len`-bit argument at bit offset `off` of an IPv6 address given as
+/// its big-endian halves `hi` (bytes 0-7) and `lo` (bytes 8-15): the SRv6
+/// Arg.FE2 of an End.DT2M SID (RFC 9819 §3.3). `None` for a length other
+/// than 8 or 16, or an argument that straddles the two halves or runs past
+/// the address. Shifts stay below 64, which the eBPF verifier accepts.
+#[inline(always)]
+pub fn sid_arg(hi: u64, lo: u64, off: u32, len: u32) -> Option<u32> {
+    if len != 8 && len != 16 {
+        return None;
+    }
+    let (half, off) = if off >= 64 { (lo, off - 64) } else { (hi, off) };
+    if off + len > 64 {
+        return None;
+    }
+    let shift = 64 - off - len;
+    Some(((half >> shift) & ((1u64 << len) - 1)) as u32)
 }
 
 // Behaviors mirror zebra-rs's live `SidBehavior` set (RFC 8986 + NEXT-C-SID).
@@ -1328,8 +1351,15 @@ pub const STAT_MPLS_L2_LEAF_POP: u32 = 60;
 /// AC withheld from a local leaf port — one copy of a flood, or an
 /// unknown-unicast copy that hit a known local leaf MAC here.
 pub const STAT_L2_DROP_ETREE_BUM: u32 = 61;
+/// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): a received End.DT2M
+/// copy whose Arg.FE2 is this PE's leaf argument — it came from a leaf AC
+/// on the ingress PE.
+pub const STAT_SRV6_L2_LEAF_DECAP: u32 = 62;
+/// An End.DT2M copy whose non-zero Arg.FE2 this PE did not allocate:
+/// dropped rather than flooded with no filter applied.
+pub const STAT_SRV6_DROP_ARG: u32 = 63;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 62;
+pub const STAT_MAX: u32 = 64;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 
@@ -1457,6 +1487,30 @@ mod user {
 
 #[cfg(test)]
 mod tests {
+    use super::sid_arg;
+
+    /// RFC 9819's example structure (LBL 32, LNL 16, FL 16, AL 16): the
+    /// argument is bytes 8-9.
+    #[test]
+    fn sid_arg_reads_the_argument_after_the_function() {
+        let sid: u128 = 0xfd00_0002_0000_0200_0001_0000_0000_0000;
+        let (hi, lo) = ((sid >> 64) as u64, sid as u64);
+        assert_eq!(sid_arg(hi, lo, 64, 16), Some(1));
+        assert_eq!(sid_arg(hi, lo, 64, 8), Some(0));
+        assert_eq!(sid_arg(hi, lo, 72, 8), Some(1));
+        // In the high half: the function itself, read as if it were one.
+        assert_eq!(sid_arg(hi, lo, 48, 16), Some(0x200));
+        assert_eq!(sid_arg(hi, lo, 120, 8), Some(0));
+    }
+
+    #[test]
+    fn sid_arg_refuses_what_it_cannot_read() {
+        assert_eq!(sid_arg(0, 0, 64, 12), None, "not a byte multiple");
+        assert_eq!(sid_arg(0, 0, 64, 32), None, "longer than 16");
+        assert_eq!(sid_arg(0, 0, 56, 16), None, "straddles the halves");
+        assert_eq!(sid_arg(0, 0, 120, 16), None, "past the address");
+    }
+
     use super::*;
 
     #[test]

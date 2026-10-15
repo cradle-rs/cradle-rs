@@ -402,9 +402,41 @@ tells cradle per `(bridge domain, VTEP)` (`SetEtreeRemote`):
   leaf's BUM still reaches the other's leaves: V1+ cannot tell it from a
   root's. zebra-rs's `show` names such a domain.
 
-Not yet: BUM between leaves on different PEs over SRv6 (an Arg.FE2-capable
-`End.DT2M`, phase 5). There a leaf's broadcast still reaches a remote leaf,
-so known unicast is the only cross-core guarantee.
+**BUM across the core over SRv6** (plan phase 5a, decision D6; RFC 8986
+§4.12, RFC 9819, rfc8317bis §5.4). The leaf mark is an Arg.FE2 argument of
+the egress PE's End.DT2M SID, placed right after the function:
+- **Leaf argument, receive.** Each PE advertises one leaf argument
+  (zebra-rs's ESI-0 Ethernet A-D route) and holds it in `LEAF_ARG`
+  (`SetEtreeLeafArg`). Its End.DT2M SID is installed at the LOC:FUNC
+  prefix length with `LocalSid.arg_bits` (8 or 16), so any argument
+  matches it. `srv6_dt2u` reads the argument at offset LBL+LNL+FL
+  (`sid_arg`, inside the non-inlined `srv6_dt2m_arg_bits`, for the
+  `cradle_xdp` stack budget). The leaf argument sets `ES_BITS_ETREE_LEAF`
+  (`srv6_l2_leaf_decap`) and the phase-3a egress filter applies; 0 is
+  plain BUM; any other value is dropped (`srv6_drop_arg`) rather than
+  flooded unfiltered.
+- **Leaf slot, transmit.** Toward a PE that advertised a leaf argument
+  there is one more replication slot (`AddReplSlot.etree_leaf_sid`), whose
+  copies go to that PE's End.DT2M SID with its argument already placed, so
+  the encap path is unchanged. SRv6 slots join the slot group
+  `(remote_sid, 0)` (an MPLS group's label is never 0), and `SlotEs.etree`
+  sends a leaf port's BUM through the leaf slot alone while the plain slot
+  serves roots only.
+- **Split horizon** over SRv6 stays local bias by outer source. RFC-style
+  ESI filtering would take its values from the same argument space and
+  must avoid the leaf argument.
+
+Static config for SRv6 BUM: `localsids[].arg_bits`, top-level
+`etree_leaf_arg` (also replayed by `ctl apply`) and
+`repl_slots[].etree_leaf_sid`. BDD `cradle_evpn_etree_srv6` runs two PEs
+back to back over SRv6, each with a leaf and a root host:
+- control, no roles: a leaf's broadcast reaches the remote leaf;
+- with roles: it reaches the remote root but not the remote leaf
+  (`srv6_l2_leaf_decap`, `l2_drop_etree_bum`);
+- a root's broadcast still reaches the remote leaf;
+- a leaf's unknown unicast that meets a known leaf MAC at the egress PE is
+  dropped there;
+- an argument the egress PE never allocated is dropped (`srv6_drop_arg`).
 
 Static config: `ports[].etree_leaf` (`true`/`false`; omitted leaves the role
 as it is), `fdb[].etree_leaf`. `cradle dump l2` shows the flag as

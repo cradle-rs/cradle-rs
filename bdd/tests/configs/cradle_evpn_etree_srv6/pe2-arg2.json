@@ -1,0 +1,9 @@
+{
+  "ports": [
+    { "name": "pe2l", "vlan": 100, "etree_leaf": true },
+    { "name": "pe2r", "vlan": 100 },
+    { "name": "r21a", "vlan": 100 },
+    { "name": "r21la", "vlan": 100 }
+  ],
+  "etree_leaf_arg": 2
+}

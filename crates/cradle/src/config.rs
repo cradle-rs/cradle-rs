@@ -71,6 +71,11 @@ pub struct Config {
     /// is; 0 removes it.
     #[serde(default)]
     pub etree_leaf_label: Option<u32>,
+    /// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): the Arg.FE2 value
+    /// this PE advertised as its leaf argument, for decap
+    /// (`SetEtreeLeafArg`). Omitted leaves it as it is; 0 removes it.
+    #[serde(default)]
+    pub etree_leaf_arg: Option<u32>,
     /// EVPN E-Tree over VXLAN (V1+): remote PEs whose ACs in a bridge
     /// domain are all leaves (`SetEtreeRemote`).
     #[serde(default)]
@@ -230,6 +235,12 @@ pub struct ReplSlotCfg {
     /// with explicit plumbing; an auto slot takes it from `etree_remotes`.
     #[serde(default)]
     pub etree_root_only: bool,
+    /// EVPN E-Tree over SRv6 (RFC 8317): the leaf slot toward the PE whose
+    /// End.DT2M SID is `remote_sid` — BUM from local leaf ports only, sent
+    /// to this SID (that SID with the PE's leaf argument placed), and every
+    /// other slot toward the PE serves roots only.
+    #[serde(default)]
+    pub etree_leaf_sid: Option<String>,
 }
 
 /// EVPN E-Tree over VXLAN (V1+): the PE at `remote_vtep` is leaf-only in
@@ -364,6 +375,11 @@ pub struct LocalSidCfg {
     /// Function bit length (REPLACE-C-SID: C-SID width = node + fun bits).
     #[serde(default)]
     pub fun_bits: u8,
+    /// `end.dt2m` only: the Arg.FE2 argument length (0, 8 or 16) at bit
+    /// offset `block_bits + node_bits + fun_bits` (RFC 9819). Install the
+    /// SID at that offset's `prefix_len`, so any argument matches it.
+    #[serde(default)]
+    pub arg_bits: u8,
     /// Attachment-circuit port for `end.dx2` (resolved to an ifindex and
     /// carried in the SID's `vrf` slot). For `end.dx2v` use `vrf` as the
     /// VLAN-table id and populate `dx2v` entries instead.
@@ -773,6 +789,9 @@ impl Config {
         if let Some(label) = self.etree_leaf_label {
             ctl.set_etree_leaf_label(label).await?;
         }
+        if let Some(arg) = self.etree_leaf_arg {
+            ctl.set_etree_leaf_arg(arg).await?;
+        }
         for r in &self.etree_remotes {
             let vtep = r
                 .remote_vtep
@@ -972,6 +991,7 @@ impl Config {
                 ls.block_bits,
                 ls.node_bits,
                 ls.fun_bits,
+                ls.arg_bits,
                 srv6_flavors(&ls.flavors)?,
             )
             .await?;
@@ -1033,7 +1053,15 @@ impl Config {
                     let remote_sid = sid
                         .parse()
                         .with_context(|| format!("bad remote SID {sid:?}"))?;
-                    ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid)
+                    let leaf = r
+                        .etree_leaf_sid
+                        .as_deref()
+                        .map(|s| {
+                            s.parse()
+                                .with_context(|| format!("bad etree_leaf_sid {s:?}"))
+                        })
+                        .transpose()?;
+                    ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid, leaf)
                         .await?;
                 }
                 (None, Some(vtep), None) => {

@@ -77,6 +77,7 @@ use cradle_common::{
 use cradle_common::{
     ES_BITS_ETREE_LEAF, L7_PROXY_MARK, MPLS_LABEL_MASK, REPL_EXTRA_ETREE_LEAF, SLOT_ETREE_LEAF,
     SLOT_ETREE_ROOT, STAT_L2_DROP_ETREE_BUM, STAT_MPLS_L2_LEAF_POP, STAT_MPLS_L2_LEAF_PUSH,
+    STAT_SRV6_DROP_ARG, STAT_SRV6_L2_LEAF_DECAP, sid_arg,
 };
 use cradle_common::{
     ETREE_F_LEAF, FDB_F_ETREE_LEAF, STAT_L2_DROP_ETREE_LOCAL, STAT_L2_DROP_ETREE_UC,
@@ -309,6 +310,14 @@ static PORT_ETREE: HashMap<u32, u32> = HashMap::with_max_entries(256, 0);
 /// leaf ports. One label per PE, so one row in practice.
 #[map]
 static LEAF_LABEL: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+
+/// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): the Arg.FE2 value this
+/// PE advertised as its leaf argument (`SetEtreeLeafArg`). A received
+/// End.DT2M copy carrying it came from a leaf AC on the ingress PE, so
+/// `srv6_dt2u` ORs `ES_BITS_ETREE_LEAF` into it. One argument per PE, so one
+/// row in practice.
+#[map]
+static LEAF_ARG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
 
 // --- L4 ---
 #[map]
@@ -5431,7 +5440,23 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
     }
     // Multihoming split horizon: the segments the outer source PE shares
     // with us — read before the outer header goes.
-    let es_bits = vtep6_es_bits(xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)?);
+    let mut es_bits = vtep6_es_bits(xdp_ptr::<[u8; 16]>(ctx, IP6_SRC_OFF)?);
+    // An End.DT2M with an argument (RFC 9819): the Arg.FE2 after the
+    // function. This PE's leaf argument means the copy came from a remote
+    // leaf AC (RFC 8317), so the TC stage keeps it off our leaf ports. A
+    // value we never allocated is dropped rather than flooded unfiltered.
+    if sid.arg_bits != 0 {
+        let off = sid.block_bits as u32 + sid.node_bits as u32 + sid.fun_bits as u32;
+        let bits = srv6_dt2m_arg_bits(
+            xdp_ptr::<[u8; 16]>(ctx, IP6_DST_OFF)?,
+            off,
+            sid.arg_bits as u32,
+        );
+        if bits == ARG_DROP {
+            return Ok(xdp_action::XDP_DROP);
+        }
+        es_bits |= bits;
+    }
     // Drop the outer eth + outer IPv6: the inner eth frame moves to the front.
     let strip = (EthHdr::LEN + IP6_HDR_LEN) as i32;
     if unsafe { bpf_xdp_adjust_head(ctx.ctx, strip) } != 0 {
@@ -5451,6 +5476,36 @@ fn srv6_dt2u(ctx: &XdpContext, sid: &LocalSid) -> Result<u32, ()> {
         (*meta).es_bits = es_bits;
     }
     Ok(xdp_action::XDP_PASS)
+}
+
+/// [`srv6_dt2m_arg_bits`]'s verdict for an argument this PE never allocated.
+const ARG_DROP: u64 = u64::MAX;
+
+/// The `es_bits` an End.DT2M copy's Arg.FE2 contributes (RFC 8986 §4.12,
+/// RFC 9819 §3.3): `ES_BITS_ETREE_LEAF` for this PE's leaf argument (the
+/// copy came from a remote leaf AC, RFC 8317), 0 for none, or [`ARG_DROP`]
+/// for a value we never allocated. `p` is the outer destination address,
+/// bounds-checked by the caller; the argument is `len` bits at bit `off`.
+///
+/// Deliberately NOT inlined, like [`vtep6_vxlan_bits`]: `cradle_xdp`'s
+/// flattened frame sits at the verifier's combined-stack limit, and this
+/// subprogram's locals (the map key, the address halves) stay in its own
+/// small frame instead.
+#[inline(never)]
+fn srv6_dt2m_arg_bits(p: *const [u8; 16], off: u32, len: u32) -> u64 {
+    let hi = u64::from_be_bytes(unsafe { *(p as *const [u8; 8]) });
+    let lo = u64::from_be_bytes(unsafe { *((p as *const u8).add(8) as *const [u8; 8]) });
+    match sid_arg(hi, lo, off, len) {
+        Some(0) | None => 0,
+        Some(arg) if LEAF_ARG.get_ptr(&arg).is_some() => {
+            stat_inc(STAT_SRV6_L2_LEAF_DECAP);
+            ES_BITS_ETREE_LEAF
+        }
+        Some(_) => {
+            stat_inc(STAT_SRV6_DROP_ARG);
+            ARG_DROP
+        }
+    }
 }
 
 /// EVPN-over-MPLS egress disposition (RFC 7432): the frame's bottom-of-stack

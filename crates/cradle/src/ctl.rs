@@ -54,6 +54,9 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            if let Some(arg) = cfg.etree_leaf_arg {
+                client.set_etree_leaf_arg(pb::EtreeLeafArg { arg }).await?;
+            }
             if let Some(label) = cfg.etree_leaf_label {
                 client
                     .set_etree_leaf_label(pb::EtreeLeafLabel { label })
