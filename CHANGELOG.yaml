@@ -11,6 +11,46 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.6
+  date: 2026-10-15T18:01:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN E-Tree over VXLAN (RFC 8317; the V1+ scheme)
+        * VXLAN carries no label for a leaf mark, and there is no
+          standard. A PE whose ACs in a bridge domain are all leaves
+          says so on its IMET (the E-Tree EC), and cradle is told per
+          (bridge domain, VTEP) with `SetEtreeRemote`
+        * Egress: VXLAN decap looks the source VTEP up in `VTEP_ETREE`
+          beside the local-bias lookup, and a copy from a leaf-only PE
+          is kept off the leaf ports (`l2_drop_etree_bum`). Per domain:
+          a PE can be leaf-only in one and mixed in another
+        * Ingress: a leaf-only PE has no root to deliver a leaf's BUM
+          to, so the slot toward it serves roots only, applied to the
+          PE's auto slot now or when it appears
+        * Between two PEs that both have roots and leaves, a leaf's BUM
+          still reaches the other's leaves: VXLAN cannot tell it from a
+          root's
+
+    - note: |
+        ### Control plane and configuration
+        * `SetEtreeRemote {bd, remote, leaf_only}` (replace semantics)
+        * Static config: top-level `etree_remotes` (replayed by `ctl
+          apply`) and `repl_slots[].etree_root_only` for a slot with
+          explicit plumbing
+
+    - note: |
+        ### BDD / test infrastructure
+        * `cradle_evpn_etree_vxlan`: a leaf-only PE against a mixed one —
+          the leaf-only PE's broadcast reaches the remote root but not
+          the remote leaf, the mixed PE's leaf broadcast is not sent to
+          the leaf-only PE at all, and a root's still is
+        * `cradle_evpn_etree_mpls_zebra`: E-Tree over MPLS driven by
+          zebra-rs (leaf labels advertised and imported through BGP, over
+          IS-IS SR-MPLS across a P router)
+
 - semver: 1.1.5
   date: 2026-10-15T16:08:00+09:00
   distribution: unstable
