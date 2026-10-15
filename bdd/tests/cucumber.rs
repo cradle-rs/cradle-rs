@@ -3698,6 +3698,34 @@ async fn command_not_contains(
     );
 }
 
+/// Immediate (non-polling) positive twin of `command_not_contains`: run the
+/// command once and require its stdout contains the needle. For a counter
+/// that must still read zero (`tc -s filter show` → "Sent 0 bytes 0 pkt")
+/// right after the traffic that must not have reached it.
+#[then(expr = "command {string} in namespace {string} should contain {string}")]
+async fn command_contains(world: &mut World, command: String, namespace: String, needle: String) {
+    let scoped = world.ns(&namespace);
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (cmd, args) = parts
+        .split_first()
+        .unwrap_or_else(|| panic!("empty command in 'command …' for {}", scoped));
+    let output = netns::exec_in_netns(&scoped, cmd, args)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+    assert!(
+        output.contains(&needle),
+        "'{}' in namespace {} did not contain '{}'\nfull output:\n{}",
+        command,
+        scoped,
+        needle,
+        output,
+    );
+    println!(
+        "✓ '{}' in namespace {} contains '{}'",
+        command, scoped, needle
+    );
+}
+
 /// Assert the IS-IS LSDB at the given level (`L1` or `L2`) in a namespace
 /// holds at least one self-originated LSP. Reads
 /// `vtyctl show -j "show isis database"`, whose JSON is

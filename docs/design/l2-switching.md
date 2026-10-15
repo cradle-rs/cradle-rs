@@ -274,7 +274,9 @@ comes from the source VTEP being a leaf-only PE in the domain
 (`VTEP_ETREE`), and the slot toward such a PE serves roots only. The roles
 come from
 `SetEtreeRole`, kept by port name. BDD: `cradle_evpn_etree`,
-`cradle_evpn_etree_mpls`, `cradle_evpn_etree_vxlan`; the design is in
+`cradle_evpn_etree_mpls`, `cradle_evpn_etree_vxlan` (static), and
+`cradle_evpn_etree_zebra`, `cradle_evpn_etree_mpls_zebra`,
+`cradle_evpn_etree_vxlan_zebra` (zebra-rs-driven); the design is in
 `bgp-evpn.md` §E-Tree.
 
 ### LAG ports

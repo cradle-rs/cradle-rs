@@ -466,6 +466,21 @@ broadcast reaches the remote root but not the remote leaf
 (`l2_drop_etree_bum`), a root's reaches both, and a leaf's known unicast
 to the remote leaf is dropped at its own PE (`l2_drop_etree_uc`).
 
+Under zebra-rs (plan phase 4b), the leaf-only marks come from BGP over
+VXLAN too. A PE whose ACs in a VNI are all leaves colours that VNI's IMET
+with the E-Tree EC's Leaf flag; zebra-rs takes a VNI's ACs from its kernel
+bridge (the ports that are not the VXLAN device), so every AC must be in
+the bridge. A PE with a leaf AC of its own tees each remote leaf-only VTEP
+as `SetEtreeRemote`. BDD `cradle_evpn_etree_vxlan_zebra` runs a leaf-only
+PE against a mixed one:
+- the leaf-only PE's broadcast reaches the remote root but not the remote
+  leaf (`l2_drop_etree_bum`);
+- the mixed PE's leaf broadcast is not sent to the leaf-only PE at all
+  (`vxlan_flood` does not move), and a root's still is;
+- the control: a root AC added on the leaf-only PE makes it mixed, zebra-rs
+  warns that the two mixed PEs' leaf BUM is not isolated, and the leaf
+  broadcasts cross both ways; removing it restores the isolation.
+
 ## Configuration walkthrough
 
 The operator surface, all existing zebra YANG (`zebra-bgp-evpn.yang`):
