@@ -11,6 +11,60 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.5
+  date: 2026-10-15T16:08:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN E-Tree over MPLS (RFC 8317 §4.2)
+        * A leaf AC's broadcast, multicast and unknown unicast now reach
+          the roots on other PEs but never their leaves. One BUM copy
+          serves roots and leaves alike, so the ingress PE marks a leaf's
+          copy with the egress PE's leaf label and the egress PE filters
+          it (egress filtering)
+        * Receive: `SetEtreeLeafLabel` puts this PE's leaf label in
+          `LEAF_LABEL`; a copy carrying it under the service label is
+          kept off the leaf ports (`mpls_l2_leaf_pop`,
+          `l2_drop_etree_bum`). That includes an unknown-unicast copy
+          that meets a MAC known here, which `l2_switch` would otherwise
+          forward to a leaf
+        * Transmit: a leaf slot per PE that has a leaf label
+          (`AddReplSlot.etree_leaf_label`). A leaf port's flood reaches
+          that PE through it alone, every other slot toward the PE serves
+          roots only, and on a multihomed leaf the leaf label replaces
+          the ESI label (`mpls_l2_leaf_push`)
+        * Ethernet Segment ids now stop at 62: bit 63 of the segment
+          bitmaps marks a copy from a remote leaf
+
+    - note: |
+        ### Control plane and configuration
+        * `SetEtreeLeafLabel`; `ReplSlot.etree_leaf_label` (exclusive
+          with `esi`/`esi_label`)
+        * Static config: top-level `etree_leaf_label` (omitted leaves it
+          as it is) and `repl_slots[].etree_leaf_label`; `ctl apply`
+          replays the label. Reserved labels are refused
+        * New counters `mpls_l2_leaf_push`, `mpls_l2_leaf_pop`,
+          `l2_drop_etree_bum`
+
+    - note: |
+        ### BDD / test infrastructure
+        * `cradle_evpn_etree_mpls`: two PEs over static MPLS, a leaf on an
+          Ethernet Segment. Without roles its broadcast goes through the
+          ESI-label slot and reaches the remote leaf; with roles it goes
+          through the leaf slot instead, the remote root receives it and
+          the remote leaf does not. A root's broadcast still reaches the
+          leaf, and a leaf's unknown unicast meeting a known remote leaf
+          MAC is dropped at the egress PE
+        * `cradle_evpn_etree_zebra`: E-Tree driven by zebra-rs (phase
+          2b) over VXLAN — a leaf's known unicast to a remote leaf dropped
+          at its own PE, and a host moving from a leaf AC to a root AC
+          becoming reachable from the leaves. New step to start zebra-rs
+          with `--feature`
+        * New step `the cradle stat … should still equal its recorded
+          value`
+
 - semver: 1.1.4
   date: 2026-10-15T13:16:00+09:00
   distribution: unstable
