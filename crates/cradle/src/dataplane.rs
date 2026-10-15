@@ -31,7 +31,7 @@ use cradle_common::{
     POLICY_DIR_INGRESS, POLICY_KEY_GEN, PolicyKey, PortConfig, REPL_KIND_MPLS, REPL_KIND_SRV6,
     REPL_KIND_VXLAN, REPL_ROLE_LEAF, ReplBranch, ReplSeg, ReplTarget, STAT_FDB_AGED, STAT_MAX,
     SVC_F_AFFINITY, ServiceInfo, ServiceKey, ServiceKey6, Srv6Encap, VNI_F_ELINE, VNI_F_ELINE_VLAN,
-    VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VxlanEncap,
+    VNI_F_L2, VNI_F_L3, VniInfo, Vrf4Key, Vrf6Key, VrfId6Key, VrfIdKey, VtepBdKey, VxlanEncap,
 };
 
 use crate::{
@@ -211,6 +211,8 @@ pub struct Dataplane {
     esi_label: HashMap<MapData, u32, u32>,
     /// EVPN E-Tree over MPLS: the leaf label this PE advertised (decap).
     leaf_label: HashMap<MapData, u32, u32>,
+    /// EVPN E-Tree over VXLAN: `(VTEP, bd)` of the leaf-only remote PEs.
+    vtep_etree: HashMap<MapData, VtepBdKey, u32>,
     vtep_es: HashMap<MapData, In6Key, u64>,
     /// LAG member ifindex → its bond (the cradle port), for the XDP stage.
     port_master: HashMap<MapData, u32, u32>,
@@ -355,6 +357,10 @@ impl Dataplane {
             leaf_label: HashMap::try_from(
                 bpf.take_map("LEAF_LABEL")
                     .context("map LEAF_LABEL missing")?,
+            )?,
+            vtep_etree: HashMap::try_from(
+                bpf.take_map("VTEP_ETREE")
+                    .context("map VTEP_ETREE missing")?,
             )?,
             vtep_es: HashMap::try_from(bpf.take_map("VTEP_ES").context("map VTEP_ES missing")?)?,
             port_master: HashMap::try_from(
@@ -1034,6 +1040,27 @@ impl Dataplane {
     /// The leaf label is no longer ours.
     pub fn leaf_label_del(&mut self, label: u32) {
         let _ = self.leaf_label.remove(&label);
+    }
+
+    /// EVPN E-Tree over VXLAN (RFC 8317, V1+): the PE at `vtep` has only
+    /// leaf ACs in bridge domain `bd`, so VXLAN BUM from it is
+    /// leaf-originated and decap marks it `ES_BITS_ETREE_LEAF`.
+    pub fn vtep_etree_set(&mut self, vtep: IpAddr, bd: u16) -> Result<()> {
+        let key = VtepBdKey {
+            addr: ip_to_v6_bytes(vtep),
+            bd: bd as u32,
+        };
+        self.vtep_etree.insert(key, 1, 0)?;
+        Ok(())
+    }
+
+    /// The PE has a root AC in the domain again (or is gone).
+    pub fn vtep_etree_del(&mut self, vtep: IpAddr, bd: u16) {
+        let key = VtepBdKey {
+            addr: ip_to_v6_bytes(vtep),
+            bd: bd as u32,
+        };
+        let _ = self.vtep_etree.remove(&key);
     }
 
     /// Alias LAG member `member` to its bond `port` for the XDP stage (a

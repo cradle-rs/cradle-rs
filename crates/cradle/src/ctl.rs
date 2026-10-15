@@ -59,6 +59,15 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     .set_etree_leaf_label(pb::EtreeLeafLabel { label })
                     .await?;
             }
+            for r in &cfg.etree_remotes {
+                client
+                    .set_etree_remote(pb::EtreeRemote {
+                        bd: r.bd as u32,
+                        remote: r.remote_vtep.clone(),
+                        leaf_only: r.leaf_only,
+                    })
+                    .await?;
+            }
             for es in &cfg.ethernet_segments {
                 client
                     .set_ethernet_segment(pb::EthernetSegment {

@@ -269,9 +269,13 @@ leaf port to a remote MAC flagged `FDB_F_ETREE_LEAF` is dropped before the
 encap (`l2_drop_etree_uc`, §4.1). Over MPLS, a flood from a leaf port goes
 to a PE through its leaf-label slot only (`SlotEs.etree`), and a copy that
 arrived with this PE's leaf label (`ES_BITS_ETREE_LEAF`) skips the leaf
-ports, flooded or switched (`l2_drop_etree_bum`). The roles come from
+ports, flooded or switched (`l2_drop_etree_bum`). Over VXLAN the same mark
+comes from the source VTEP being a leaf-only PE in the domain
+(`VTEP_ETREE`), and the slot toward such a PE serves roots only. The roles
+come from
 `SetEtreeRole`, kept by port name. BDD: `cradle_evpn_etree`,
-`cradle_evpn_etree_mpls`; the design is in `bgp-evpn.md` §E-Tree.
+`cradle_evpn_etree_mpls`, `cradle_evpn_etree_vxlan`; the design is in
+`bgp-evpn.md` §E-Tree.
 
 ### LAG ports
 

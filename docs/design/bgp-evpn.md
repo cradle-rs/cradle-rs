@@ -385,10 +385,26 @@ it:
   multihomed leaf's copy (§4.2.3), and a PE with no leaf label gets the
   usual slots.
 
-Not yet: BUM between leaves on different PEs over VXLAN (the IMET
-colouring, phase 4) and SRv6 (an Arg.FE2-capable `End.DT2M`, phase 5).
-There a leaf's broadcast still reaches a remote leaf, so known unicast is
-the only cross-core guarantee.
+**BUM across the core over VXLAN** (plan phase 4a; the V1+ scheme of the
+plan's §8.5, since VXLAN has no label and no standard). A PE whose ACs in
+a bridge domain are all leaves says so on its IMET, and the control plane
+tells cradle per `(bridge domain, VTEP)` (`SetEtreeRemote`):
+- **Egress.** VXLAN decap looks the source VTEP up in `VTEP_ETREE` beside
+  the `VTEP_ES` local-bias lookup (`vtep4_es_bits`, `vtep6_vxlan_bits`), and
+  sets `ES_BITS_ETREE_LEAF`; the phase-3a egress filter keeps the copy off
+  the leaf ports. Keyed per domain: a PE can be leaf-only in one domain and
+  mixed in another.
+- **Ingress.** A leaf-only PE has no root to deliver a leaf's BUM to, so its
+  slot serves roots only (`SLOT_ETREE_ROOT`, the phase-3a mark; `flood()`
+  needs no change). cradle applies it to the PE's auto slot when the slot
+  appears, so the role may come first.
+- **The gap.** Between two PEs that both have roots and leaves (mixed), a
+  leaf's BUM still reaches the other's leaves: V1+ cannot tell it from a
+  root's. zebra-rs's `show` names such a domain.
+
+Not yet: BUM between leaves on different PEs over SRv6 (an Arg.FE2-capable
+`End.DT2M`, phase 5). There a leaf's broadcast still reaches a remote leaf,
+so known unicast is the only cross-core guarantee.
 
 Static config: `ports[].etree_leaf` (`true`/`false`; omitted leaves the role
 as it is), `fdb[].etree_leaf`. `cradle dump l2` shows the flag as
@@ -414,6 +430,15 @@ zebra-rs-driven VXLAN fabric:
 - each leaf still reaching the root on the other PE;
 - a host moving from a leaf AC to a root AC on its PE becoming reachable
   from the leaves, once zebra-rs re-advertises its MAC without the flag.
+
+Static config for VXLAN BUM: top-level `etree_remotes` (`[{bd,
+remote_vtep, leaf_only}]`, `leaf_only` defaulting to true) and, for a slot
+with explicit plumbing, `repl_slots[].etree_root_only`. BDD
+`cradle_evpn_etree_vxlan` runs a leaf-only PE against a mixed one: without
+roles each leaf's broadcast reaches the other; with them the leaf-only PE's
+broadcast reaches the remote root but not the remote leaf
+(`l2_drop_etree_bum`), the mixed PE's leaf broadcast is not sent to the
+leaf-only PE at all (`vxlan_flood` does not move), and a root's still is.
 
 Static config for MPLS BUM: top-level `etree_leaf_label` (this PE's; omitted
 leaves it as it is, 0 removes it) and `repl_slots[].etree_leaf_label` (a
