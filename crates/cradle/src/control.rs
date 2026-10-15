@@ -320,6 +320,16 @@ fn slot_role(esi: Option<&str>, esi_label: u32, etree_leaf_label: u32) -> (SlotR
     }
 }
 
+/// Make `key` a member of `set` (`on`) or not, reporting whether that
+/// changed anything.
+fn set_member<K: Ord>(set: &mut std::collections::BTreeSet<K>, key: K, on: bool) -> bool {
+    if on {
+        set.insert(key)
+    } else {
+        set.remove(&key)
+    }
+}
+
 /// The `SLOT_ES` rows of group `g`: `(flood ifindex, only, skip, etree)`.
 /// A segment slot serves its segment `only`; the plain slot `skip`s the
 /// segments that have one. While the group has a leaf slot, it alone
@@ -1408,19 +1418,32 @@ impl Control {
     ///   (`SLOT_ETREE_ROOT`).
     ///
     /// Kept by `(bd, remote)`, so it may precede the slot.
+    ///
+    /// The cache is updated first, so a slot created meanwhile picks the
+    /// mark up, and rolled back if programming fails: a cached mark is one
+    /// the datapath holds, so the same request retries instead of
+    /// returning early.
     pub async fn set_etree_remote(&self, bd: u16, remote: IpAddr, leaf_only: bool) -> Result<()> {
         let key = v6_key(remote);
-        {
-            let mut remotes = self.etree_remotes.lock().await;
-            let changed = if leaf_only {
-                remotes.insert((bd, key))
-            } else {
-                remotes.remove(&(bd, key))
-            };
-            if !changed {
-                return Ok(());
-            }
+        if !set_member(&mut *self.etree_remotes.lock().await, (bd, key), leaf_only) {
+            return Ok(());
         }
+        let result = self.program_etree_remote(bd, remote, key, leaf_only).await;
+        if result.is_err() {
+            set_member(&mut *self.etree_remotes.lock().await, (bd, key), !leaf_only);
+        }
+        result
+    }
+
+    /// The datapath half of [`Self::set_etree_remote`]: the decap mark and
+    /// the auto slot's root-only row.
+    async fn program_etree_remote(
+        &self,
+        bd: u16,
+        remote: IpAddr,
+        key: Ipv6Addr,
+        leaf_only: bool,
+    ) -> Result<()> {
         let slot = self
             .repl_slots
             .lock()
@@ -1892,11 +1915,11 @@ impl Control {
         let b_idx = util::ifindex_of(&b)?;
         // The B end runs the per-copy encap in the XDP stage.
         self.attach(&b, b_idx, true).await?;
-        {
-            let mut dp = self.dp.lock().await;
-            program(&mut dp, a_idx, b_idx)?;
-            dp.l2_member_add(bd, a_idx)?;
-        }
+        program(&mut *self.dp.lock().await, a_idx, b_idx)?;
+        // The slot's restrictions before its flood membership: the slot
+        // floods as soon as it is a member, and joining first would send
+        // what they keep out until they land (a leaf's BUM to a leaf-only
+        // PE, or BUM back toward a segment).
         if let Some((group, role)) = group {
             self.slot_es_bind(group, a_idx, role).await?;
         } else if esi.is_empty() && self.etree_remotes.lock().await.contains(&(bd, key)) {
@@ -1906,6 +1929,7 @@ impl Control {
                 .await
                 .slot_es_set(a_idx, 0, 0, SLOT_ETREE_ROOT)?;
         }
+        self.dp.lock().await.l2_member_add(bd, a_idx)?;
         match group.map(|(_, role)| role) {
             Some(SlotRole::Es(esi)) => {
                 info!("repl slot {a}/{b}: bd {bd} -> {key} for ES {esi} (ESI label)");
@@ -1943,6 +1967,9 @@ impl Control {
         else {
             return Ok(());
         };
+        // Out of the flood list before its restrictions go, the reverse of
+        // the add: a member with its row cleared would flood unrestricted.
+        self.dp.lock().await.l2_member_remove(bd, a_idx)?;
         if let Some(group) = group {
             self.slot_es_unbind(group, a_idx).await?;
         }
@@ -1952,7 +1979,6 @@ impl Control {
                 // An E-Tree root-only mark, if any: the ifindex may be reused.
                 dp.slot_es_set(a_idx, 0, 0, 0)?;
             }
-            dp.l2_member_remove(bd, a_idx)?;
             let _ = dp.repl_sid_del(a_idx);
             let _ = dp.repl_sid_del(b_idx);
         }
@@ -5050,6 +5076,30 @@ mod etree_slot_tests {
         assert!(check_extra_labels(3900, 2900).is_err(), "exclusive");
         assert!(check_extra_labels(0, 15).is_err(), "reserved");
         assert!(check_extra_labels(0, 1 << 20).is_err(), "21 bits");
+    }
+
+    /// A leaf-only mark that failed to program rolls back: the same request
+    /// then changes the cache again, so it is retried rather than answered
+    /// from a cache that never reached the datapath.
+    #[test]
+    fn a_failed_mark_rolls_back() {
+        let mut marks = std::collections::BTreeSet::new();
+        let key = (100u16, Ipv6Addr::LOCALHOST);
+        assert!(set_member(&mut marks, key, true), "new mark");
+        // Programming failed: roll back.
+        assert!(set_member(&mut marks, key, false));
+        assert!(
+            set_member(&mut marks, key, true),
+            "the retry is not a no-op"
+        );
+        assert!(
+            !set_member(&mut marks, key, true),
+            "applied: a repeat is a no-op"
+        );
+        // A failed clear rolls back to marked.
+        assert!(set_member(&mut marks, key, false));
+        assert!(set_member(&mut marks, key, true));
+        assert!(marks.contains(&key));
     }
 
     /// Bit 63 of the segment bitmaps is the E-Tree leaf mark: no segment
