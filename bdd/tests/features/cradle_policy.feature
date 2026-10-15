@@ -108,8 +108,8 @@ Feature: Network policy in the eBPF datapath
     # allows only GET matching the path regex /api/v[0-9]/.* (Cilium
     # full-match semantics) and answers anything else with an empty 403.
     When I apply cradle config "policy-l7.json" to namespace "node" via gRPC as "ctl"
-    And HTTP GET "http://10.244.0.3:8080/api/vX/users" from namespace "pod1" should fail
-    Then the cradle stat "l7_redirect" in namespace "node" via gRPC as "ctl" should be nonzero
+    Then HTTP GET "http://10.244.0.3:8080/api/vX/users" from namespace "pod1" should fail
+    And the cradle stat "l7_redirect" in namespace "node" via gRPC as "ctl" should be nonzero
     # A path the regex matches (digit version + sub-path) is proxied through.
     And HTTP GET "http://10.244.0.3:8080/api/v2/users" from namespace "pod1" should eventually succeed
 

@@ -1380,6 +1380,16 @@ pub struct FlowRecord {
 /// `bpf_sk_assign`.
 pub const L7_PROXY_PORT: u16 = 18000;
 
+/// `skb->mark` the eBPF datapath sets on every packet it assigns to the L7
+/// proxy (`bpf_sk_assign`). `bpf_sk_assign` does not bypass routing: a
+/// packet whose destination is not local is classified for forwarding, and
+/// `ip_forward` drops an skb that carries a socket. An L7 VIP gets its own
+/// `local <vip>/32` route, but an L7-policy destination is a pod address,
+/// whose other traffic must still be forwarded. So the proxy's policy rule
+/// (cradle `kernel::ensure_l7_proxy_routing`) sends packets with this mark to
+/// a table whose only route is `local 0.0.0.0/0 dev lo`.
+pub const L7_PROXY_MARK: u32 = 0x4c37;
+
 // ============================ user-space Pod impls =========================
 
 #[cfg(feature = "user")]

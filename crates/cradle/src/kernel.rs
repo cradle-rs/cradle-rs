@@ -106,6 +106,63 @@ pub fn derive_port(dp: &mut Dataplane, name: &str, ifindex: u32, vrf: u32) -> Re
     Ok(derived)
 }
 
+/// Policy-routing table that holds only `local 0.0.0.0/0 dev lo`, and the
+/// rule preference that sends `L7_PROXY_MARK` packets to it.
+const L7_PROXY_TABLE: u32 = 2047;
+const L7_PROXY_RULE_PREF: u32 = 100;
+
+/// Route every packet the datapath assigned to the L7 proxy to the local
+/// stack: `ip rule add pref 100 fwmark L7_PROXY_MARK lookup 2047` over a table
+/// whose only route is `local 0.0.0.0/0 dev lo`. Without it, a flow steered
+/// to a pod address (L7 policy) is routed for forwarding and dropped, since
+/// `ip_forward` refuses an skb that carries a socket; a VIP has its own
+/// local route (`add_local_route_v4`). Only steered packets carry the mark,
+/// so the proxy's own upstream connection to the pod routes normally.
+///
+/// Idempotent: the rule is replaced at its fixed preference. Runs in
+/// cradle's network namespace and needs CAP_NET_ADMIN.
+pub fn ensure_l7_proxy_routing() -> Result<()> {
+    let table = L7_PROXY_TABLE.to_string();
+    let pref = L7_PROXY_RULE_PREF.to_string();
+    let mark = format!("{:#x}", cradle_common::L7_PROXY_MARK);
+    run_ip(&[
+        "-4",
+        "route",
+        "replace",
+        "local",
+        "0.0.0.0/0",
+        "dev",
+        "lo",
+        "table",
+        &table,
+    ])?;
+    // A rule left by an earlier run would stack a duplicate: drop it first.
+    let _ = Command::new("ip")
+        .args(["-4", "rule", "del", "pref", &pref])
+        .output();
+    run_ip(&[
+        "-4", "rule", "add", "pref", &pref, "fwmark", &mark, "lookup", &table,
+    ])?;
+    info!("L7 proxy policy routing: fwmark {mark} -> table {table} (local 0.0.0.0/0 dev lo)");
+    Ok(())
+}
+
+/// Run `ip <args>`, failing with its stderr.
+fn run_ip(args: &[&str]) -> Result<()> {
+    let out = Command::new("ip")
+        .args(args)
+        .output()
+        .with_context(|| format!("running `ip {}`", args.join(" ")))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Install a kernel `local` route for an L7 VIP, so packets steered to the
 /// user-space transparent proxy by `bpf_sk_assign` are delivered to that local
 /// socket rather than forwarded.

@@ -75,8 +75,8 @@ use cradle_common::{
     XDP_META_MAGIC_REPL, XDP_META_MAGIC_SRV6, fibw_unpack, mpls_lse, mpls_lse_unpack,
 };
 use cradle_common::{
-    ES_BITS_ETREE_LEAF, MPLS_LABEL_MASK, REPL_EXTRA_ETREE_LEAF, SLOT_ETREE_LEAF, SLOT_ETREE_ROOT,
-    STAT_L2_DROP_ETREE_BUM, STAT_MPLS_L2_LEAF_POP, STAT_MPLS_L2_LEAF_PUSH,
+    ES_BITS_ETREE_LEAF, L7_PROXY_MARK, MPLS_LABEL_MASK, REPL_EXTRA_ETREE_LEAF, SLOT_ETREE_LEAF,
+    SLOT_ETREE_ROOT, STAT_L2_DROP_ETREE_BUM, STAT_MPLS_L2_LEAF_POP, STAT_MPLS_L2_LEAF_PUSH,
 };
 use cradle_common::{
     ETREE_F_LEAF, FDB_F_ETREE_LEAF, STAT_L2_DROP_ETREE_LOCAL, STAT_L2_DROP_ETREE_UC,
@@ -725,6 +725,7 @@ fn sock_tuple(saddr: u32, daddr: u32, sport: u16, dport: u16) -> bpf_sock_tuple 
 /// For an established proxy connection the packet's own 4-tuple resolves the
 /// socket; a fresh SYN finds the proxy's wildcard listener. The proxy binds
 /// `IP_TRANSPARENT`, so the accepted socket's local address is the original VIP.
+/// Every assigned packet is marked `L7_PROXY_MARK`, which routes it locally.
 #[inline(always)]
 fn l7_redirect(ctx: &TcContext) -> Option<i32> {
     let ethertype: u16 = ctx.load(ETH_TYPE_OFF).ok()?;
@@ -765,6 +766,7 @@ fn l7_redirect(ctx: &TcContext) -> Option<i32> {
             let r = unsafe { bpf_sk_assign(skb as *mut _, sk as *mut _, 0) };
             unsafe { bpf_sk_release(sk as *mut _) };
             if r == 0 {
+                ctx.set_mark(L7_PROXY_MARK);
                 stat_inc(STAT_L7_REDIRECT);
                 return Some(TC_ACT_OK as i32);
             }
@@ -782,6 +784,10 @@ fn l7_redirect(ctx: &TcContext) -> Option<i32> {
     let r = unsafe { bpf_sk_assign(skb as *mut _, psk as *mut _, 0) };
     unsafe { bpf_sk_release(psk as *mut _) };
     if r == 0 {
+        // Routing still runs after the assign: the mark makes it deliver
+        // the packet locally (`L7_PROXY_MARK`), where the destination is a
+        // pod address with no local route of its own (L7 policy).
+        ctx.set_mark(L7_PROXY_MARK);
         stat_inc(STAT_L7_REDIRECT);
         return Some(TC_ACT_OK as i32);
     }

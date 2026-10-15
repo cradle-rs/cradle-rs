@@ -675,6 +675,12 @@ impl Control {
     pub async fn start_l7_proxy(&self) {
         if let Err(e) = crate::l7::spawn_proxy(self.routes.clone()).await {
             warn!("L7 proxy disabled: {e:#}");
+            return;
+        }
+        // Steered packets must route locally to reach the proxy
+        // (`L7_PROXY_MARK`); without the rule, L7 policy drops every flow.
+        if let Err(e) = crate::kernel::ensure_l7_proxy_routing() {
+            warn!("L7 proxy policy routing: {e:#}");
         }
     }
 
