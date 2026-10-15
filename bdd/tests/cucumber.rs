@@ -4907,6 +4907,20 @@ async fn main() {
                             .tee::<World, _>(writer::Json::for_tee(json_file))
                             .normalized(),
                     )
+                    // Treat a SKIPPED step as a FAILURE. cucumber silently
+                    // skips a step whose phrasing matches no step definition,
+                    // and an `And` takes the keyword of the step before it,
+                    // so an `And <assertion>` after a `When` matches no
+                    // `#[then]` and is skipped too. Either way the check never
+                    // runs and the scenario still passes: three E-Tree
+                    // features' "received nothing" checks and one of
+                    // `cradle_policy`'s were silently skipped this way. Wraps
+                    // the whole writer so the terminal output, the summary
+                    // and the Allure JSON agree. A scenario that legitimately
+                    // expects a skip can opt out with `@allow.skipped`
+                    // (already excluded from `feature_tag` in the `before`
+                    // hook above). zebra-rs's runner does the same.
+                    .fail_on_skipped()
                     // Ignore the process CLI for the per-feature runner so
                     // `--concurrency` doesn't override `max_concurrent_scenarios`;
                     // the tag / name filter is re-applied in the closure below.
