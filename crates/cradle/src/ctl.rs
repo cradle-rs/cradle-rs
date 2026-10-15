@@ -54,6 +54,11 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                     })
                     .await?;
             }
+            if let Some(label) = cfg.etree_leaf_label {
+                client
+                    .set_etree_leaf_label(pb::EtreeLeafLabel { label })
+                    .await?;
+            }
             for es in &cfg.ethernet_segments {
                 client
                     .set_ethernet_segment(pb::EthernetSegment {

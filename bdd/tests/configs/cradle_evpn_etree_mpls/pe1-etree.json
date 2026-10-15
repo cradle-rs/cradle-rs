@@ -1,0 +1,10 @@
+{
+  "ports": [
+    { "name": "pe1l", "vlan": 100, "etree_leaf": true },
+    { "name": "pe1r", "vlan": 100 },
+    { "name": "r12a", "vlan": 100 },
+    { "name": "r12ea", "vlan": 100 },
+    { "name": "r12la", "vlan": 100 }
+  ],
+  "etree_leaf_label": 1800
+}

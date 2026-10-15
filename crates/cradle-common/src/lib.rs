@@ -210,8 +210,21 @@ pub struct CradleXdpMeta {
     /// those segments (EVPN split horizon / local bias, RFC 8365 §8.3.1):
     /// the peer PE already delivered it to the multihomed CE. Zero = not a
     /// segment peer (or an MPLS decap, which carries no source address).
+    /// Bit 63 is not a segment: [`ES_BITS_ETREE_LEAF`].
     pub es_bits: u64,
 }
+
+/// [`CradleXdpMeta::es_bits`] bit 63: EVPN E-Tree (RFC 8317 §4.2), the
+/// copy came from a leaf AC on the ingress PE — it carried our leaf label
+/// (`LEAF_LABEL`) under the service label. The TC stage withholds it from
+/// local leaf ports, flooded or not. Segment ids stop at 62
+/// ([`MAX_ES_ID`]) so no segment owns this bit.
+pub const ES_BITS_ETREE_LEAF: u64 = 1 << 63;
+
+/// The highest Ethernet Segment id: ids index the 64-bit `es_bits`,
+/// `VTEP_ES` and `SlotEs::skip` bitmaps, whose bit 63 is
+/// [`ES_BITS_ETREE_LEAF`].
+pub const MAX_ES_ID: u8 = 62;
 
 /// L3 (`End.DT4/6/46`) decap: TC routes the inner IP packet in `vrf_id`.
 pub const XDP_META_MAGIC: u32 = 0xC7AD_1E01;
@@ -629,9 +642,21 @@ pub struct ReplTarget {
     /// the service label on each copy — the remote PE's label for the
     /// Ethernet Segment the frame entered through, so it can withhold the
     /// copy from that segment. 0 = none (every other kind, every unicast
-    /// target, and a slot serving no segment).
+    /// target, and a slot serving no segment). With
+    /// [`REPL_EXTRA_ETREE_LEAF`] set, the low 20 bits are instead the remote
+    /// PE's E-Tree leaf label (RFC 8317 §4.2), which replaces the ESI label
+    /// on a leaf's copies.
     pub esi_label: u32,
 }
+
+/// [`ReplTarget::esi_label`] bit 31: the extra label is an E-Tree leaf
+/// label, not an ESI label. Only the low 20 bits go on the wire; the
+/// marker picks the counter (`mpls_l2_leaf_push`). An MPLS label is 20
+/// bits, so the field has room, and the encap path keeps its signature
+/// (the `cradle_xdp` stack budget).
+pub const REPL_EXTRA_ETREE_LEAF: u32 = 1 << 31;
+/// The 20 label bits of [`ReplTarget::esi_label`].
+pub const MPLS_LABEL_MASK: u32 = 0xF_FFFF;
 
 /// [`ReplTarget::addr`] is a remote `End.DT2M` SID (MAC-in-SRv6 per copy).
 pub const REPL_KIND_SRV6: u32 = 0;
@@ -651,13 +676,26 @@ pub const REPL_KIND_MPLS: u32 = 2;
 /// ESI label for N: `only` = N's id + 1 on that slot (it serves no other
 /// ingress), and N's bit in `skip` on the peer's plain slot (which serves
 /// every other ingress). A slot with no row serves everything.
+///
+/// `etree` (`SLOT_ETREE_*`, RFC 8317 §4.2): toward a PE that advertised an
+/// E-Tree leaf label, a leaf port's BUM goes through a slot carrying that
+/// label (`SLOT_ETREE_LEAF`) and no other, and every other slot toward the
+/// PE (`SLOT_ETREE_ROOT`) serves only roots. The leaf label replaces the
+/// ESI label: a leaf's copy carries one or the other, never both.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SlotEs {
     pub only: u32,
-    pub _pad: u32,
+    pub etree: u32,
     pub skip: u64,
 }
+
+/// [`SlotEs::etree`]: a leaf slot — its copies carry the remote PE's E-Tree
+/// leaf label, and it serves BUM from local leaf ports only.
+pub const SLOT_ETREE_LEAF: u32 = 1 << 0;
+/// [`SlotEs::etree`]: a plain or ESI-label slot toward a PE that also has a
+/// leaf slot — it serves BUM from root ports only.
+pub const SLOT_ETREE_ROOT: u32 = 1 << 1;
 
 /// Maximum downstream branches of one Replication segment (RFC 9524).
 pub const MAX_REPL_BRANCHES: usize = 16;
@@ -1269,8 +1307,18 @@ pub const STAT_L2_DROP_ETREE_LOCAL: u32 = 57;
 /// port toward a remote MAC flagged `FDB_F_ETREE_LEAF`, dropped at ingress
 /// instead of being encapsulated.
 pub const STAT_L2_DROP_ETREE_UC: u32 = 58;
+/// EVPN E-Tree over MPLS (RFC 8317 §4.2): a BUM copy from a local leaf port
+/// sent with the remote PE's leaf label under the service label.
+pub const STAT_MPLS_L2_LEAF_PUSH: u32 = 59;
+/// EVPN E-Tree over MPLS (RFC 8317 §4.2): a received BUM copy carrying this
+/// PE's leaf label — it came from a leaf AC on the ingress PE.
+pub const STAT_MPLS_L2_LEAF_POP: u32 = 60;
+/// EVPN E-Tree (RFC 8317 §4.2, egress filtering): a copy from a remote leaf
+/// AC withheld from a local leaf port — one copy of a flood, or an
+/// unknown-unicast copy that hit a known local leaf MAC here.
+pub const STAT_L2_DROP_ETREE_BUM: u32 = 61;
 /// Number of stat slots (the `STATS` map's `max_entries`).
-pub const STAT_MAX: u32 = 59;
+pub const STAT_MAX: u32 = 62;
 
 // ====================== Hubble flow events (docs/design/hubble.md) ==========
 

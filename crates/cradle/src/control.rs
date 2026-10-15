@@ -43,6 +43,31 @@ use cradle_common::{
     SRV6_BH_END_X, SRV6_BH_END_X_REP, SRV6_BH_UA, SRV6_BH_UALIB, SRV6_BH_UN,
     SRV6_ENCAP_MODE_INSERT, STAT_MAX,
 };
+use cradle_common::{MAX_ES_ID, REPL_EXTRA_ETREE_LEAF, SLOT_ETREE_LEAF, SLOT_ETREE_ROOT};
+
+/// An unreserved 20-bit MPLS label (RFC 3032 §2.1 reserves 0-15).
+fn unreserved_label(label: u32) -> bool {
+    (16..1 << 20).contains(&label)
+}
+
+/// A replication slot's extra label: an ESI label (RFC 7432 §8.3) or an
+/// E-Tree leaf label (RFC 8317 §4.2), not both — the leaf label replaces
+/// the ESI label on a leaf's copy (§4.2.3).
+pub(crate) fn check_extra_labels(esi_label: u32, etree_leaf_label: u32) -> Result<(), String> {
+    if esi_label != 0 && etree_leaf_label != 0 {
+        return Err(
+            "esi_label and etree_leaf_label are exclusive: a leaf's copy carries \
+                    the leaf label instead of the ESI label"
+                .to_string(),
+        );
+    }
+    if etree_leaf_label != 0 && !unreserved_label(etree_leaf_label) {
+        return Err(format!(
+            "etree_leaf_label {etree_leaf_label} is not an unreserved 20-bit MPLS label"
+        ));
+    }
+    Ok(())
+}
 
 /// Validate a wire `behavior` code against the known `SRV6_BH_*` set.
 fn srv6_behavior(code: u32) -> Result<u8> {
@@ -131,6 +156,9 @@ const STAT_NAMES: [&str; STAT_MAX as usize] = [
     "mpls_l2_esi_pop",
     "l2_drop_etree_local",
     "l2_drop_etree_uc",
+    "mpls_l2_leaf_push",
+    "mpls_l2_leaf_pop",
+    "l2_drop_etree_bum",
 ];
 
 /// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
@@ -215,9 +243,11 @@ struct EtreeTable {
 /// The segment named `esi`, created with a fresh id if unknown.
 fn es_entry<'a>(tbl: &'a mut EsTable, esi: &str) -> Result<&'a mut EsState> {
     if !tbl.segments.contains_key(esi) {
-        let id = (0..64u8)
+        // Bit 63 of the segment bitmaps is the E-Tree leaf mark
+        // (`ES_BITS_ETREE_LEAF`), so ids stop at `MAX_ES_ID`.
+        let id = (0..=MAX_ES_ID)
             .find(|i| tbl.ids & (1u64 << i) == 0)
-            .context("too many Ethernet Segments (max 64)")?;
+            .context("too many Ethernet Segments (max 63)")?;
         tbl.ids |= 1u64 << id;
         tbl.segments.insert(
             esi.to_string(),
@@ -249,13 +279,67 @@ struct ReplSlot {
 /// segment slot apart from the plain slot toward the same PE.
 type ReplSlotKey = (u16, Ipv6Addr, String);
 
-/// The replication slots toward one `(PE, BUM label)` — the plain one and,
-/// per Ethernet Segment, the one carrying that PE's ESI label for it
-/// (RFC 7432 §8.3). Values are flood-side ifindexes (`SLOT_ES` keys).
+/// The replication slots toward one `(PE, BUM label)` — the plain one,
+/// per Ethernet Segment the one carrying that PE's ESI label for it
+/// (RFC 7432 §8.3), and the one carrying its E-Tree leaf label (RFC 8317
+/// §4.2). Values are flood-side ifindexes (`SLOT_ES` keys).
 #[derive(Default)]
 struct SlotGroup {
     plain: Option<u32>,
     es: std::collections::BTreeMap<String, u32>,
+    leaf: Option<u32>,
+}
+
+/// What one slot of a [`SlotGroup`] serves.
+#[derive(Clone, Copy, Debug)]
+enum SlotRole<'a> {
+    /// Every ingress no dedicated slot serves.
+    Plain,
+    /// BUM that entered through this Ethernet Segment, carrying the PE's
+    /// ESI label for it.
+    Es(&'a str),
+    /// BUM from local leaf ports, carrying the PE's E-Tree leaf label.
+    Leaf,
+}
+
+/// The registry key's third part for a leaf-label slot: no ESI (colon hex)
+/// can collide with it.
+const ETREE_SLOT_KEY: &str = "etree-leaf";
+
+/// A new MPLS slot's role and the extra label its copies carry
+/// (`ReplTarget::esi_label`): the ESI label, or the leaf label marked
+/// `REPL_EXTRA_ETREE_LEAF`. The callers check the two are not both set.
+fn slot_role(esi: Option<&str>, esi_label: u32, etree_leaf_label: u32) -> (SlotRole<'_>, u32) {
+    if etree_leaf_label != 0 {
+        (SlotRole::Leaf, etree_leaf_label | REPL_EXTRA_ETREE_LEAF)
+    } else {
+        match esi {
+            Some(esi) => (SlotRole::Es(esi), esi_label),
+            None => (SlotRole::Plain, esi_label),
+        }
+    }
+}
+
+/// The `SLOT_ES` rows of group `g`: `(flood ifindex, only, skip, etree)`.
+/// A segment slot serves its segment `only`; the plain slot `skip`s the
+/// segments that have one. While the group has a leaf slot, it alone
+/// serves leaf ports and every other slot serves roots only.
+fn slot_group_rows(tbl: &mut EsTable, g: &SlotGroup) -> Result<Vec<(u32, u32, u64, u32)>> {
+    let root = if g.leaf.is_some() { SLOT_ETREE_ROOT } else { 0 };
+    let mut rows = Vec::with_capacity(g.es.len() + 2);
+    let mut skip = 0u64;
+    for (esi, &oif) in &g.es {
+        let id = es_entry(tbl, esi)?.id as u32;
+        rows.push((oif, id + 1, 0, root));
+        skip |= 1u64 << (id & 63);
+    }
+    if let Some(plain) = g.plain {
+        rows.push((plain, 0, skip, root));
+    }
+    if let Some(leaf) = g.leaf {
+        rows.push((leaf, 0, 0, SLOT_ETREE_LEAF));
+    }
+    Ok(rows)
 }
 
 /// The remote endpoint of a VPWS cross-connect (EVPN E-Line, RFC 8214) —
@@ -508,6 +592,8 @@ pub struct Control {
     /// EVPN E-Tree port roles (`SetEtreeRole`), the source of the
     /// `PORT_ETREE` rows. Lock order: `etree` → `dp`.
     etree: Arc<Mutex<EtreeTable>>,
+    /// EVPN E-Tree over MPLS: our leaf label in `LEAF_LABEL` (0 = none).
+    etree_leaf_label: Arc<Mutex<u32>>,
     /// CNI state (IPAM allocations + endpoint records) under the state dir.
     cni: Arc<Mutex<crate::cni::Store>>,
     /// User-space mirror of the datapath `IDENTITY` map (pod/node IP → policy
@@ -557,6 +643,7 @@ impl Control {
             repl_seg_veths: Arc::new(Mutex::new(std::collections::HashMap::new())),
             es: Arc::new(Mutex::new(EsTable::default())),
             etree: Arc::new(Mutex::new(EtreeTable::default())),
+            etree_leaf_label: Arc::new(Mutex::new(0)),
             cni: Arc::new(Mutex::new(crate::cni::Store::new(state_dir))),
             identities: Arc::new(Mutex::new(HashMap::new())),
             policy_revisions: Arc::new(Mutex::new(HashMap::new())),
@@ -1244,46 +1331,36 @@ impl Control {
     }
 
     /// RFC 7432 §8.3 (MPLS): register replication slot `a_idx` (its
-    /// flood-side ifindex) in the `(PE, BUM label)` group `key` — as the
-    /// plain slot, or as the one serving Ethernet Segment `esi` exclusively
-    /// — and re-render the group's `SLOT_ES` rows: the segment slot gets
-    /// `only` = its segment's id + 1, the plain slot `skip` = the bitmap of
-    /// the segments the group has dedicated slots for. Lock order: `es` →
-    /// `slot_groups` → `dp`.
+    /// flood-side ifindex) in the `(PE, BUM label)` group `key` as `role`,
+    /// and re-render the group's `SLOT_ES` rows ([`slot_group_rows`]).
+    /// Lock order: `es` → `slot_groups` → `dp`.
     async fn slot_es_bind(
         &self,
         key: (Ipv6Addr, u32),
         a_idx: u32,
-        esi: Option<&str>,
+        role: SlotRole<'_>,
     ) -> Result<()> {
         let mut tbl = self.es.lock().await;
         let mut groups = self.slot_groups.lock().await;
         let g = groups.entry(key).or_default();
-        match esi {
-            Some(esi) => {
+        match role {
+            SlotRole::Plain => g.plain = Some(a_idx),
+            SlotRole::Es(esi) => {
                 g.es.insert(esi.to_string(), a_idx);
             }
-            None => g.plain = Some(a_idx),
+            SlotRole::Leaf => g.leaf = Some(a_idx),
         }
-        let mut rows: Vec<(u32, u32, u64)> = Vec::with_capacity(g.es.len() + 1);
-        let mut skip = 0u64;
-        for (esi, &oif) in &g.es {
-            let id = es_entry(&mut tbl, esi)?.id as u32;
-            rows.push((oif, id + 1, 0));
-            skip |= 1u64 << (id & 63);
-        }
-        if let Some(plain) = g.plain {
-            rows.push((plain, 0, skip));
-        }
+        let rows = slot_group_rows(&mut tbl, g)?;
         let mut dp = self.dp.lock().await;
-        for (oif, only, skip) in rows {
-            dp.slot_es_set(oif, only, skip)?;
+        for (oif, only, skip, etree) in rows {
+            dp.slot_es_set(oif, only, skip, etree)?;
         }
         Ok(())
     }
 
-    /// Inverse of [`Self::slot_es_bind`]: slot `a_idx` leaves group `key`
-    /// (its row goes, the plain slot's `skip` shrinks).
+    /// Inverse of [`Self::slot_es_bind`]: slot `a_idx` leaves group `key`.
+    /// Its row goes, and the rest are re-rendered: the plain slot's `skip`
+    /// shrinks, and the root-only marks go with the group's leaf slot.
     async fn slot_es_unbind(&self, key: (Ipv6Addr, u32), a_idx: u32) -> Result<()> {
         let mut tbl = self.es.lock().await;
         let mut groups = self.slot_groups.lock().await;
@@ -1293,20 +1370,44 @@ impl Control {
         if g.plain == Some(a_idx) {
             g.plain = None;
         }
-        g.es.retain(|_, oif| *oif != a_idx);
-        let mut skip = 0u64;
-        for esi in g.es.keys() {
-            skip |= 1u64 << (es_entry(&mut tbl, esi)?.id & 63);
+        if g.leaf == Some(a_idx) {
+            g.leaf = None;
         }
-        let plain = g.plain;
-        if g.plain.is_none() && g.es.is_empty() {
+        g.es.retain(|_, oif| *oif != a_idx);
+        let rows = slot_group_rows(&mut tbl, g)?;
+        if g.plain.is_none() && g.es.is_empty() && g.leaf.is_none() {
             groups.remove(&key);
         }
         let mut dp = self.dp.lock().await;
-        dp.slot_es_set(a_idx, 0, 0)?;
-        if let Some(plain) = plain {
-            dp.slot_es_set(plain, 0, skip)?;
+        dp.slot_es_set(a_idx, 0, 0, 0)?;
+        for (oif, only, skip, etree) in rows {
+            dp.slot_es_set(oif, only, skip, etree)?;
         }
+        Ok(())
+    }
+
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf label this PE
+    /// advertises (its ESI-0 Ethernet A-D route), for decap; 0 = none. A
+    /// peer pushes it under our service label on BUM from its leaf ACs,
+    /// and the copy is then kept off our leaf ports. Replaces the previous
+    /// label.
+    pub async fn set_etree_leaf_label(&self, label: u32) -> Result<()> {
+        anyhow::ensure!(
+            label == 0 || unreserved_label(label),
+            "leaf label {label} is not an unreserved 20-bit MPLS label"
+        );
+        let mut cur = self.etree_leaf_label.lock().await;
+        if *cur == label {
+            return Ok(());
+        }
+        let mut dp = self.dp.lock().await;
+        if *cur != 0 {
+            dp.leaf_label_del(*cur);
+        }
+        if label != 0 {
+            dp.leaf_label_set(label)?;
+        }
+        *cur = label;
         Ok(())
     }
 
@@ -1613,7 +1714,10 @@ impl Control {
     ///
     /// With `esi` (RFC 7432 §8.3) the slot serves that Ethernet Segment
     /// exclusively, each copy carrying `esi_label` under the service label;
-    /// see [`Self::slot_es_bind`].
+    /// with `etree_leaf_label` (RFC 8317 §4.2) it serves the local leaf
+    /// ports, each copy carrying that PE's leaf label instead. See
+    /// [`Self::slot_es_bind`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_repl_slot_mpls(
         &self,
         flood_port: &str,
@@ -1622,14 +1726,16 @@ impl Control {
         label: u32,
         esi: Option<&str>,
         esi_label: u32,
+        etree_leaf_label: u32,
     ) -> Result<()> {
         let flood = util::ifindex_of(flood_port)?;
         let encap = util::ifindex_of(encap_port)?;
+        let (role, extra) = slot_role(esi, esi_label, etree_leaf_label);
         self.dp
             .lock()
             .await
-            .repl_slot_add_mpls(flood, encap, pe, label, esi_label)?;
-        self.slot_es_bind((v6_key(pe), label), flood, esi).await
+            .repl_slot_add_mpls(flood, encap, pe, label, extra)?;
+        self.slot_es_bind((v6_key(pe), label), flood, role).await
     }
 
     /// Create a BUM replication slot for `(bd, remote_sid)` with cradle-owned
@@ -1668,7 +1774,10 @@ impl Control {
     /// With `esi` (RFC 7432 §8.3) the slot serves that Ethernet Segment
     /// exclusively, each copy carrying `esi_label` — the PE's label for the
     /// segment — under the service label, and is keyed apart from the plain
-    /// slot toward the same PE; see [`Self::slot_es_bind`].
+    /// slot toward the same PE. With `etree_leaf_label` (RFC 8317 §4.2) it
+    /// serves the local leaf ports, each copy carrying the PE's leaf label
+    /// instead, keyed apart too ([`ETREE_SLOT_KEY`]). See
+    /// [`Self::slot_es_bind`].
     pub async fn add_repl_slot_auto_mpls(
         &self,
         bd: u16,
@@ -1676,13 +1785,20 @@ impl Control {
         label: u32,
         esi: Option<&str>,
         esi_label: u32,
+        etree_leaf_label: u32,
     ) -> Result<()> {
+        let (role, extra) = slot_role(esi, esi_label, etree_leaf_label);
+        let slot_key = match role {
+            SlotRole::Plain => "",
+            SlotRole::Es(esi) => esi,
+            SlotRole::Leaf => ETREE_SLOT_KEY,
+        };
         self.add_repl_slot_auto_keyed(
             bd,
             v6_key(pe),
-            esi.unwrap_or(""),
-            Some((v6_key(pe), label)),
-            |dp, a_idx, b_idx| dp.repl_slot_add_mpls(a_idx, b_idx, pe, label, esi_label),
+            slot_key,
+            Some(((v6_key(pe), label), role)),
+            |dp, a_idx, b_idx| dp.repl_slot_add_mpls(a_idx, b_idx, pe, label, extra),
         )
         .await
     }
@@ -1694,7 +1810,7 @@ impl Control {
         bd: u16,
         key: Ipv6Addr,
         esi: &str,
-        group: Option<(Ipv6Addr, u32)>,
+        group: Option<((Ipv6Addr, u32), SlotRole<'_>)>,
         program: impl FnOnce(&mut Dataplane, u32, u32) -> Result<()>,
     ) -> Result<()> {
         let mut slots = self.repl_slots.lock().await;
@@ -1716,14 +1832,17 @@ impl Control {
             program(&mut dp, a_idx, b_idx)?;
             dp.l2_member_add(bd, a_idx)?;
         }
-        if let Some(group) = group {
-            self.slot_es_bind(group, a_idx, (!esi.is_empty()).then_some(esi))
-                .await?;
+        if let Some((group, role)) = group {
+            self.slot_es_bind(group, a_idx, role).await?;
         }
-        if esi.is_empty() {
-            info!("repl slot {a}/{b}: bd {bd} -> {key}");
-        } else {
-            info!("repl slot {a}/{b}: bd {bd} -> {key} for ES {esi} (ESI label)");
+        match group.map(|(_, role)| role) {
+            Some(SlotRole::Es(esi)) => {
+                info!("repl slot {a}/{b}: bd {bd} -> {key} for ES {esi} (ESI label)");
+            }
+            Some(SlotRole::Leaf) => {
+                info!("repl slot {a}/{b}: bd {bd} -> {key} for E-Tree leaves (leaf label)");
+            }
+            _ => info!("repl slot {a}/{b}: bd {bd} -> {key}"),
         }
         slots.insert(
             (bd, key, esi.to_string()),
@@ -1731,7 +1850,7 @@ impl Control {
                 a,
                 a_idx,
                 b_idx,
-                group,
+                group: group.map(|(g, _)| g),
             },
         );
         Ok(())
@@ -3287,6 +3406,20 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn set_etree_leaf_label(
+        &self,
+        req: Request<pb::EtreeLeafLabel>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let label = req.into_inner().label;
+        if label != 0 && !unreserved_label(label) {
+            return Err(Status::invalid_argument(format!(
+                "leaf label {label} is not an unreserved 20-bit MPLS label"
+            )));
+        }
+        self.control.set_etree_leaf_label(label).await.map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn set_es_peers(&self, req: Request<pb::EsPeers>) -> Result<Response<pb::Empty>, Status> {
         let p = req.into_inner();
         self.control
@@ -3878,6 +4011,8 @@ impl Cradle for GrpcService {
             if r.esi.is_empty() != (r.esi_label == 0) {
                 return Err(Status::invalid_argument("esi and esi_label go together"));
             }
+            check_extra_labels(r.esi_label, r.etree_leaf_label)
+                .map_err(Status::invalid_argument)?;
             self.control
                 .add_repl_slot_auto_mpls(
                     r.bd as u16,
@@ -3885,6 +4020,7 @@ impl Cradle for GrpcService {
                     r.remote_label,
                     (!r.esi.is_empty()).then_some(r.esi.as_str()),
                     r.esi_label,
+                    r.etree_leaf_label,
                 )
                 .await
                 .map_err(st)?;
@@ -3907,8 +4043,15 @@ impl Cradle for GrpcService {
         } else {
             v6_key(r.remote_pe.parse::<IpAddr>().map_err(st)?)
         };
+        // A leaf-label slot is keyed apart from the plain one, as a segment
+        // slot is by its ESI.
+        let slot_key = if r.etree_leaf_label != 0 {
+            ETREE_SLOT_KEY
+        } else {
+            r.esi.as_str()
+        };
         self.control
-            .del_repl_slot_auto(r.bd as u16, key, &r.esi)
+            .del_repl_slot_auto(r.bd as u16, key, slot_key)
             .await
             .map_err(st)?;
         Ok(Response::new(pb::Empty {}))
@@ -4751,5 +4894,88 @@ mod spawn_tied_tests {
             libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
         }
         assert!(died, "sleep {pid} outlived the thread that forked it");
+    }
+}
+
+#[cfg(test)]
+mod etree_slot_tests {
+    use super::*;
+
+    const ESI1: &str = "00:00:00:00:00:00:00:00:00:01";
+
+    /// Without a leaf slot nothing changes (RFC 7432 §8.3 alone): the
+    /// segment slot serves its segment, the plain slot skips it.
+    #[test]
+    fn a_group_without_a_leaf_slot_has_no_etree_marks() {
+        let mut tbl = EsTable::default();
+        let mut g = SlotGroup {
+            plain: Some(10),
+            ..Default::default()
+        };
+        g.es.insert(ESI1.to_string(), 11);
+        let id = es_entry(&mut tbl, ESI1).unwrap().id as u32;
+        let rows = slot_group_rows(&mut tbl, &g).unwrap();
+        assert_eq!(rows, vec![(11, id + 1, 0, 0), (10, 0, 1u64 << id, 0)]);
+    }
+
+    /// With a leaf slot (RFC 8317 §4.2) it alone serves the leaves, and
+    /// the plain and segment slots toward the PE serve roots only.
+    #[test]
+    fn a_leaf_slot_makes_the_others_root_only() {
+        let mut tbl = EsTable::default();
+        let mut g = SlotGroup {
+            plain: Some(10),
+            leaf: Some(12),
+            ..Default::default()
+        };
+        g.es.insert(ESI1.to_string(), 11);
+        let id = es_entry(&mut tbl, ESI1).unwrap().id as u32;
+        let rows = slot_group_rows(&mut tbl, &g).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (11, id + 1, 0, SLOT_ETREE_ROOT),
+                (10, 0, 1u64 << id, SLOT_ETREE_ROOT),
+                (12, 0, 0, SLOT_ETREE_LEAF),
+            ]
+        );
+    }
+
+    /// A leaf slot's extra label is the leaf label, marked; it wins over
+    /// nothing else, because the callers refuse both at once.
+    #[test]
+    fn slot_roles_and_extra_labels() {
+        assert!(matches!(slot_role(None, 0, 0), (SlotRole::Plain, 0)));
+        assert!(matches!(
+            slot_role(Some(ESI1), 3900, 0),
+            (SlotRole::Es(ESI1), 3900)
+        ));
+        let (role, extra) = slot_role(None, 0, 2900);
+        assert!(matches!(role, SlotRole::Leaf));
+        assert_eq!(extra, 2900 | REPL_EXTRA_ETREE_LEAF);
+        assert_eq!(extra & cradle_common::MPLS_LABEL_MASK, 2900);
+
+        assert!(check_extra_labels(3900, 0).is_ok());
+        assert!(check_extra_labels(0, 2900).is_ok());
+        assert!(check_extra_labels(3900, 2900).is_err(), "exclusive");
+        assert!(check_extra_labels(0, 15).is_err(), "reserved");
+        assert!(check_extra_labels(0, 1 << 20).is_err(), "21 bits");
+    }
+
+    /// Bit 63 of the segment bitmaps is the E-Tree leaf mark: no segment
+    /// may own it.
+    #[test]
+    fn segment_ids_stop_below_the_leaf_bit() {
+        let mut tbl = EsTable::default();
+        for i in 0..=MAX_ES_ID {
+            let esi = format!("00:00:00:00:00:00:00:00:01:{i:02x}");
+            assert_eq!(es_entry(&mut tbl, &esi).unwrap().id, i);
+        }
+        assert!(es_entry(&mut tbl, "00:00:00:00:00:00:00:00:02:00").is_err());
+        assert_eq!(
+            1u64 << MAX_ES_ID & cradle_common::ES_BITS_ETREE_LEAF,
+            0,
+            "the last segment id is not the leaf bit"
+        );
     }
 }

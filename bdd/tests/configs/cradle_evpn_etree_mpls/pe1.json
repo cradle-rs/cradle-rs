@@ -1,0 +1,35 @@
+{
+  "ports": [
+    { "name": "pe1l", "vlan": 100 },
+    { "name": "pe1r", "vlan": 100 },
+    { "name": "pe1u", "l3": true },
+    { "name": "r12a", "vlan": 100 },
+    { "name": "r12b", "l3": true },
+    { "name": "r12ea", "vlan": 100 },
+    { "name": "r12eb", "l3": true },
+    { "name": "r12la", "vlan": 100 },
+    { "name": "r12lb", "l3": true }
+  ],
+  "nexthops": [
+    { "id": 1, "oif": "pe1u", "gateway": "10.0.12.2" }
+  ],
+  "neighbors": [
+    { "oif": "pe1u", "ip": "10.0.12.2", "mac": "02:00:00:00:02:0a" }
+  ],
+  "routes": [
+    { "prefix": "10.255.0.2/32", "nexthop": 1 }
+  ],
+  "ilm": [
+    { "in_label": 1200, "action": "pop-l2", "bd": 100 }
+  ],
+  "repl_slots": [
+    { "flood_port": "r12a", "encap_port": "r12b", "remote_pe": "10.255.0.2", "label": 2200 },
+    { "flood_port": "r12ea", "encap_port": "r12eb", "remote_pe": "10.255.0.2", "label": 2200,
+      "esi": "00:00:00:00:00:00:00:00:00:01", "esi_label": 2900 },
+    { "flood_port": "r12la", "encap_port": "r12lb", "remote_pe": "10.255.0.2", "label": 2200,
+      "etree_leaf_label": 2800 }
+  ],
+  "ethernet_segments": [
+    { "esi": "00:00:00:00:00:00:00:00:00:01", "ports": [ "pe1l" ], "esi_label": 1900 }
+  ]
+}
