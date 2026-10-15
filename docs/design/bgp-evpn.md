@@ -438,6 +438,20 @@ back to back over SRv6, each with a leaf and a root host:
   dropped there;
 - an argument the egress PE never allocated is dropped (`srv6_drop_arg`).
 
+Under zebra-rs (plan phase 5b), the leaf arguments, SIDs and slots come from
+BGP: with a leaf AC under `encapsulation srv6`, zebra-rs gives the PE leaf
+argument 1 and tees it (`SetEtreeLeafArg`), installs the leaf VNI's
+End.DT2M at LOC:FUNC with a 16-bit argument (`LocalSid.arg_bits`) and
+advertises the length on its IMET, advertises the argument in an ESI-0
+Ethernet A-D route (the E-Tree EC and an End.DT2M SID with the argument
+after the function), and turns each peer's argument and End.DT2M SID into
+a leaf slot (`AddReplSlot.etree_leaf_sid`). BDD
+`cradle_evpn_etree_srv6_zebra` runs it over IS-IS SRv6 with uSID locators:
+the arguments cross in BGP, a leaf's broadcast reaches the remote root but
+not the remote leaf (`srv6_l2_leaf_decap`, `l2_drop_etree_bum`), a root's
+reaches both, and a leaf's known unicast to the remote leaf is dropped at
+its own PE.
+
 Static config: `ports[].etree_leaf` (`true`/`false`; omitted leaves the role
 as it is), `fdb[].etree_leaf`. `cradle dump l2` shows the flag as
 `etree-leaf`. BDD `cradle_evpn_etree` covers several cases, each against a

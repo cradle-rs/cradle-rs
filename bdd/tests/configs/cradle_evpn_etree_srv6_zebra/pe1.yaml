@@ -1,0 +1,68 @@
+# pe1 — a dynamic EVPN-over-SRv6 PE (zebra-rs teeing to cradle) with an
+# E-Tree leaf AC, pe1l, and a root AC, pe1r, both in br100 with vxlan100
+# (how zebra-rs knows their VNI). zebra-rs gives this PE leaf argument 1:
+# its End.DT2M for VNI 100 installs at LOC:FUNC with a 16-bit argument, its
+# IMET advertises the argument length, and its ESI-0 Ethernet A-D route
+# carries the argument. The other PE's argument makes a leaf slot toward it.
+# `etree` needs zebra-rs's `--feature etree`.
+system:
+  cradle:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: pe1u
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 2001:db8::1
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: pe1u
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+      etree:
+        leaf-interface:
+        - name: pe1l
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65001
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

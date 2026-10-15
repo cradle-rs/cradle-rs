@@ -279,7 +279,8 @@ come from
 `cradle_evpn_etree_mpls`, `cradle_evpn_etree_vxlan`,
 `cradle_evpn_etree_srv6` (static), and
 `cradle_evpn_etree_zebra`, `cradle_evpn_etree_mpls_zebra`,
-`cradle_evpn_etree_vxlan_zebra` (zebra-rs-driven); the design is in
+`cradle_evpn_etree_vxlan_zebra`, `cradle_evpn_etree_srv6_zebra`
+(zebra-rs-driven); the design is in
 `bgp-evpn.md` §E-Tree.
 
 ### LAG ports
