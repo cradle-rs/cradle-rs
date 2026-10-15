@@ -271,10 +271,13 @@ to a PE through its leaf-label slot only (`SlotEs.etree`), and a copy that
 arrived with this PE's leaf label (`ES_BITS_ETREE_LEAF`) skips the leaf
 ports, flooded or switched (`l2_drop_etree_bum`). Over VXLAN the same mark
 comes from the source VTEP being a leaf-only PE in the domain
-(`VTEP_ETREE`), and the slot toward such a PE serves roots only. The roles
+(`VTEP_ETREE`), and the slot toward such a PE serves roots only. Over SRv6
+it comes from this PE's leaf argument in the End.DT2M SID (`LEAF_ARG`),
+and a leaf slot goes to the remote SID with its argument placed. The roles
 come from
 `SetEtreeRole`, kept by port name. BDD: `cradle_evpn_etree`,
-`cradle_evpn_etree_mpls`, `cradle_evpn_etree_vxlan` (static), and
+`cradle_evpn_etree_mpls`, `cradle_evpn_etree_vxlan`,
+`cradle_evpn_etree_srv6` (static), and
 `cradle_evpn_etree_zebra`, `cradle_evpn_etree_mpls_zebra`,
 `cradle_evpn_etree_vxlan_zebra` (zebra-rs-driven); the design is in
 `bgp-evpn.md` §E-Tree.

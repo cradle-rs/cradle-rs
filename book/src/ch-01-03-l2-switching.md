@@ -227,8 +227,33 @@ root to deliver it to. Over gRPC this is `SetEtreeRemote`, which also marks
 the PE's slot. Two PEs that both have roots and leaves still exchange
 their leaves' BUM: VXLAN cannot tell it from a root's.
 
-Over SRv6 a leaf's BUM is not yet kept from leaves on *other* PEs; only
-the local copies are withheld.
+Over SRv6 the mark is the egress PE's **leaf argument**, an Arg.FE2 of its
+End.DT2M SID placed right after the function (RFC 9819). Install the
+End.DT2M SID at its LOC:FUNC length with the argument length, give this
+PE's leaf argument, and toward each remote PE add a leaf slot to its SID
+with its leaf argument placed:
+
+```json
+{
+  "localsids": [
+    { "sid": "fd00:1:0:200::", "behavior": "end.dt2m", "vrf": 100, "prefix_len": 64,
+      "block_bits": 32, "node_bits": 16, "fun_bits": 16, "arg_bits": 16 }
+  ],
+  "etree_leaf_arg": 1,
+  "repl_slots": [
+    { "flood_port": "r12a",  "encap_port": "r12b",  "remote_sid": "fd00:2:0:200::" },
+    { "flood_port": "r12la", "encap_port": "r12lb", "remote_sid": "fd00:2:0:200::",
+      "etree_leaf_sid": "fd00:2:0:200:1::" }
+  ]
+}
+```
+
+A leaf's flood then reaches that PE through the leaf slot alone, and roots
+keep using the plain slot. The receiving PE reads its leaf argument
+(`srv6_l2_leaf_decap`) and keeps the copy off its leaf ports, including an
+unknown-unicast copy for a MAC it knows. An argument it never allocated is
+dropped (`srv6_drop_arg`). Over gRPC these are `SetEtreeLeafArg`,
+`LocalSid.arg_bits` and `AddReplSlot.etree_leaf_sid`.
 
 ## Mixing L2 and L3
 
