@@ -11,6 +11,42 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.7
+  date: 2026-10-15T21:10:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### L7 HTTP policy: flows now reach the proxy (#214)
+        * L7 policy never delivered a connection to the transparent
+          proxy. `bpf_sk_assign` does not bypass routing: a pod address
+          has no local route, so a steered packet was routed for
+          forwarding, and `ip_forward` drops an skb that carries a
+          socket. An L7 VIP was unaffected (it has its own
+          `local <vip>/32` route)
+        * The datapath now marks every packet it assigns to the proxy
+          (`L7_PROXY_MARK`), and cradle installs `ip rule pref 100
+          fwmark L7_PROXY_MARK lookup 2047` over a table holding only
+          `local 0.0.0.0/0 dev lo` when the proxy starts. Only steered
+          packets carry the mark, so the proxy's own upstream connection
+          routes normally
+
+    - note: |
+        ### BDD / test infrastructure
+        * The runner fails on a skipped step (`fail_on_skipped`, as
+          zebra-rs's does; `@allow.skipped` opts a scenario out) (#213).
+          cucumber skips an unmatched step and the rest of its scenario
+          while passing it: that hid the E-Tree features' "received
+          nothing" checks and the L7 policy scenario's allowed request,
+          which had never worked
+        * New one-shot step `command … should contain` (#212); the
+          E-Tree tc-counter checks it carries now run, and hold
+        * `cradle_evpn_etree_vxlan_zebra`: E-Tree over VXLAN driven by
+          zebra-rs (IMET colouring, `SetEtreeRemote` from BGP), a
+          leaf-only PE against a mixed one, with a root AC added as the
+          control (#212)
+
 - semver: 1.1.6
   date: 2026-10-15T18:01:00+09:00
   distribution: unstable
