@@ -378,6 +378,20 @@ at zero:
 - root → leaf and leaf → root paths still working;
 - the role following a port re-created under a new ifindex.
 
+Under zebra-rs (plan phase 2b, zebra-rs #2523), the roles come from
+`router bgp afi-safi evpn etree leaf-interface <if>`, behind zebra-rs's
+`--feature etree`. zebra-rs's engine supervisor sends each role before it
+attaches the port, and again to a respawned engine. The flag comes from
+the Type-2: zebra-rs advertises a MAC cradle learned on a leaf port with
+the E-Tree EC's Leaf-Indication flag, and the receiving PE installs it with
+`FdbRemote.etree_leaf`. BDD `cradle_evpn_etree_zebra` covers it over a
+zebra-rs-driven VXLAN fabric:
+- leaf → remote leaf known unicast dropped at the sender's PE, both ways,
+  each PE's `l2_drop_etree_uc` moving;
+- each leaf still reaching the root on the other PE;
+- a host moving from a leaf AC to a root AC on its PE becoming reachable
+  from the leaves, once zebra-rs re-advertises its MAC without the flag.
+
 ## Configuration walkthrough
 
 The operator surface, all existing zebra YANG (`zebra-bgp-evpn.yang`):

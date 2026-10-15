@@ -1,0 +1,48 @@
+# pe1 — a dynamic EVPN/VXLAN PE (zebra-rs teeing to cradle) with an E-Tree
+# leaf AC, pe1l. Every other access port is a root. zebra-rs sends the leaf
+# role to cradle (SetEtreeRole) and colours the Type-2 of every MAC cradle
+# learns on pe1l with the E-Tree EC's Leaf-Indication flag; a received
+# leaf MAC is installed with FdbRemote.etree_leaf. `etree` needs zebra-rs's
+# `--feature etree`.
+system:
+  cradle:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.0.2.1/32
+- if-name: pe1u
+  ipv4:
+    address: 10.0.12.1/24
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 192.0.2.1
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 192.0.2.2/32
+        nexthop:
+        - address: 10.0.12.2
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      etree:
+        leaf-interface:
+        - name: pe1l
+    neighbor:
+    - remote-address: 192.0.2.2
+      remote-as: 65001
+      update-source: 192.0.2.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
