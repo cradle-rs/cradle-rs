@@ -11,8 +11,58 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.8
+  date: 2026-10-15T15:09:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN E-Tree over SRv6: the leaf argument (#216)
+        * Over SRv6 the leaf mark is an Arg.FE2 argument of the egress
+          PE's End.DT2M SID (RFC 8986 §4.12), placed right after the
+          function (RFC 9819 §3.3); one leaf argument per PE
+        * Decap: an End.DT2M installed with `LocalSid.arg_bits` (8 or 16)
+          at its LOC:FUNC prefix length reads the argument. This PE's
+          leaf argument (`SetEtreeLeafArg`) keeps the copy off the leaf
+          ports (`srv6_l2_leaf_decap`, `l2_drop_etree_bum`); a value it
+          never allocated is dropped (`srv6_drop_arg`)
+        * Transmit: a leaf slot toward a PE goes to its End.DT2M SID with
+          its leaf argument placed (`ReplSlot.etree_leaf_sid`); SRv6
+          slots are grouped per PE, so a leaf's BUM uses the leaf slot
+          alone and the plain slot serves roots only
+
+    - note: |
+        ### E-Tree fixes (#217)
+        * A replication slot's restrictions (its group's rows, the
+          leaf-only root mark) now land before it joins the flood list,
+          and it leaves the flood list before they go: in between, it
+          sent a leaf's BUM to remote leaves or BUM back toward a segment
+        * A leaf-only mark (`SetEtreeRemote`) whose map write failed is no
+          longer cached as applied, so the retry programs it
+
+    - note: |
+        ### Control plane and configuration
+        * New: `rpc SetEtreeLeafArg`, `ReplSlot.etree_leaf_sid`;
+          `LocalSid.arg_bits` is now read
+        * Static config: `localsids[].arg_bits`, top-level
+          `etree_leaf_arg` (also replayed by `ctl apply`),
+          `repl_slots[].etree_leaf_sid`
+
+    - note: |
+        ### BDD / test infrastructure
+        * `cradle_evpn_etree_srv6`: two PEs over static SRv6 — a leaf's
+          broadcast reaches the remote root but not the remote leaf, a
+          root's reaches both, an unknown argument is dropped
+
+    - note: |
+        ### Packaging
+        * The 1.1.4-1.1.7 entries' dates were about seven hours ahead
+          (the build host's clock was off); corrected to their release
+          times
+
 - semver: 1.1.7
-  date: 2026-10-15T21:10:00+09:00
+  date: 2026-10-15T13:39:00+09:00
   distribution: unstable
   urgency: medium
   packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
@@ -48,7 +98,7 @@
           control (#212)
 
 - semver: 1.1.6
-  date: 2026-10-15T18:01:00+09:00
+  date: 2026-10-15T11:18:00+09:00
   distribution: unstable
   urgency: medium
   packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
@@ -88,7 +138,7 @@
           IS-IS SR-MPLS across a P router)
 
 - semver: 1.1.5
-  date: 2026-10-15T16:08:00+09:00
+  date: 2026-10-15T09:26:00+09:00
   distribution: unstable
   urgency: medium
   packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
@@ -142,7 +192,7 @@
           value`
 
 - semver: 1.1.4
-  date: 2026-10-15T13:16:00+09:00
+  date: 2026-10-15T06:35:00+09:00
   distribution: unstable
   urgency: medium
   packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
