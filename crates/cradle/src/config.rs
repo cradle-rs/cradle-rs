@@ -230,9 +230,11 @@ pub struct ReplSlotCfg {
     /// serves roots only. Exclusive with `esi`/`esi_label`.
     #[serde(default)]
     pub etree_leaf_label: u32,
-    /// EVPN E-Tree over VXLAN (V1+): this slot leads to a leaf-only PE, so
-    /// it serves roots only — a leaf's BUM is not sent there. For a slot
-    /// with explicit plumbing; an auto slot takes it from `etree_remotes`.
+    /// EVPN E-Tree: this slot serves roots only — a leaf's BUM is not sent
+    /// there. Over VXLAN (V1+) it leads to a leaf-only PE; for a slot with
+    /// explicit plumbing, an auto slot takes it from `etree_remotes`. Over
+    /// SRv6 it marks the whole group toward `remote_sid` (RFC 9819 §3.2:
+    /// a PE whose leaf argument cannot be placed), `SetEtreeRootOnly`.
     #[serde(default)]
     pub etree_root_only: bool,
     /// EVPN E-Tree over SRv6 (RFC 8317): the leaf slot toward the PE whose
@@ -1063,6 +1065,9 @@ impl Config {
                         .transpose()?;
                     ctl.add_repl_slot(&r.flood_port, &r.encap_port, remote_sid, leaf)
                         .await?;
+                    if r.etree_root_only {
+                        ctl.set_etree_root_only((remote_sid, 0), true).await?;
+                    }
                 }
                 (None, Some(vtep), None) => {
                     let vtep = vtep
