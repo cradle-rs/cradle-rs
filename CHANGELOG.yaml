@@ -11,6 +11,39 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.9
+  date: 2026-10-17T14:59:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN E-Tree over SRv6: a root-only slot group (#220)
+        * A PE whose IMET argument length differs from its leaf route's
+          cannot be sent a marked copy (its leaf argument cannot be
+          placed), and RFC 9819 §3.2 asks that it get no leaf BUM at all
+        * `SetEtreeRootOnly` marks the slot group `(End.DT2M SID, 0)` (or
+          an MPLS `(PE, BUM label)` group) root-only: every slot of the
+          group serves roots only, with no leaf slot, so no copy of a
+          leaf's BUM goes toward that PE. Kept by key, so it may precede
+          the slots. No datapath change: the flood loop already keeps a
+          leaf port's BUM off root-only slots
+
+    - note: |
+        ### Control plane and configuration
+        * New: `rpc SetEtreeRootOnly` (`EtreeRootOnly`)
+        * Static config: `repl_slots[].etree_root_only` on an SRv6 slot
+          marks its whole group (on a VXLAN slot it still marks that slot)
+
+    - note: |
+        ### BDD / test infrastructure
+        * `cradle_evpn_etree_srv6`: a root-only slot group sends a leaf's
+          broadcast to neither the remote root nor the remote leaf, while
+          a root's still goes (#220)
+        * `cradle_evpn_etree_srv6_zebra`: E-Tree over SRv6 driven by
+          zebra-rs — the leaf arguments cross in BGP, a leaf's broadcast
+          reaches the remote root but not the remote leaf (#219)
+
 - semver: 1.1.8
   date: 2026-10-15T15:09:00+09:00
   distribution: unstable
