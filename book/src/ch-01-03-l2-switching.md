@@ -255,6 +255,19 @@ unknown-unicast copy for a MAC it knows. An argument it never allocated is
 dropped (`srv6_drop_arg`). Over gRPC these are `SetEtreeLeafArg`,
 `LocalSid.arg_bits` and `AddReplSlot.etree_leaf_sid`.
 
+A PE whose leaf argument cannot be used, because the argument length on its
+IMET differs from the one on its leaf route, gets no leaf slot. RFC 9819 asks
+that a leaf's BUM not reach it at all, so its plain slot is marked to serve
+roots only, with `"etree_root_only": true` on the slot (over gRPC,
+`SetEtreeRootOnly` with the PE's End.DT2M SID):
+
+```json
+"repl_slots": [
+  { "flood_port": "r12a", "encap_port": "r12b", "remote_sid": "fd00:2:0:200::",
+    "etree_root_only": true }
+]
+```
+
 ## Mixing L2 and L3
 
 A single cradle instance can carry both routed and bridged ports at once: mark

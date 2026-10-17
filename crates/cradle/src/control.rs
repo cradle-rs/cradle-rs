@@ -285,11 +285,24 @@ type ReplSlotKey = (u16, Ipv6Addr, String);
 /// per Ethernet Segment the one carrying that PE's ESI label for it
 /// (RFC 7432 §8.3), and the one carrying its E-Tree leaf label (RFC 8317
 /// §4.2). Values are flood-side ifindexes (`SLOT_ES` keys).
+///
+/// `root_only` (`SetEtreeRootOnly`) makes every slot of the group serve
+/// roots only with no leaf slot: no copy of a leaf's BUM goes to the PE
+/// at all. It is kept by key, so it may precede the slots, and a group
+/// holding only the mark lives until the mark is cleared.
 #[derive(Default)]
 struct SlotGroup {
     plain: Option<u32>,
     es: std::collections::BTreeMap<String, u32>,
     leaf: Option<u32>,
+    root_only: bool,
+}
+
+impl SlotGroup {
+    /// No slot and no mark left: the group can go.
+    fn is_empty(&self) -> bool {
+        self.plain.is_none() && self.es.is_empty() && self.leaf.is_none() && !self.root_only
+    }
 }
 
 /// What one slot of a [`SlotGroup`] serves.
@@ -362,9 +375,14 @@ fn srv6_dt2m_arg_bits(behavior: u8, arg_bits: u8) -> Result<u8> {
 /// The `SLOT_ES` rows of group `g`: `(flood ifindex, only, skip, etree)`.
 /// A segment slot serves its segment `only`; the plain slot `skip`s the
 /// segments that have one. While the group has a leaf slot, it alone
-/// serves leaf ports and every other slot serves roots only.
+/// serves leaf ports and every other slot serves roots only; a
+/// `root_only` group's slots serve roots only, leaf slot or not.
 fn slot_group_rows(tbl: &mut EsTable, g: &SlotGroup) -> Result<Vec<(u32, u32, u64, u32)>> {
-    let root = if g.leaf.is_some() { SLOT_ETREE_ROOT } else { 0 };
+    let root = if g.leaf.is_some() || g.root_only {
+        SLOT_ETREE_ROOT
+    } else {
+        0
+    };
     let mut rows = Vec::with_capacity(g.es.len() + 2);
     let mut skip = 0u64;
     for (esi, &oif) in &g.es {
@@ -1428,7 +1446,7 @@ impl Control {
         }
         g.es.retain(|_, oif| *oif != a_idx);
         let rows = slot_group_rows(&mut tbl, g)?;
-        if g.plain.is_none() && g.es.is_empty() && g.leaf.is_none() {
+        if g.is_empty() {
             groups.remove(&key);
         }
         let mut dp = self.dp.lock().await;
@@ -1491,6 +1509,41 @@ impl Control {
         }
         if let Some(a_idx) = slot {
             dp.slot_es_set(a_idx, 0, 0, if leaf_only { SLOT_ETREE_ROOT } else { 0 })?;
+        }
+        Ok(())
+    }
+
+    /// EVPN E-Tree over SRv6 (RFC 9819 §3.2): the slots of group `key` —
+    /// `(End.DT2M SID, 0)` for SRv6, `(PE, BUM label)` for MPLS — serve
+    /// roots only (`root_only`), with no leaf slot: a local leaf's BUM is
+    /// not sent toward that PE at all. For a PE whose leaf argument cannot
+    /// be placed (its IMET's argument length differs), which RFC 9819 asks
+    /// not to forward leaf BUM to. Kept by key, so it may precede the
+    /// slots; `false` clears it. Lock order: `es` → `slot_groups` → `dp`.
+    pub async fn set_etree_root_only(&self, key: (Ipv6Addr, u32), root_only: bool) -> Result<()> {
+        let mut tbl = self.es.lock().await;
+        let mut groups = self.slot_groups.lock().await;
+        let g = groups.entry(key).or_default();
+        if g.root_only == root_only {
+            if g.is_empty() {
+                groups.remove(&key);
+            }
+            return Ok(());
+        }
+        g.root_only = root_only;
+        let rows = match slot_group_rows(&mut tbl, g) {
+            Ok(rows) => rows,
+            Err(e) => {
+                g.root_only = !root_only;
+                return Err(e);
+            }
+        };
+        if g.is_empty() {
+            groups.remove(&key);
+        }
+        let mut dp = self.dp.lock().await;
+        for (oif, only, skip, etree) in rows {
+            dp.slot_es_set(oif, only, skip, etree)?;
         }
         Ok(())
     }
@@ -3588,6 +3641,19 @@ impl Cradle for GrpcService {
         Ok(Response::new(pb::Empty {}))
     }
 
+    async fn set_etree_root_only(
+        &self,
+        req: Request<pb::EtreeRootOnly>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let r = req.into_inner();
+        let remote: IpAddr = r.remote.parse().map_err(st)?;
+        self.control
+            .set_etree_root_only((v6_key(remote), r.label), r.root_only)
+            .await
+            .map_err(st)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
     async fn set_etree_remote(
         &self,
         req: Request<pb::EtreeRemote>,
@@ -5156,6 +5222,44 @@ mod etree_slot_tests {
                 (12, 0, 0, SLOT_ETREE_LEAF),
             ]
         );
+    }
+
+    /// A root-only group (RFC 9819 §3.2, `SetEtreeRootOnly`) sends a leaf's
+    /// BUM nowhere: every slot serves roots only, with no leaf slot. The
+    /// segment slot keeps its segment, the plain slot its skips.
+    #[test]
+    fn a_root_only_group_serves_roots_only() {
+        let mut tbl = EsTable::default();
+        let mut g = SlotGroup {
+            plain: Some(10),
+            root_only: true,
+            ..Default::default()
+        };
+        g.es.insert(ESI1.to_string(), 11);
+        let id = es_entry(&mut tbl, ESI1).unwrap().id as u32;
+        let rows = slot_group_rows(&mut tbl, &g).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (11, id + 1, 0, SLOT_ETREE_ROOT),
+                (10, 0, 1u64 << id, SLOT_ETREE_ROOT),
+            ]
+        );
+    }
+
+    /// A group lives while it has a slot or the root-only mark: the mark
+    /// may come before the slots and outlast them.
+    #[test]
+    fn a_root_only_mark_keeps_its_group() {
+        let mut g = SlotGroup::default();
+        assert!(g.is_empty());
+        g.root_only = true;
+        assert!(!g.is_empty(), "the mark alone");
+        g.root_only = false;
+        g.plain = Some(10);
+        assert!(!g.is_empty(), "a slot alone");
+        g.plain = None;
+        assert!(g.is_empty());
     }
 
     /// A leaf slot's extra label is the leaf label, marked; it wins over

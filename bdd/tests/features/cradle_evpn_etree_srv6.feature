@@ -146,6 +146,24 @@ Feature: EVPN E-Tree over SRv6 — a leaf's BUM is kept from remote leaves by th
     When I apply cradle config "pe2-etree.json" to namespace "pe2" via gRPC as "ctl2"
     Then ping from "l1" to "10.0.0.22" should eventually succeed
 
+  Scenario: A root-only slot group sends a leaf's BUM nowhere toward the PE
+    Given the test topology exists
+    # RFC 9819 §3.2: a PE whose leaf argument cannot be placed (its IMET's
+    # argument length differs from its leaf route's) gets no leaf slot, and
+    # must get no leaf BUM at all. pe1 restarts with its plain slot toward
+    # pe2 marked root-only (`SetEtreeRootOnly`) and no leaf slot.
+    When I stop cradle in namespace "pe1"
+    And I start cradle in namespace "pe1" with config "pe1-root-only.json" serving gRPC as "ctl1"
+    And I execute "tc filter del dev eth0 ingress pref 1" in namespace "l2"
+    And I execute "tc filter add dev eth0 ingress pref 1 flower src_mac 02:00:00:00:e1:01 action pass" in namespace "l2"
+    And I execute "ip neigh flush dev eth0" in namespace "r1"
+    And I execute "ip neigh flush dev eth0" in namespace "l1"
+    # A root's broadcast still goes: the plain slot serves roots.
+    Then ping from "r1" to "10.0.0.22" should eventually succeed
+    # The leaf's does not: its ARP reaches neither pe2's root nor its leaf.
+    And ping from "l1" to "10.0.0.22" should fail
+    And command "tc -s filter show dev eth0 ingress pref 1" in namespace "l2" should contain "Sent 0 bytes 0 pkt"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop cradle in namespace "pe1"
