@@ -422,6 +422,13 @@ the egress PE's End.DT2M SID, placed right after the function:
   `(remote_sid, 0)` (an MPLS group's label is never 0), and `SlotEs.etree`
   sends a leaf port's BUM through the leaf slot alone while the plain slot
   serves roots only.
+- **No leaf slot possible.** A PE whose IMET argument length is non-zero
+  and differs from its leaf route's gets no leaf slot, and RFC 9819 §3.2
+  asks that a leaf's BUM not be sent to it at all. `SetEtreeRootOnly`
+  marks the slot group `(remote_sid, 0)` root-only (`SlotGroup.root_only`):
+  every slot of the group serves roots only, so no copy of a leaf's BUM
+  goes toward that PE. Kept by key, so it may precede the slots. Static
+  config: `repl_slots[].etree_root_only` on an SRv6 slot.
 - **Split horizon** over SRv6 stays local bias by outer source. RFC-style
   ESI filtering would take its values from the same argument space and
   must avoid the leaf argument.
