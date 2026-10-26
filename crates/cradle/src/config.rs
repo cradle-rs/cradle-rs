@@ -91,9 +91,11 @@ pub struct Config {
     #[serde(default)]
     pub dx2v: Vec<Dx2vCfg>,
     /// Idle timeout (seconds) for locally-learned FDB entries; 0 disables
-    /// aging. Default 300 (the kernel bridge default).
-    #[serde(default = "default_fdb_age_secs")]
-    pub fdb_age_secs: u64,
+    /// aging. Absent = 300 (the kernel bridge default). An `Option` so
+    /// `ctl apply` can tell "set to the default" from "not set" and refuse it
+    /// — the aging task is started once, at load time, by `serve`.
+    #[serde(default)]
+    pub fdb_age_secs: Option<u64>,
     #[serde(default)]
     pub services: Vec<Service>,
     /// Egress masquerade: SNAT pod→outside-the-cluster to this node IP.
@@ -117,10 +119,6 @@ pub struct Config {
     /// per-bridge-domain DF role (a non-DF pair never receives BUM).
     #[serde(default)]
     pub ethernet_segments: Vec<EthernetSegmentCfg>,
-}
-
-fn default_fdb_age_secs() -> u64 {
-    300
 }
 
 /// An Ethernet Segment (RFC 7432 §5) for a multihomed CE: the local access

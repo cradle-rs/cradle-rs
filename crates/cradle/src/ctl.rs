@@ -25,6 +25,44 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
     match op {
         CtlOp::Apply { config } => {
             let cfg = Config::load(&config)?;
+            // Refuse what this path cannot replay, BEFORE sending anything —
+            // a section accepted and dropped is worse than one rejected, and
+            // failing up front keeps a doomed apply from landing half of
+            // itself. Two kinds live here: knobs consumed by `serve` before
+            // the eBPF object loads, and sections with no RPC behind them.
+            let unreplayable: &[(&str, bool, &str)] = &[
+                (
+                    "fib4_mode",
+                    cfg.fib4_mode.is_some(),
+                    "sizes the FIB maps at load time",
+                ),
+                (
+                    "fdb_age_secs",
+                    cfg.fdb_age_secs.is_some(),
+                    "starts the aging task at load time",
+                ),
+                (
+                    "repl_slots",
+                    !cfg.repl_slots.is_empty(),
+                    "names operator-created veth ports; the gRPC AddReplSlot takes a bridge \
+                     domain and creates its own pair, so the two are not the same operation",
+                ),
+                (
+                    "dx2v",
+                    !cfg.dx2v.is_empty(),
+                    "has no RPC of its own (an End.DX2V is reachable over gRPC only as part of \
+                     an Xconnect, via its vid/dx2v_table)",
+                ),
+            ];
+            for (name, present, why) in unreplayable {
+                anyhow::ensure!(
+                    !present,
+                    "{}: `{name}` cannot be applied over gRPC — it {why}. \
+                     Pass this config to `cradle serve --config` instead, or drop the \
+                     section from the file you apply at runtime.",
+                    config.display()
+                );
+            }
 
             for p in &cfg.ports {
                 // The role first: a leaf must not forward as a root in between.
@@ -99,6 +137,14 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
             if let Some(src) = &cfg.srv6_source {
                 client
                     .set_srv6_encap_source(pb::Srv6EncapSource { addr: src.clone() })
+                    .await?;
+            }
+            // One RPC serves both families — the server dispatches on the
+            // parsed address into the v4 or v6 source slot — so a dual-stack
+            // fabric sends it twice.
+            if let Some(src) = &cfg.vtep_source6 {
+                client
+                    .set_vtep_source(pb::VtepSource { addr: src.clone() })
                     .await?;
             }
             if let Some(src) = &cfg.vtep_source {
@@ -220,6 +266,48 @@ pub async fn run(endpoint: GrpcEndpoint, op: CtlOp) -> Result<()> {
                         teid: pdr.teid,
                         vrf: pdr.vrf,
                         match_vrf: pdr.match_vrf,
+                    })
+                    .await?;
+            }
+            // RFC 9524 replication segments and E-Line cross-connects, in the
+            // in-process `Config::apply` order (both after the FDB, before
+            // neighbors). A `local` branch is a Bud delivery whose leaf veth
+            // the server creates itself, so it replays unchanged.
+            for rs in &cfg.repl_segs {
+                client
+                    .set_repl_seg(pb::ReplSeg {
+                        sid: rs.sid.clone(),
+                        hop_limit_threshold: rs.hop_limit_threshold as u32,
+                        branches: rs
+                            .branches
+                            .iter()
+                            .map(|b| pb::ReplSegBranch {
+                                sid: b.sid.clone(),
+                                nexthop_id: b.nexthop,
+                                local: b.local,
+                            })
+                            .collect(),
+                    })
+                    .await?;
+            }
+            for x in &cfg.xconnects {
+                client
+                    .add_xconnect(pb::Xconnect {
+                        port: x.port.clone(),
+                        port_index: 0,
+                        remote_sid: x.remote_sid.clone().unwrap_or_default(),
+                        // The config has no `local_sid`: an SRv6 E-Line's
+                        // local End.DX2 comes from the `localsids` section,
+                        // not from the cross-connect.
+                        local_sid: String::new(),
+                        vid: x.vid as u32,
+                        dx2v_table: x.dx2v_table,
+                        remote_vtep: x.remote_vtep.clone().unwrap_or_default(),
+                        remote_vni: x.remote_vni,
+                        local_vni: x.local_vni,
+                        remote_pe: x.remote_pe.clone().unwrap_or_default(),
+                        remote_label: x.remote_label,
+                        local_label: x.local_label,
                     })
                     .await?;
             }
