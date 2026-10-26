@@ -1,0 +1,5 @@
+{
+  "fdb": [
+    { "mac": "ff:ff:ff:ff:ff:ff", "bd": 100, "remote_sid": "fd00:2::200", "nexthop": 1 }
+  ]
+}
