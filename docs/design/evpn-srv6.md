@@ -207,7 +207,10 @@ Mandatory teardown on each.
    (BUM/unknown-unicast falls through to the TC flood). Static
    `repl_slots` config; `cradle_evpn_srv6_multi` BDD (3 PEs, hub underlay,
    no unicast FDB — every pair reaches via flood-and-learn, and bounded
-   BUM counters prove the horizon holds).
+   BUM counters prove the horizon holds). Why the veth hop is the
+   mechanism rather than overhead — and why slots and the sentinel are
+   refused in the same bridge domain — is
+   [`bum-replication.md`](bum-replication.md).
 6. **Slice 6 — the Type-3 → slot tee** *(done)*. The zebra tee programs
    replication slots instead of the single-remote sentinel: each received
    IMET with a DT2M SID sends `Message::CradleReplAdd { vni, sid }` →
