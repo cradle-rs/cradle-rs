@@ -1,0 +1,5 @@
+{
+  "repl_slots": [
+    { "flood_port": "n1c", "encap_port": "n1u", "remote_sid": "fd00:2::200" }
+  ]
+}

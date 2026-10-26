@@ -1548,6 +1548,117 @@ async fn apply_cradle_grpc(world: &mut World, config: String, namespace: String,
     println!("✓ applied {} to {} via gRPC {}", config, scoped, ep);
 }
 
+/// Negative control for a server-side config rejection: `cradle ctl apply`
+/// propagates the gRPC `Status` out of `main`, so a refused config exits
+/// nonzero and `exec_in_netns` hands back the message on stderr. Asserting
+/// the message — not just the failure — keeps the step from passing on an
+/// unrelated error (a missing socket, a typo'd port name).
+#[then(
+    expr = "applying cradle config {string} to namespace {string} via gRPC as {string} should be rejected with {string}"
+)]
+async fn apply_cradle_grpc_rejected(
+    world: &mut World,
+    config: String,
+    namespace: String,
+    sock: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = grpc_sock(world, &sock);
+    let err = match netns::exec_in_netns(
+        &scoped,
+        &cradle_bin(),
+        &["ctl", "--grpc", &ep, "apply", &cfg],
+    )
+    .await
+    {
+        Ok(out) => panic!(
+            "cradle ctl apply {} in {} was ACCEPTED; expected a rejection containing {:?} (output: {})",
+            config,
+            scoped,
+            needle,
+            out.trim()
+        ),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains(&needle),
+        "cradle ctl apply {} in {} was rejected, but not with {:?}: {}",
+        config,
+        scoped,
+        needle,
+        err.trim()
+    );
+    println!("✓ {} rejected in {} with {:?}", config, scoped, needle);
+}
+
+/// Negative control for the BOOTSTRAP config path (`serve --config`), which is
+/// the only way some sections are applied at all — `ctl apply` does not replay
+/// `repl_slots`. Run `serve` in the foreground: a config the bootstrap refuses
+/// fails before the daemon starts serving, so it exits nonzero with the
+/// message. A config it ACCEPTS would block forever instead, so the wait is
+/// bounded and a timeout is reported as acceptance rather than hanging the run.
+#[then(expr = "cradle in namespace {string} should refuse config {string} with {string}")]
+async fn cradle_refuses_config(
+    world: &mut World,
+    namespace: String,
+    config: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let cfg = config_in(world, &config);
+    let ep = format!("unix:cradle/refuse-{}", world.short_id());
+    // A pid file so the accepted-by-mistake case is recoverable: dropping the
+    // `exec_in_netns` future on timeout does NOT reap the child (no
+    // `kill_on_drop`), and an orphaned daemon would outlive the namespace and
+    // foul later runs on this host.
+    let pid = format!("/tmp/{}-refuse.pid", scoped);
+    let bin = cradle_bin();
+    let args = [
+        "serve",
+        "--config",
+        cfg.as_str(),
+        "--grpc",
+        ep.as_str(),
+        "--pid-file",
+        pid.as_str(),
+    ];
+    let run = netns::exec_in_netns(&scoped, &bin, &args);
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(30), run).await;
+    // Reap before asserting, so every path cleans up: `serve` writes the pid
+    // file BEFORE applying the bootstrap config, so even the refused run (the
+    // expected outcome) leaves one behind for the clean-environment check to
+    // trip over. Best-effort — a dead process and a missing file are fine.
+    let _ = netns::kill_pidfile(Path::new(&pid)).await;
+    let err = match outcome {
+        Err(_) => panic!(
+            "cradle serve --config {} in {} was still running after 30s: the config was ACCEPTED, but a rejection containing {:?} was expected",
+            config, scoped, needle
+        ),
+        Ok(Ok(out)) => panic!(
+            "cradle serve --config {} in {} exited 0; expected a rejection containing {:?} (output: {})",
+            config,
+            scoped,
+            needle,
+            out.trim()
+        ),
+        Ok(Err(e)) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains(&needle),
+        "cradle serve --config {} in {} failed, but not with {:?}: {}",
+        config,
+        scoped,
+        needle,
+        err.trim()
+    );
+    println!(
+        "✓ bootstrap config {} refused in {} with {:?}",
+        config, scoped, needle
+    );
+}
+
 /// Start a plain zebra-rs (no cradle tee) from a `--config-file`. Used for peer
 /// routers that only originate/advertise.
 #[when(expr = "I start zebra-rs in namespace {string} with config {string}")]

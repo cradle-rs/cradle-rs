@@ -542,7 +542,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     // Expire idle locally-learned MACs (default 300s; `fdb_age_secs: 0`
     // disables). WatchFdb subscribers see the removals as age events.
-    control.start_fdb_aging(cfg.as_ref().map(|c| c.fdb_age_secs).unwrap_or(300));
+    control.start_fdb_aging(cfg.as_ref().and_then(|c| c.fdb_age_secs).unwrap_or(300));
 
     // Feed link carrier/admin transitions into the datapath so protected
     // nexthops fail over to their backups (TI-LFA fast-reroute).

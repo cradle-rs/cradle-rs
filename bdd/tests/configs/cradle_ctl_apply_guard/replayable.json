@@ -1,0 +1,15 @@
+{
+  "vtep_source6": "fd00:1::1",
+  "repl_segs": [
+    {
+      "sid": "fd00:1::900",
+      "hop_limit_threshold": 0,
+      "branches": [
+        { "sid": "fd00:2::900", "nexthop": 1, "local": false }
+      ]
+    }
+  ],
+  "xconnects": [
+    { "port": "n1ac", "remote_sid": "fd00:2::300" }
+  ]
+}

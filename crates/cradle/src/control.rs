@@ -2035,6 +2035,20 @@ impl Control {
         if slots.contains_key(&(bd, key, esi.to_string())) {
             return Ok(());
         }
+        // `Dataplane::repl_target_add` makes this check by resolving the flood
+        // port's bridge domain, which works for a statically-configured slot
+        // (already a member) but not here: the A end joins `bd` only after the
+        // target is programmed. Check before burning a slot number or creating
+        // the veth pair, so a refusal leaves nothing behind.
+        anyhow::ensure!(
+            !self.dp.lock().await.bd_has_bum_sentinel(bd),
+            "bd {bd}: a replication slot toward {key} would leave the bridge \
+             domain with both the all-ones-MAC BUM sentinel and BUM \
+             replication slots. The datapath serves one or the other: the \
+             sentinel is matched in XDP and redirects there, so the TC flood \
+             never runs and every slot is skipped. Withdraw the sentinel \
+             before the first Type-3 slot."
+        );
         let n = self
             .repl_next
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
