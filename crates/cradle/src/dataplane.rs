@@ -1247,6 +1247,77 @@ impl Dataplane {
         )
     }
 
+    /// The per-BD BUM sentinel MAC: the all-ones destination `l2_evpn_xdp`
+    /// looks up to find the bridge domain's single overlay BUM tunnel.
+    const BUM_SENTINEL: [u8; 6] = [0xff; 6];
+
+    /// Does bridge domain `bd` carry the all-ones-MAC BUM sentinel?
+    ///
+    /// Mirrors the datapath's `l2_evpn_bum_tunnel`: an entry exists AND is an
+    /// overlay one, so a local all-ones learn (which cannot happen — the learn
+    /// sites skip group MACs) could never read as a sentinel.
+    pub fn bd_has_bum_sentinel(&self, bd: u16) -> bool {
+        matches!(
+            self.fdb.get(
+                &FdbKey {
+                    mac: Self::BUM_SENTINEL,
+                    vlan: bd,
+                },
+                0,
+            ),
+            Ok(e) if e.flags & FDB_F_REMOTE != 0
+        )
+    }
+
+    /// Does bridge domain `bd` flood through at least one BUM replication
+    /// slot? Walks the flood list and tests each member for a `REPL_SID` row
+    /// — exactly the membership test `flood()`'s `local_only` exclusion makes,
+    /// so this sees a slot precisely when the datapath would.
+    pub fn bd_has_repl_slot(&self, bd: u16) -> bool {
+        let count = self.l2_count.get(&bd, 0).unwrap_or(0);
+        (0..count).any(|slot| {
+            matches!(
+                self.l2_members.get(&L2MemberKey { vlan: bd, slot: slot as u16 }, 0),
+                Ok(m) if self.repl_sid.get(&m, 0).is_ok()
+            )
+        })
+    }
+
+    /// The bridge domain `ifindex` is a flood-list member of, if any. Used to
+    /// resolve the bridge domain of a statically-configured replication slot,
+    /// whose config carries only the two port names — no bridge domain is in
+    /// scope there (see `Control::add_repl_slot_mpls`).
+    pub fn bd_of_member(&self, ifindex: u32) -> Option<u16> {
+        self.l2_members
+            .iter()
+            .flatten()
+            .find(|(_, m)| *m == ifindex)
+            .map(|(k, _)| k.vlan)
+    }
+
+    /// Reject the one BUM-forwarding combination the datapath cannot serve:
+    /// a bridge domain carrying BOTH the all-ones sentinel and replication
+    /// slots (`proto/cradle.proto`, `ReplSlot`).
+    ///
+    /// The sentinel path in `l2_evpn_xdp` encapsulates toward its single
+    /// remote and **terminates in XDP with a redirect**, so the TC flood —
+    /// and with it every replication slot — never runs. Half the flood set
+    /// silently disappears while `STAT_*_L2_BUM` keeps incrementing, which
+    /// is why this is an error at the write site and not a warning: there is
+    /// no counter a reader could tell the broken case from the healthy one.
+    fn check_bum_exclusive(sentinel: bool, slots: bool, bd: u16, adding: &str) -> Result<()> {
+        anyhow::ensure!(
+            !(sentinel && slots),
+            "bd {bd}: {adding} would leave the bridge domain with both the \
+             all-ones-MAC BUM sentinel and BUM replication slots. The datapath \
+             serves one or the other: the sentinel is matched in XDP and \
+             redirects there, so the TC flood never runs and every slot is \
+             skipped. Use slots alone for a multi-PE domain (the EVPN Type-3 \
+             tee does), or the sentinel alone for a single remote."
+        );
+        Ok(())
+    }
+
     fn fdb_overlay_add(
         &mut self,
         mac: [u8; 6],
@@ -1256,6 +1327,14 @@ impl Dataplane {
         nexthop_id: u32,
         label: u32,
     ) -> Result<bool> {
+        if mac == Self::BUM_SENTINEL && flags & FDB_F_REMOTE != 0 {
+            Self::check_bum_exclusive(
+                true,
+                self.bd_has_repl_slot(bd),
+                bd,
+                "programming the BUM sentinel",
+            )?;
+        }
         let displaced_local = matches!(
             self.fdb.get(&FdbKey { mac, vlan: bd }, 0),
             Ok(e) if e.flags & FDB_F_REMOTE == 0
@@ -1657,6 +1736,19 @@ impl Dataplane {
         encap_ifindex: u32,
         target: ReplTarget,
     ) -> Result<()> {
+        // The static-config path: the slot's A end is already a flood member
+        // (`l2_domains` is applied before `repl_slots`), so its bridge domain
+        // resolves here. The cradle-owned (Type-3 tee) path joins the A end
+        // only AFTER this call, so it checks in `add_repl_slot_auto_keyed`
+        // where the bridge domain is an argument.
+        if let Some(bd) = self.bd_of_member(flood_ifindex) {
+            Self::check_bum_exclusive(
+                self.bd_has_bum_sentinel(bd),
+                true,
+                bd,
+                "programming a replication slot",
+            )?;
+        }
         self.repl_sid.insert(flood_ifindex, target, 0)?;
         self.repl_sid.insert(encap_ifindex, target, 0)?;
         Ok(())
