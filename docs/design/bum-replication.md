@@ -186,11 +186,20 @@ config carrying both is refused outright, and the refused attempt leaves the
 flood path untouched. Mutation-checked — with both guards neutered, three of
 those steps fail.
 
-### Known gap, not addressed here
+### The same failure shape, next door
 
-`cradle ctl apply` does not replay every config section: `repl_slots`,
-`repl_segs`, `xconnects`, `dx2v` and `vtep_source6` are parsed and silently
-ignored, so a slot can only be added by `serve --config` or by the Type-3 tee.
-That is why `cradle_evpn_bum_guard` drives the slot direction through the
-bootstrap path. Worth closing separately — a section that is accepted and
-dropped is the same class of silent failure this note is about.
+`cradle ctl apply` used to walk only the sections it had been taught, printing
+`applied` and silently discarding `repl_slots`, `repl_segs`, `xconnects`,
+`dx2v`, `vtep_source6`, `fib4_mode` and `fdb_age_secs` — an operator told it
+worked, with nothing to say otherwise. Closed in the same change:
+`repl_segs`, `xconnects` and `vtep_source6` have RPCs behind them and are now
+sent; the other four cannot be replayed and are refused up front, before any
+RPC, so a doomed apply does not land half of itself.
+
+`repl_slots` is one of the four, and for a reason worth recording here: the
+static section names operator-created veth ports and carries no bridge domain,
+while the gRPC `AddReplSlot` takes a bridge domain and creates its own pair.
+They are not the same operation, so a slot still arrives either from
+`serve --config` or from the Type-3 tee — which is why
+`cradle_evpn_bum_guard` drives the slot direction through the bootstrap path.
+`cradle_ctl_apply_guard` pins the rest.
