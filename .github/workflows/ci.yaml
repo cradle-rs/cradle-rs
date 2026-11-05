@@ -10,10 +10,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job carries timeout-minutes. Without it a hung runner holds a PR for
+# the 6-hour default: one clippy job sat 46 minutes in `apt-get` before it was
+# cancelled (#223). Over 99 runs the slowest jobs took 3 min (clippy) and
+# 4 min (test). The 30-minute caps leave room for a cold build after a
+# toolchain bump, and a hang still fails within half an hour.
 jobs:
   fmt:
     name: cargo fmt
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -27,6 +33,7 @@ jobs:
   clippy:
     name: cargo clippy
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -53,6 +60,7 @@ jobs:
   test:
     name: cargo test
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
