@@ -20,8 +20,9 @@ name = "cradle-rs"
 maintainer = "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 section = "net"
 priority = "optional"
-# Automatic shared-library Depends via dpkg-shlibdeps over the built binaries.
-depends = "$auto"
+# Automatic shared-library Depends via dpkg-shlibdeps over the built binaries,
+# plus libcap2-bin for the setcap call in postinst.
+depends = "$auto, libcap2-bin"
 # Keep the artifact as cradle-rs_<version>_<arch>.deb (no -1 revision) — the
 # build-debs dist-suffix rename and zebra-rs's `cradle-rs_*-<codename>_*.deb`
 # ingest glob both expect that shape.
