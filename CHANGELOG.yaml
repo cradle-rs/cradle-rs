@@ -11,6 +11,76 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 1.1.10
+  date: 2026-11-13T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN BUM forwarding
+        * A bridge domain carrying BOTH the all-ones-MAC BUM sentinel
+          and BUM replication slots is now refused instead of
+          misforwarding. The two do not compose: the sentinel is
+          matched in `l2_evpn_xdp` and redirects there, so the TC
+          flood never runs and every slot — and the local flood — is
+          skipped. BUM reached one PE and silently missed the rest
+          while `STAT_*_L2_BUM` kept incrementing, so no counter
+          separated the broken case from a healthy one
+        * `proto/cradle.proto` has stated the contract on `ReplSlot`
+          since slots landed; it is now enforced at the write sites,
+          which covers static config, `ctl` and the EVPN Type-3 tee
+          alike. A cradle-owned slot is checked before its veth pair
+          is created, so a refusal leaves nothing behind
+
+    - note: |
+        ### Control plane and configuration
+        * **`ctl apply` no longer accepts a config section it cannot
+          replay.** It used to walk only the sections it had been
+          taught and print `applied` regardless, silently discarding
+          seven of thirty. `repl_segs`, `xconnects` and
+          `vtep_source6` have RPCs behind them and are now actually
+          sent; `fib4_mode`, `fdb_age_secs`, `repl_slots` and `dx2v`
+          cannot be replayed at runtime and are now rejected up
+          front, before any RPC, so a doomed apply does not land half
+          of itself. A config file carrying one of those four and
+          applied at runtime will now error where it previously
+          appeared to succeed — pass it to `serve --config` instead,
+          or drop the section from the file you apply
+        * `fdb_age_secs` is an optional field in the config schema so
+          "set to the default" is distinguishable from "not set";
+          omitting it still means 300 seconds, and existing config
+          files are unaffected
+
+    - note: |
+        ### Packaging and CI
+        * The `.deb` depends on `libcap2-bin`: the postinst runs
+          `setcap` on `/usr/bin/cradle` under `set -e`, and `$auto`
+          lists only the shared libraries the binaries link to, so on
+          a minimal host (`ubuntu:24.04`) `apt install` failed with
+          "setcap: not found" and left cradle-rs half-configured.
+          This also matters to zebra-rs, which `Recommends:
+          cradle-rs` — nothing made cradle-rs's configure wait for
+          the `libcap2-bin` zebra-rs now depends on
+        * Every CI job carries a `timeout-minutes` cap. With none
+          set, a hung runner held a PR for GitHub's 6-hour default —
+          one clippy job sat 46 minutes in `apt-get` before being
+          cancelled, and passed in 2 minutes on re-run
+
+    - note: |
+        ### Design notes
+        * `bum-replication.md` records why the replication slot's veth
+          hop is the mechanism rather than overhead: it manufactures
+          the per-copy netdevice identity `bpf_clone_redirect` keys
+          on, which is what makes "one frame, N different outer
+          headers" expressible at all. It also records why devmap
+          broadcast with per-entry `xdp_devmap` programs cannot
+          replace it — `bq_enqueue` latches `bq->xdp_prog` from the
+          first frame into a per-device, per-CPU bulk queue, so at
+          most one distinct rewrite per egress netdevice survives a
+          flush, which is precisely the EVPN case where N PEs sit
+          behind one uplink
+
 - semver: 1.1.9
   date: 2026-10-17T14:59:00+09:00
   distribution: unstable
